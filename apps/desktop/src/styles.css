@@ -54,6 +54,14 @@
   --gap: 12px;
   --pad: 16px;
 
+  /*
+   * The narrowest the note's content will draw itself.
+   *
+   * A divider can now put the note below this, so below it `.note__body`
+   * scrolls sideways instead of the text reflowing into an unreadable column.
+   */
+  --note-min: 24rem;
+
   color-scheme: light dark;
 }
 
@@ -899,12 +907,14 @@ pre {
 .editor {
   height: 100%;
   padding: 0 24px;
+  min-width: var(--note-min);
 }
 
 /* Preview ----------------------------------------------------------------- */
 
 .preview {
   max-width: 46rem;
+  min-width: var(--note-min);
   margin: 0 auto;
   padding: 24px 24px 40vh;
   display: flex;

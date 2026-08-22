@@ -41,7 +41,7 @@ import { Prompt } from "./components/Prompt";
 import { ContextMenu, type MenuItem } from "./components/ContextMenu";
 import { Confirm } from "./components/Confirm";
 import { Workspace } from "./features/workspace/Workspace";
-import { DEFAULT_PANES, isPaneWidths, type PaneWidths } from "./features/workspace/panes";
+import { defaultPanes, isPaneWidths, type PaneWidths } from "./features/workspace/panes";
 import { readPref, writePref } from "./state/prefs";
 import {
   applyTheme,
@@ -112,8 +112,12 @@ export function App() {
   const [theme, setTheme] = useState<ThemePreference>(() =>
     readPref("theme", "system" as ThemePreference, isThemePreference),
   );
+  // Resolved against the real window, which the workspace spans: the window
+  // opens maximized, so a pixel default written for one screen is wrong on the
+  // next. A stored preference still wins — someone who has dragged their panes
+  // keeps them.
   const [panes, setPanes] = useState<PaneWidths>(() =>
-    readPref("panes", DEFAULT_PANES, isPaneWidths),
+    readPref("panes", defaultPanes(window.innerWidth), isPaneWidths),
   );
   const [prefersDark, setPrefersDark] = useState(systemPrefersDark);
 

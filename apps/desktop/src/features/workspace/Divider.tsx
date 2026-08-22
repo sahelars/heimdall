@@ -13,6 +13,13 @@ import { clampPane } from "./panes";
 interface DividerProps {
   side: "left" | "right";
   width: number;
+  /**
+   * What the pane on the other side of the note is taking.
+   *
+   * A divider's travel is bounded by the note's floor, and that floor depends
+   * on both side panes — so this one cannot work out its own maximum alone.
+   */
+  opposite: number;
   label: string;
   onResize: (width: number) => void;
 }
@@ -20,7 +27,7 @@ interface DividerProps {
 /** How far one arrow-key press moves a divider. */
 const STEP = 16;
 
-export function Divider({ side, width, label, onResize }: DividerProps) {
+export function Divider({ side, width, opposite, label, onResize }: DividerProps) {
   const start = useRef<{ x: number; width: number } | null>(null);
 
   const container = (element: HTMLElement | null) =>
@@ -46,7 +53,9 @@ export function Divider({ side, width, label, onResize }: DividerProps) {
         const travelled = event.clientX - start.current.x;
         // The right pane grows as the pointer moves left, so its delta inverts.
         const delta = side === "left" ? travelled : -travelled;
-        onResize(clampPane(start.current.width + delta, container(event.currentTarget)));
+        onResize(
+          clampPane(start.current.width + delta, container(event.currentTarget), opposite),
+        );
       }}
       onPointerUp={(event) => {
         event.currentTarget.releasePointerCapture(event.pointerId);
@@ -68,7 +77,7 @@ export function Divider({ side, width, label, onResize }: DividerProps) {
         if (direction === 0) return;
         event.preventDefault();
         const delta = (side === "left" ? direction : -direction) * STEP;
-        onResize(clampPane(width + delta, container(event.currentTarget)));
+        onResize(clampPane(width + delta, container(event.currentTarget), opposite));
       }}
     />
   );

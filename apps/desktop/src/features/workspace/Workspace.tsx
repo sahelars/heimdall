@@ -55,6 +55,7 @@ export function Workspace({ widths, onResize, left, centre, right }: WorkspacePr
       <Divider
         side="left"
         width={widths.left}
+        opposite={widths.right}
         label="Resize the file pane"
         onResize={(width) => onResize("left", width)}
       />
@@ -66,6 +67,7 @@ export function Workspace({ widths, onResize, left, centre, right }: WorkspacePr
       <Divider
         side="right"
         width={widths.right}
+        opposite={widths.left}
         label="Resize the graph pane"
         onResize={(width) => onResize("right", width)}
       />
