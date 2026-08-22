@@ -1,0 +1,1474 @@
+/*
+ * The visual system (SPEC §15).
+ *
+ * Monochrome with exactly one accent. Dark mode is pure black behind white;
+ * light mode is the exact inverse; the system preference decides unless the
+ * user overrides it in Settings. Every border in the application — inputs and
+ * buttons included — is 1px solid and squared.
+ *
+ * The accent is spent only on links, the note open in the file tree, the active
+ * graph node, and mermaid diagrams, and it is written literally in exactly one
+ * place per theme. Every
+ * other rule reaches it through var(--accent) or var(--link), which is what
+ * lets design.test.ts check the whole palette by reading this file.
+ *
+ * Colour lives here and nowhere else. The CodeMirror theme and the graph
+ * renderer are JavaScript, so a literal in either would be a colour no test
+ * could see; both read these custom properties instead.
+ */
+
+:root {
+  /* Surfaces */
+  --bg: #ffffff;
+  --bg-sunken: #f7f7f7;
+  --bg-hover: #eeeeee;
+  --bg-selected: #e4e4e4;
+
+  /* Ink. Grey is still monochrome: equal channels, no hue. */
+  --fg: #000000;
+  --muted: #666666;
+  --faint: #999999;
+
+  /*
+   * Rules.
+   *
+   * One border colour for the whole application — the same grey the pane
+   * dividers are drawn in. Borders are structure, not emphasis: at full
+   * contrast every panel, input and dialog shouts, which is what a stark white
+   * outline in dark mode does.
+   *
+   * `--line-strong` exists only for the places that genuinely need to read as
+   * a hard edge, and is currently unused by any component.
+   */
+  --line: #d4d4d4;
+  --line-soft: #d4d4d4;
+  --line-strong: #000000;
+
+  /* The one accent. Light mode has no hue at all: its links are black. */
+  --accent: #000000;
+  --link: var(--accent);
+
+  --font: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --gap: 12px;
+  --pad: 16px;
+
+  color-scheme: light dark;
+}
+
+/*
+ * The system preference is the default, so the first paint is already correct
+ * without waiting for JavaScript. The :not() is what lets an explicit light
+ * override win on a machine set to dark.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #000000;
+    --bg-sunken: #000000;
+    --bg-hover: #191919;
+    --bg-selected: #262626;
+    --fg: #ffffff;
+    --muted: #999999;
+    --faint: #666666;
+    --line: #333333;
+    --line-soft: #333333;
+    --line-strong: #ffffff;
+    --accent: #00ff00;
+    color-scheme: dark;
+  }
+}
+
+/* The explicit override from Settings, token for token. */
+:root[data-theme="dark"] {
+  --bg: #000000;
+  --bg-sunken: #000000;
+  --bg-hover: #191919;
+  --bg-selected: #262626;
+  --fg: #ffffff;
+  --muted: #999999;
+  --faint: #666666;
+  --line: #333333;
+  --line-soft: #333333;
+  --line-strong: #ffffff;
+  --accent: #00ff00;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  /* Squared, everywhere, with no exceptions to forget about later. */
+  border-radius: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  /*
+   * Only the note is text; everything else is furniture.
+   *
+   * A drag that began on a filename used to paint a selection across the tree,
+   * the header and half the pane behind it, because a `user-select: none` on
+   * one row cannot stop a selection the document is making around it. The rule
+   * belongs at the top, with the few places that hold real text opting back in
+   * below. The prefixed property is not decoration: WebKit is where this ships.
+   */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/*
+ * What may be selected: the note, in either of the two ways it is shown, and
+ * the fields and setup commands that exist to be typed into or copied out of.
+ */
+.editor,
+.preview,
+.snippet,
+input,
+textarea,
+[contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/*
+ * Cursors.
+ *
+ * Which pointer appears says what a thing is, so it is stated once here by what
+ * the element *is* rather than remembered class by class. Every control in this
+ * application is a real `<button>`, so the hand arrives with the markup and a
+ * new one cannot end up the only arrow on the screen; the rows of the file tree
+ * are the exception the ARIA pattern forces — `role="treeitem"`, not buttons —
+ * and name it themselves.
+ *
+ * A label belongs in that list: clicking one focuses the field it names, which
+ * makes it a control whatever it looks like. It has to be said out loud rather
+ * than left to the initial value, because WebKit's own stylesheet carries
+ * `label { cursor: default }` — which is what made every field label in this
+ * application, "Vault name" and "Location" among them, the one arrow left on
+ * the screen.
+ *
+ * The few surfaces that are genuinely something else — the pane dividers, the
+ * graph canvas, an external link that goes nowhere — override by class, and a
+ * class outweighs an element selector however this file is ordered.
+ */
+button,
+[role="button"],
+a[href],
+label[for],
+input[type="checkbox"],
+input[type="radio"] {
+  cursor: pointer;
+}
+
+/*
+ * A tick box and its words are one target, so they answer the same way — this
+ * time without a `for`, because the control is nested inside the label.
+ *
+ * On its own rule deliberately: `:has()` is not a forgiving selector, so a
+ * parser that did not know it would throw away every selector sitting beside
+ * it — and the one that matters here is the bare `button` above.
+ */
+label:has(input[type="checkbox"]),
+label:has(input[type="radio"]) {
+  cursor: pointer;
+}
+
+/*
+ * A control that will not answer says so under the pointer as well as in its
+ * ink. `cursor` inherits, so the icon inside a disabled button is covered by
+ * the same rule; the descendant selector is there for the children that name a
+ * cursor of their own.
+ *
+ * Written as `button:disabled` rather than the bare `:disabled` so it outweighs
+ * the class that gave the control its hand, wherever that class sits.
+ */
+button:disabled,
+button:disabled *,
+input:disabled,
+select:disabled,
+textarea:disabled,
+[aria-disabled="true"],
+[aria-disabled="true"] * {
+  cursor: not-allowed;
+}
+
+h1,
+h2,
+h3 {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+h1 {
+  font-size: 20px;
+}
+
+h2 {
+  font-size: 16px;
+}
+
+h3 {
+  font-size: 14px;
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: var(--fg);
+}
+
+code,
+pre {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+/* Layout ------------------------------------------------------------------ */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.app__header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--gap);
+  padding: var(--pad);
+  border-bottom: 1px solid var(--line);
+}
+
+.app__title {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.app__subtitle {
+  color: var(--muted);
+}
+
+.app__tabs {
+  display: flex;
+  gap: 0;
+  padding: 0 var(--pad);
+  border-bottom: 1px solid var(--line);
+}
+
+.app__main {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--pad);
+  display: flex;
+  flex-direction: column;
+  gap: var(--pad);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+.row {
+  display: flex;
+  gap: var(--gap);
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+/* The three panes -------------------------------------------------------- */
+
+.workspace {
+  display: grid;
+  /*
+   * The dividers are their own 7px tracks with the rule drawn down the middle,
+   * so their pointer target never overlaps a tree row. An overhanging hit area
+   * made the last few pixels of every row start a drag instead of opening the
+   * note.
+   */
+  grid-template-columns: var(--pane-left) 7px minmax(0, 1fr) 7px var(--pane-right);
+  /*
+   * Takes the space left over rather than claiming the whole window. With
+   * `height: 100%` it kept its full height even when a banner appeared above
+   * it, pushing the bottom of all three panes off-screen.
+   */
+  flex: 1;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.workspace__pane {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace__pane--left {
+  background: var(--bg-sunken);
+}
+
+/*
+ * The divider is the rule, drawn as a background rather than a border so it
+ * stays one grid cell wide while its pointer target reaches past it.
+ */
+.divider {
+  background: transparent;
+  cursor: col-resize;
+  position: relative;
+  border: none;
+  padding: 0;
+  appearance: none;
+}
+
+/* The rule itself: one pixel, centred in the seven the track is wide. */
+.divider::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: var(--line-soft);
+}
+
+/*
+ * Hovering a divider does not light it up.
+ *
+ * `col-resize` under the pointer already says the rule can be dragged, and it
+ * says it from the whole seven-pixel track rather than from the one pixel that
+ * would have changed colour. Brightening the rule as well made every pass of
+ * the mouse across the window flash two hairlines that were not being used for
+ * anything — motion the rest of this application does not have.
+ *
+ * Keyboard focus is a different question: a divider reached with Tab has no
+ * pointer over it to say where it is, so that one still shows.
+ */
+.divider:focus-visible::after {
+  background: var(--fg);
+}
+
+.divider:focus-visible {
+  outline: none;
+}
+
+.empty {
+  margin: auto;
+  padding: var(--pad);
+  color: var(--muted);
+  text-align: center;
+  max-width: 32ch;
+}
+
+/* File tree --------------------------------------------------------------- */
+
+.explorer {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.explorer__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 6px;
+}
+
+.explorer__scroll {
+  flex: 1;
+  overflow: auto;
+  padding-bottom: var(--pad);
+  display: flex;
+  flex-direction: column;
+}
+
+.icon-button {
+  appearance: none;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 0;
+  padding: 5px;
+  cursor: pointer;
+}
+
+.icon-button:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+
+.icon-button:disabled {
+  color: var(--line-soft);
+  cursor: not-allowed;
+}
+
+.tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/*
+ * The outermost tree fills the pane even when the vault is three notes long.
+ *
+ * It is the vault root's drop target, so the empty space under the last row has
+ * to belong to it — otherwise dragging a note out of a folder has nowhere to
+ * land and the drag reports "nowhere to drop" over most of the pane.
+ */
+.tree--root {
+  flex: 1 0 auto;
+}
+
+.tree--drop {
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.tree__row {
+  /*
+   * Nothing here starts a WebKit drag.
+   *
+   * The move is a pointer-event drag, and `-webkit-user-drag: element` puts
+   * WKWebView's own drag machinery on top of it: it takes the press, shows its
+   * own ghost, and delivers a `pointercancel` mid-gesture — which is the stutter
+   * this pane had.
+   */
+  -webkit-user-drag: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  padding: 3px 8px 3px 0;
+  cursor: pointer;
+}
+
+.tree__row:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.tree__row--folder {
+  color: var(--fg);
+}
+
+/*
+ * The note you have open is named in the accent — green in dark mode, black in
+ * light, the same ink every link in the application is written in. A row of
+ * grey behind it said "selected" the way a list box does; the colour says it
+ * the way the rest of this application does.
+ *
+ * `aria-current` still marks the row for anything that is listening; it is the
+ * class that carries the colour, so `design.test.ts` can name the one surface
+ * in the tree the accent may be spent on.
+ */
+.tree__row--current,
+.tree__row--current:hover {
+  color: var(--link);
+}
+
+/*
+ * The row owns every pointer event.
+ *
+ * The label span is the part anyone actually grabs, and it is also what
+ * `elementFromPoint` would report under the cursor. Letting the children go
+ * transparent to the pointer puts every event, and every hit test, on the row
+ * that carries the path.
+ */
+.tree__twist,
+.tree__label {
+  pointer-events: none;
+}
+
+.tree__twist {
+  flex: none;
+  width: 14px;
+  line-height: 0;
+  color: var(--faint);
+}
+
+.tree__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree__note {
+  padding: 6px 10px;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+/* Controls ---------------------------------------------------------------- */
+
+.tab {
+  appearance: none;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-bottom: none;
+  font-family: inherit;
+  font-size: inherit;
+  padding: 8px 14px;
+  cursor: pointer;
+  margin-bottom: -1px;
+}
+
+.tab:hover {
+  color: var(--fg);
+}
+
+.tab[aria-current="page"] {
+  color: var(--fg);
+  border-color: var(--line);
+  background: var(--bg);
+  font-weight: 700;
+}
+
+.button {
+  appearance: none;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  font-family: inherit;
+  font-size: inherit;
+  padding: 7px 14px;
+  cursor: pointer;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.button:active:not(:disabled) {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.button:disabled {
+  color: var(--muted);
+  border-color: var(--muted);
+  cursor: not-allowed;
+}
+
+.button--primary {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.button--primary:hover:not(:disabled) {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.field--grow {
+  flex: 1;
+}
+
+.field__label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.field__hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.input {
+  appearance: none;
+  background: var(--bg);
+  color: var(--fg);
+  /* Inputs get the same 1px squared border as everything else. */
+  border: 1px solid var(--line);
+  font-family: inherit;
+  font-size: inherit;
+  padding: 7px 10px;
+  width: 100%;
+}
+
+.input:focus {
+  /* The border grey is deliberately quiet, so focus is shown in ink instead. */
+  outline: 1px solid var(--fg);
+  outline-offset: -2px;
+}
+
+.input::placeholder {
+  color: var(--muted);
+}
+
+.choice {
+  display: flex;
+  gap: var(--gap);
+  align-items: center;
+}
+
+.choice__option {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.choice__option--selected {
+  color: var(--fg);
+}
+
+/* Panels and notices ------------------------------------------------------ */
+
+.panel {
+  border: 1px solid var(--line);
+  padding: var(--pad);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+.panel__title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--gap);
+}
+
+.panel__description {
+  color: var(--muted);
+}
+
+.notice {
+  border: 1px solid var(--line);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.notice--failure {
+  /*
+   * Severity reads through the code label above it — bold, uppercase,
+   * quotable — rather than through a heavier rule. Every border in the
+   * application is 1px, with no exceptions to argue about.
+   */
+  font-weight: 500;
+}
+
+.notice__code {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+.notice__detail {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.snippet {
+  border: 1px solid var(--line);
+  padding: 12px;
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px var(--gap);
+  margin: 0;
+}
+
+.facts dt {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.facts dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.strong {
+  font-weight: 700;
+}
+
+/* The settings modal ------------------------------------------------------ */
+
+.modal {
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--fg);
+  padding: 0;
+  width: min(780px, 92vw);
+  max-height: 86vh;
+  overflow: hidden;
+}
+
+.modal::backdrop {
+  /* A pure grey dimmed with opacity, so no colour function is needed. */
+  background: #000000;
+  opacity: 0.5;
+}
+
+/*
+ * The sheet takes focus itself when it opens (see Modal.tsx), and a container
+ * is not a control: the ring belongs on whatever you Tab to from here.
+ */
+.modal:focus {
+  outline: none;
+}
+
+.modal__frame {
+  display: flex;
+  flex-direction: column;
+  max-height: 86vh;
+}
+
+/*
+ * No rule under the title.
+ *
+ * The tab strip below draws its own, and two hairlines a row apart boxed the
+ * close button into a corner of its own. The title is a heading with space
+ * around it; that is enough to separate it from what follows.
+ */
+.modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+  padding: 12px var(--pad);
+}
+
+.modal__body {
+  overflow-y: auto;
+  padding: var(--pad);
+  display: flex;
+  flex-direction: column;
+  gap: var(--pad);
+}
+
+.modal__tabs {
+  display: flex;
+  padding: 0 var(--pad);
+  border-bottom: 1px solid var(--line);
+}
+
+/* The note pane ----------------------------------------------------------- */
+
+.note {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.note__header {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  padding: 8px 12px;
+}
+
+.note__nav,
+.note__actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.note__dirty {
+  color: var(--muted);
+  font-size: 10px;
+  padding-right: 4px;
+}
+
+.note__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.note__conflict,
+.note__error {
+  margin: 0 24px 12px;
+}
+
+.breadcrumb {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+  align-items: baseline;
+  gap: 0;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.breadcrumb__folders {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.breadcrumb__current {
+  flex: none;
+}
+
+.breadcrumb__separator {
+  color: var(--faint);
+}
+
+.breadcrumb__current {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: inherit;
+  padding: 0;
+  cursor: pointer;
+}
+
+.editor {
+  height: 100%;
+  padding: 0 24px;
+}
+
+/* Preview ----------------------------------------------------------------- */
+
+.preview {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 24px 24px 40vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+.preview__title {
+  font-size: 28px;
+  margin-bottom: 4px;
+}
+
+.preview__rule {
+  border: none;
+  border-top: 1px solid var(--line-soft);
+  width: 100%;
+  margin: 4px 0;
+}
+
+.preview__content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+.md-heading {
+  margin-top: 12px;
+}
+
+.md-paragraph {
+  line-height: 1.7;
+}
+
+.md-code {
+  background: var(--bg-sunken);
+  border: 1px solid var(--line-soft);
+  padding: 12px;
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.md-codespan {
+  background: var(--bg-hover);
+  padding: 1px 4px;
+}
+
+.md-quote {
+  border-left: 1px solid var(--line-soft);
+  padding-left: 12px;
+  color: var(--muted);
+}
+
+.md-list {
+  margin: 0;
+  padding-left: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.md-rule {
+  border: none;
+  border-top: 1px solid var(--line-soft);
+}
+
+.md-table__scroll {
+  overflow-x: auto;
+}
+
+.md-table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.md-table th,
+.md-table td {
+  border: 1px solid var(--line-soft);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.md-image {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.md-link {
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--link);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.md-link--unresolved {
+  color: var(--muted);
+  text-decoration-style: dashed;
+}
+
+.md-link--external {
+  color: var(--muted);
+  text-decoration: underline dotted;
+  cursor: default;
+}
+
+/* Properties -------------------------------------------------------------- */
+
+.properties {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.properties__title {
+  font-size: 14px;
+  color: var(--fg);
+}
+
+.properties__grid {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.properties__row {
+  display: grid;
+  grid-template-columns: 12rem 1fr;
+  gap: var(--gap);
+  align-items: start;
+}
+
+.properties__key {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.properties__values {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.properties__value {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.property__value {
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--link);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.properties__add {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--gap);
+  flex-wrap: wrap;
+  padding-top: 4px;
+}
+
+.properties__add .field {
+  min-width: 10rem;
+}
+
+.properties__add-button {
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 2px 0;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.properties__add-button:hover {
+  color: var(--fg);
+}
+
+/* Backlinks --------------------------------------------------------------- */
+
+.backlinks {
+  border-top: 1px solid var(--line-soft);
+  margin-top: 24px;
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.backlinks__title {
+  font-size: 13px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.backlinks__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/*
+ * The name leads and the path follows it, both from the left edge.
+ *
+ * A `<button>` centres its own text, so a full-width one in a column left the
+ * note's name floating in the middle of the pane, away from the row it belongs
+ * to. The row is a flex line and the button only as wide as its word.
+ */
+.backlinks__item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.backlinks__path {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.backlink {
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+  color: var(--link);
+  cursor: pointer;
+}
+
+/* Graph ------------------------------------------------------------------- */
+
+.graph {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+
+  /* The canvas reads these; nothing in TypeScript names a colour. */
+  --graph-node: var(--faint);
+  --graph-node-active: var(--accent);
+  --graph-edge: var(--line-soft);
+  --graph-label: var(--muted);
+}
+
+.graph__canvas {
+  position: absolute;
+  inset: 0;
+  cursor: grab;
+}
+
+.graph__canvas:active {
+  cursor: grabbing;
+}
+
+.graph__recentre {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 1;
+  appearance: none;
+  background: var(--bg);
+  color: var(--muted);
+  border: 1px solid var(--line-soft);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.graph__recentre:hover {
+  color: var(--fg);
+  border-color: var(--line);
+}
+
+/* Mermaid ----------------------------------------------------------------- */
+
+/*
+ * Ported from the vault template's mermaid_green.css, with the literals swapped
+ * for tokens so light mode inherits black and the accent stays defined once.
+ */
+.mermaid {
+  background: var(--bg);
+  overflow-x: auto;
+}
+
+.mermaid svg {
+  background: var(--bg);
+  max-width: 100%;
+}
+
+.mermaid .node rect,
+.mermaid .node circle,
+.mermaid .node ellipse,
+.mermaid .node polygon,
+.mermaid .node path,
+.mermaid .cluster rect {
+  fill: var(--bg);
+  stroke: var(--link);
+  stroke-width: 1.5px;
+}
+
+.mermaid .flowchart-link,
+.mermaid .edgePath path,
+.mermaid .messageLine0,
+.mermaid .messageLine1 {
+  fill: none;
+  stroke: var(--link);
+}
+
+.mermaid marker path,
+.mermaid .arrowheadPath,
+.mermaid .marker {
+  fill: var(--link);
+  stroke: var(--link);
+}
+
+.mermaid .nodeLabel,
+.mermaid .nodeLabel p,
+.mermaid .edgeLabel,
+.mermaid .edgeLabel p,
+.mermaid .cluster-label,
+.mermaid text,
+.mermaid tspan {
+  color: var(--link);
+  fill: var(--link);
+}
+
+.mermaid .edgeLabel,
+.mermaid .edgeLabel rect,
+.mermaid .labelBkg {
+  background: var(--bg);
+  fill: var(--bg);
+  opacity: 1;
+}
+
+.mermaid__error {
+  border: 1px solid var(--line-soft);
+  padding: 12px;
+  color: var(--muted);
+}
+
+/* Quick switcher ---------------------------------------------------------- */
+
+.switcher {
+  width: min(560px, 90vw);
+  max-height: 60vh;
+  top: 12vh;
+}
+
+.switcher__frame {
+  display: flex;
+  flex-direction: column;
+  max-height: 60vh;
+}
+
+.switcher__input {
+  border: none;
+  border-bottom: 1px solid var(--line);
+  font-size: 16px;
+  padding: 12px var(--pad);
+}
+
+.switcher__input:focus {
+  outline: none;
+}
+
+.switcher__results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+}
+
+.switcher__result {
+  display: flex;
+  align-items: baseline;
+  gap: var(--gap);
+  width: 100%;
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+  padding: 7px var(--pad);
+  cursor: pointer;
+}
+
+.switcher__result--selected {
+  background: var(--bg-selected);
+}
+
+.switcher__path {
+  color: var(--faint);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Name prompt ------------------------------------------------------------- */
+
+.prompt {
+  width: min(420px, 90vw);
+  top: 20vh;
+}
+
+.prompt__frame {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  padding: var(--pad);
+}
+
+.prompt__actions {
+  justify-content: flex-end;
+}
+
+.app__banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--gap);
+  padding: 12px var(--pad);
+  border-bottom: 1px solid var(--line);
+}
+
+.app__banner .notice {
+  flex: 1;
+}
+
+/* Context menu ------------------------------------------------------------ */
+
+.menu {
+  position: fixed;
+  z-index: 40;
+  min-width: 160px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  padding: 4px 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.menu__item {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+.menu__item:hover {
+  background: var(--bg-hover);
+}
+
+.menu__item--destructive {
+  font-weight: 700;
+}
+
+/* Confirmation ------------------------------------------------------------ */
+
+.confirm__frame {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  padding: var(--pad);
+}
+
+.confirm__actions {
+  justify-content: flex-end;
+}
+
+.graph__truncation {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  right: 104px;
+  margin: 0;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.note__loading {
+  padding: 6px var(--pad);
+  color: var(--muted);
+  font-size: 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.preview__title-field {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  width: 100%;
+}
+
+.preview__title-field:focus {
+  outline: none;
+  border-bottom: 1px solid var(--line);
+}
+
+.tree__row--drop {
+  background: var(--bg-selected);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.tree__row--dragging {
+  opacity: 0.4;
+}
+
+/* The label that follows the cursor while a row is being dragged. */
+.tree__ghost {
+  position: fixed;
+  /* Moved with a transform from the corner, so the drag never lays out. */
+  left: 0;
+  top: 0;
+  z-index: 50;
+  pointer-events: none;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  font-size: 12px;
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+
+.tree__ghost-note {
+  color: var(--muted);
+}
+

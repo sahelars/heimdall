@@ -1,0 +1,4 @@
+/target
+/gen/schemas
+# Staged at build time from the workspace CLI; never committed.
+/binaries

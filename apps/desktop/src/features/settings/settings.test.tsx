@@ -1,0 +1,407 @@
+/**
+ * Screen behavior (SPEC §17, desktop tests).
+ *
+ * Tauri commands are stubbed at the IPC boundary, so these exercise the real
+ * components against the real shape of a CLI response — including the failure
+ * shapes, which must stay readable rather than becoming "something went wrong".
+ */
+
+import { act, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const invoke = vi.fn();
+const openDialog = vi.fn();
+const listenEvent = vi.fn();
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: (...args: unknown[]) => openDialog(...args) }));
+// New: the workspace subscribes to the application menu's Settings event.
+vi.mock("@tauri-apps/api/event", () => ({ listen: (...args: unknown[]) => listenEvent(...args) }));
+
+const { App } = await import("../../App");
+const { Setup } = await import("./Setup");
+const { Server } = await import("./Server");
+const { Diagnostics } = await import("./Diagnostics");
+
+const STATUS = {
+  path: "/Applications/Heimdall.app/Contents/MacOS/heimdall",
+  available: true,
+  cliVersion: "0.1.0",
+  coreVersion: "0.1.0",
+  mcpProtocolVersion: "2025-11-25",
+  outputSchemaVersion: 1,
+};
+
+/** Captured so a test can fire the menu event the way Rust does. */
+let fireSettings: (() => void) | undefined;
+
+beforeEach(() => {
+  invoke.mockReset();
+  openDialog.mockReset();
+  listenEvent.mockReset();
+  fireSettings = undefined;
+  listenEvent.mockImplementation((_name: string, handler: () => void) => {
+    fireSettings = handler;
+    return Promise.resolve(() => {});
+  });
+  window.localStorage.clear();
+});
+
+describe("Setup", () => {
+  it("creates a templated vault and reports what was written", async () => {
+    invoke.mockResolvedValue({
+      ok: true,
+      data: {
+        path: "/Users/n/Documents/demo",
+        mode: "scaffolded",
+        created: [".obsidian/", "aios/", "ideas/hello_world.md"],
+      },
+    });
+    const onVaultChange = vi.fn();
+    render(<Setup vault="" onVaultChange={onVaultChange} />);
+
+    await userEvent.type(screen.getByLabelText("Vault name"), "demo");
+    await userEvent.type(screen.getByLabelText("Location"), "/Users/n/Documents");
+    await userEvent.click(screen.getByRole("button", { name: "Create vault" }));
+
+    await screen.findByText("Vault created");
+    expect(invoke).toHaveBeenCalledWith("invoke_cli", {
+      command: "create",
+      request: { name: "demo", root: "/Users/n/Documents" },
+      stdin: undefined,
+    });
+    expect(onVaultChange).toHaveBeenCalledWith("/Users/n/Documents/demo");
+    expect(screen.getByText("ideas/hello_world.md")).toBeInTheDocument();
+  });
+
+  it("initializes an existing vault by its parent and folder, adding only aios/", async () => {
+    openDialog.mockResolvedValue("/Users/n/Documents/Existing Vault");
+    invoke.mockResolvedValue({
+      ok: true,
+      data: {
+        path: "/Users/n/Documents/Existing Vault",
+        mode: "initialized",
+        created: ["aios/", "aios/agents.md"],
+      },
+    });
+    render(<Setup vault="" onVaultChange={vi.fn()} />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Choose a folder and initialize…" }),
+    );
+
+    await screen.findByText("Vault initialized");
+    expect(invoke).toHaveBeenCalledWith("invoke_cli", {
+      command: "create",
+      request: { name: "Existing Vault", root: "/Users/n/Documents" },
+      stdin: undefined,
+    });
+    // Nothing about example notes: initializing adds only what was missing.
+    expect(screen.getByText("aios/agents.md")).toBeInTheDocument();
+  });
+
+  it("keeps a structured failure readable instead of crashing", async () => {
+    invoke.mockResolvedValue({
+      ok: false,
+      error: {
+        code: "ALREADY_EXISTS",
+        message: '"demo" already exists in the root directory and is not a directory',
+        details: { name: "demo" },
+      },
+    });
+    render(<Setup vault="" onVaultChange={vi.fn()} />);
+
+    await userEvent.type(screen.getByLabelText("Vault name"), "demo");
+    await userEvent.type(screen.getByLabelText("Location"), "/tmp");
+    await userEvent.click(screen.getByRole("button", { name: "Create vault" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("ALREADY_EXISTS");
+    expect(alert).toHaveTextContent("already exists in the root directory");
+    // The details a user would need to act are still there.
+    expect(alert).toHaveTextContent("demo");
+  });
+
+  it("surfaces an uninitialized vault with the guidance the CLI gives", async () => {
+    invoke.mockResolvedValue({
+      ok: false,
+      error: {
+        code: "NOT_INITIALIZED",
+        message:
+          'this vault has no complete aios/ structure; run "heimdall create" against it',
+        details: { missing: ["aios/", "aios/agents.md"] },
+      },
+    });
+    render(<Setup vault="/Users/n/plain-folder" onVaultChange={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Verify" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("NOT_INITIALIZED");
+    expect(alert).toHaveTextContent("heimdall create");
+  });
+});
+
+describe("Server", () => {
+  it("shows the exact command and a config snippet pointing at the bundled tool", async () => {
+    invoke.mockResolvedValue([]);
+    render(<Server vault="/Users/n/My Vault" status={STATUS} />);
+
+    expect(
+      screen.getByText(`${STATUS.path} mcp --vault "/Users/n/My Vault"`),
+    ).toBeInTheDocument();
+
+    const snippet = screen.getByText(/"mcpServers"/);
+    const parsed = JSON.parse(snippet.textContent!);
+    expect(parsed.mcpServers.heimdall.command).toBe(STATUS.path);
+    expect(parsed.mcpServers.heimdall.args).toEqual(["mcp", "--vault", "/Users/n/My Vault"]);
+  });
+
+  it("reports a successful handshake with what the server said", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "list_client_configs") return Promise.resolve([]);
+      if (command === "health_check") {
+        return Promise.resolve({
+          ok: true,
+          serverName: "heimdall",
+          serverVersion: "0.1.0",
+          protocolVersion: "2025-11-25",
+        });
+      }
+      return Promise.resolve(null);
+    });
+    render(<Server vault="/v" status={STATUS} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Run health check" }));
+
+    await screen.findByText("Handshake succeeded");
+    expect(screen.getByText("heimdall 0.1.0")).toBeInTheDocument();
+    expect(screen.getByText("2025-11-25")).toBeInTheDocument();
+  });
+
+  it("keeps a failed handshake actionable", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "list_client_configs") return Promise.resolve([]);
+      if (command === "health_check") {
+        return Promise.resolve({
+          ok: false,
+          error: { code: "IO_ERROR", message: "the server did not answer within 10 seconds" },
+          stderr: "heimdall mcp: NOT_FOUND: vault directory does not exist",
+        });
+      }
+      return Promise.resolve(null);
+    });
+    render(<Server vault="/missing" status={STATUS} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Run health check" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("IO_ERROR");
+    expect(alert).toHaveTextContent("did not answer");
+    // Captured stderr is shown, because that is where the real reason is.
+    expect(alert).toHaveTextContent("vault directory does not exist");
+  });
+
+  it("writes a client entry only when asked, and says what it did", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "list_client_configs") {
+        return Promise.resolve([
+          {
+            id: "claude-desktop",
+            name: "Claude Desktop",
+            path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
+            present: true,
+            installed: false,
+            serverKey: "heimdall",
+          },
+        ]);
+      }
+      if (command === "install_client_config") {
+        return Promise.resolve({
+          path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
+          serverKey: "heimdall",
+          replaced: false,
+          backupPath: "/Users/n/Library/Application Support/Claude/claude_desktop_config.heimdall-backup.json",
+        });
+      }
+      return Promise.resolve(null);
+    });
+    render(<Server vault="/v" status={STATUS} />);
+
+    await screen.findByText("Claude Desktop");
+    // Nothing is written until the button is pressed.
+    expect(invoke).not.toHaveBeenCalledWith("install_client_config", expect.anything());
+
+    await userEvent.click(screen.getByRole("button", { name: "Add entry" }));
+
+    await screen.findByText("Configuration written");
+    expect(invoke).toHaveBeenCalledWith("install_client_config", {
+      clientId: "claude-desktop",
+      vault: "/v",
+    });
+    expect(screen.getByText(/heimdall-backup\.json/)).toBeInTheDocument();
+  });
+
+  it("asks for a vault before offering to configure anything", () => {
+    render(<Server vault="" status={STATUS} />);
+    expect(screen.getByText("No vault selected")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Run health check" })).toBeNull();
+  });
+});
+
+describe("Diagnostics", () => {
+  it("names the binary in use and the versions it reports", () => {
+    render(
+      <Diagnostics vault="/v" status={STATUS} failures={[]} onRefresh={vi.fn()} />,
+    );
+
+    expect(screen.getByText(STATUS.path)).toBeInTheDocument();
+    expect(screen.getByText("2025-11-25")).toBeInTheDocument();
+    expect(screen.getByText("Nothing has failed in this session.")).toBeInTheDocument();
+  });
+
+  it("reports a missing sidecar rather than pretending it is fine", () => {
+    render(
+      <Diagnostics
+        vault="/v"
+        status={{
+          path: "/Applications/Heimdall.app/Contents/MacOS/heimdall",
+          available: false,
+          error: {
+            code: "IO_ERROR",
+            message: "the bundled heimdall command line tool is missing from this application",
+          },
+        }}
+        failures={[]}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("no")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("IO_ERROR");
+  });
+
+  it("keeps recent failures where a user can still read them", () => {
+    render(
+      <Diagnostics
+        vault="/v"
+        status={STATUS}
+        failures={[
+          {
+            at: "2026-08-17T10:00:00Z",
+            context: "write-memory",
+            error: {
+              code: "REVISION_CONFLICT",
+              message: "the memory changed since it was read",
+              details: { current_revision: "blake3:abc" },
+            },
+          },
+        ]}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("REVISION_CONFLICT");
+    expect(alert).toHaveTextContent("blake3:abc");
+    expect(screen.getByText(/write-memory/)).toBeInTheDocument();
+  });
+});
+
+describe("Settings", () => {
+  it("is closed until the application menu asks for it, and closes again from the X", async () => {
+    invoke.mockResolvedValue(STATUS);
+    render(<App />);
+
+    await waitFor(() =>
+      expect(listenEvent).toHaveBeenCalledWith("menu:settings", expect.any(Function)),
+    );
+    // Settings is not a screen you can be stuck on.
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    act(() => fireSettings?.());
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("button", { name: "Create vault" })).toBeInTheDocument();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Close settings" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("moves between its sections without leaving the workspace", async () => {
+    invoke.mockResolvedValue(STATUS);
+    render(<App />);
+    await waitFor(() => expect(listenEvent).toHaveBeenCalled());
+    act(() => fireSettings?.());
+
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Appearance" }));
+    expect(within(dialog).getByRole("radiogroup", { name: "Theme" })).toBeInTheDocument();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Diagnostics" }));
+    expect(within(dialog).getByText("Command line tool")).toBeInTheDocument();
+  });
+
+  it("opens without a ring drawn around its close button", async () => {
+    // `showModal` focuses the first control it finds, which is the X — so the
+    // sheet opened looking as though something in it had been selected.
+    invoke.mockResolvedValue(STATUS);
+    render(<App />);
+    await waitFor(() => expect(listenEvent).toHaveBeenCalled());
+    act(() => fireSettings?.());
+
+    const dialog = await screen.findByRole("dialog");
+    expect(document.activeElement).toBe(dialog);
+    expect(document.activeElement).not.toBe(
+      within(dialog).getByRole("button", { name: "Close settings" }),
+    );
+  });
+
+  it("lines the vault fields up by keeping the hint out of their row", async () => {
+    // A row aligns along the bottom, so a field carrying a hint is taller than
+    // the one beside it and rides a line up. There is no layout in jsdom to
+    // measure, but the cause is structural and can be checked.
+    invoke.mockResolvedValue(STATUS);
+    render(<App />);
+    await waitFor(() => expect(listenEvent).toHaveBeenCalled());
+    act(() => fireSettings?.());
+
+    const dialog = await screen.findByRole("dialog");
+    const hint = within(dialog).getByText("One folder name, not a path.");
+    expect(hint.closest(".row")).toBeNull();
+    // And it is still next to the field it describes, not orphaned elsewhere.
+    const row = within(dialog).getByLabelText("Vault name").closest(".row");
+    expect(row?.nextElementSibling).toBe(hint);
+  });
+
+  it("applies a theme override to the document and remembers it", async () => {
+    invoke.mockResolvedValue(STATUS);
+    render(<App />);
+    await waitFor(() => expect(listenEvent).toHaveBeenCalled());
+    act(() => fireSettings?.());
+
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Appearance" }));
+    await userEvent.click(within(dialog).getByRole("radio", { name: "Dark" }));
+
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    expect(window.localStorage.getItem("heimdall.theme")).toBe('"dark"');
+  });
+});
+
+describe("the workspace", () => {
+  it("asks for a vault before it can show anything", async () => {
+    invoke.mockResolvedValue(STATUS);
+    render(<App />);
+
+    expect(await screen.findByText(/No vault yet/)).toBeInTheDocument();
+  });
+
+  it("survives a bridge that rejects outright", async () => {
+    invoke.mockRejectedValue(new Error("no bridge"));
+    render(<App />);
+
+    // The window still renders and still says what to do next.
+    expect(await screen.findByText(/No vault yet/)).toBeInTheDocument();
+  });
+});

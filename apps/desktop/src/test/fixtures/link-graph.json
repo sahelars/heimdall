@@ -1,0 +1,168 @@
+{
+"nodes": [
+{
+"path": "aios/AGENTS.md",
+"title": "AGENTS",
+"in_aios": true,
+"size_bytes": 5,
+"modified_at": "2026-08-21T23:54:22Z",
+"scanned": true
+},
+{
+"path": "aios/memories/extended/memory_1.md",
+"title": "memory_1",
+"in_aios": true,
+"size_bytes": 35,
+"modified_at": "2026-08-21T23:54:22Z",
+"scanned": true
+},
+{
+"path": "aios/memories/extended/memory_2.md",
+"title": "memory_2",
+"in_aios": true,
+"size_bytes": 40,
+"modified_at": "2026-08-21T23:54:22Z",
+"scanned": true
+},
+{
+"path": "aios/memories/memory.md",
+"title": "memory",
+"in_aios": true,
+"size_bytes": 77,
+"modified_at": "2026-08-21T23:54:22Z",
+"scanned": true
+},
+{
+"path": "aios/notifications/2026-08-21_23-54-22.md",
+"title": "2026-08-21_23-54-22",
+"in_aios": true,
+"size_bytes": 74,
+"modified_at": "2026-08-21T23:54:22Z",
+"scanned": true
+},
+{
+"path": "ideas/game_idea.md",
+"title": "game_idea",
+"in_aios": false,
+"size_bytes": 34,
+"modified_at": "2026-08-21T23:54:22Z",
+"scanned": true
+},
+{
+"path": "ideas/hello_world.md",
+"title": "hello_world",
+"in_aios": false,
+"size_bytes": 58,
+"modified_at": "2026-08-21T23:54:22Z",
+"scanned": true
+},
+{
+"path": "ideas/test_note.md",
+"title": "test_note",
+"in_aios": false,
+"size_bytes": 12,
+"modified_at": "2026-08-21T23:54:22Z",
+"scanned": true
+},
+{
+"path": "projects/lens/articles.md",
+"title": "articles",
+"in_aios": false,
+"size_bytes": 66,
+"modified_at": "2026-08-21T23:54:22Z",
+"scanned": true
+},
+{
+"path": "projects/lens/how_lens_works.md",
+"title": "how_lens_works",
+"in_aios": false,
+"size_bytes": 503,
+"modified_at": "2026-08-21T23:54:22Z",
+"scanned": true
+},
+{
+"path": "projects/lens/profile.md",
+"title": "profile",
+"in_aios": false,
+"size_bytes": 35,
+"modified_at": "2026-08-21T23:54:22Z",
+"scanned": true
+},
+{
+"path": "projects/my_project.md",
+"title": "my_project",
+"in_aios": false,
+"size_bytes": 25,
+"modified_at": "2026-08-21T23:54:22Z",
+"scanned": true
+},
+{
+"path": "projects/heimdall/what_is_heimdall.md",
+"title": "what_is_heimdall",
+"in_aios": false,
+"size_bytes": 46,
+"modified_at": "2026-08-21T23:54:22Z",
+"scanned": true
+}
+],
+"edges": [
+{
+"from": 1,
+"to": 3,
+"count": 1
+},
+{
+"from": 2,
+"to": 3,
+"count": 1
+},
+{
+"from": 5,
+"to": 3,
+"count": 1
+},
+{
+"from": 6,
+"to": 12,
+"count": 1
+},
+{
+"from": 8,
+"to": 6,
+"count": 1
+},
+{
+"from": 8,
+"to": 9,
+"count": 1
+},
+{
+"from": 9,
+"to": 8,
+"count": 1
+},
+{
+"from": 9,
+"to": 10,
+"count": 1
+},
+{
+"from": 10,
+"to": 9,
+"count": 1
+},
+{
+"from": 12,
+"to": 5,
+"count": 1
+}
+],
+"unresolved": [],
+"truncated": {
+"node_cap_hit": false,
+"total_bytes_cap_hit": false,
+"nodes_omitted": 0,
+"files_unscanned": 0,
+"scanned_bytes": 1010
+}
+}

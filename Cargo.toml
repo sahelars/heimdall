@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = ["crates/heimdall-core", "crates/heimdall-cli"]
+# The desktop app builds through Tauri, not cargo: `tauri::generate_context!`
+# embeds the built frontend, so a plain `cargo build --workspace` would fail
+# until Vite has run. Keeping it out also keeps the CLI artifact free of any
+# WebView dependency (SPEC §16).
+exclude = ["apps/desktop/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/slarsen/heimdall"
+
+[workspace.dependencies]
+heimdall-core = { path = "crates/heimdall-core", version = "0.1.0" }
+
+blake3 = "1"
+camino = { version = "1", features = ["serde1"] }
+cap-std = "3"
+clap = { version = "4", features = ["derive"] }
+fs4 = { version = "0.13", features = ["sync"] }
+include_dir = "0.7"
+# Pinned deliberately: the MCP protocol baseline moves with this crate, and
+# SPEC §12 requires upgrading only after contract tests pass.
+rmcp = { version = "=3.1.3", default-features = false }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "signal"] }
+
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+[profile.release]
+strip = true

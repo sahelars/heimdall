@@ -1,0 +1,95 @@
+body.theme-dark .mermaid > svg,
+body.theme-light .mermaid > svg {
+  -webkit-filter: none !important;
+  filter: none !important;
+  background: #000000 !important;
+  background-color: #000000 !important;
+}
+
+body .mermaid {
+  background: #000000 !important;
+  background-color: #000000 !important;
+}
+
+/* Some Mermaid diagrams emit a direct SVG background rectangle. */
+body .mermaid > svg > rect {
+  fill: #000000 !important;
+}
+
+/* Flowchart node shapes (`graph TD`, `graph LR`, and `flowchart`). */
+body .mermaid > svg .node rect,
+body .mermaid > svg .node circle,
+body .mermaid > svg .node ellipse,
+body .mermaid > svg .node polygon,
+body .mermaid > svg .node path {
+  fill: #000000 !important;
+  stroke: #00ff00 !important;
+  stroke-width: 1.5px !important;
+}
+
+/* Flowchart connectors and arrowheads. */
+body .mermaid > svg .flowchart-link,
+body .mermaid > svg .edgePath path {
+  fill: none !important;
+  stroke: #00ff00 !important;
+}
+
+body .mermaid > svg marker path,
+body .mermaid > svg .arrowheadPath,
+body .mermaid > svg .root .anchor path {
+  fill: #00ff00 !important;
+  stroke: #00ff00 !important;
+}
+
+/* Node, edge, and group labels (both SVG text and HTML labels). */
+body .mermaid > svg .nodeLabel,
+body .mermaid > svg .nodeLabel p,
+body .mermaid > svg .nodeLabel span,
+body .mermaid > svg .edgeLabel,
+body .mermaid > svg .edgeLabel p,
+body .mermaid > svg .edgeLabel span,
+body .mermaid > svg .cluster-label,
+body .mermaid > svg .cluster-label p,
+body .mermaid > svg .cluster-label span,
+body .mermaid > svg text,
+body .mermaid > svg tspan {
+  color: #00ff00 !important;
+  fill: #00ff00 !important;
+}
+
+/* Edge-label and subgraph backgrounds. */
+body .mermaid > svg .edgeLabel,
+body .mermaid > svg .edgeLabel p,
+body .mermaid > svg .edgeLabel rect,
+body .mermaid > svg .labelBkg {
+  background: #000000 !important;
+  background-color: #000000 !important;
+  fill: #000000 !important;
+  color: #00ff00 !important;
+  opacity: 1 !important;
+}
+
+body .mermaid > svg .cluster rect {
+  fill: #000000 !important;
+  stroke: #00ff00 !important;
+  stroke-width: 1.5px !important;
+}
+
+/* Current Mermaid mindmap node structure used by Obsidian 1.13.x. */
+body .mermaid > svg .mindmap-node path.node-bkg,
+body .mermaid > svg .mindmap-node path.label-container,
+body .mermaid > svg .mindmap-node circle.label-container,
+body .mermaid > svg .mindmap-node polygon.label-container,
+body .mermaid > svg .mindmap-node rect.label-container {
+  fill: #000000 !important;
+  stroke: #00ff00 !important;
+}
+
+body .mermaid > svg .mindmap-node line,
+body .mermaid > svg .edgePaths path[class*="section-edge-"] {
+  stroke: #00ff00 !important;
+}
+
+body .mermaid > svg .mindmap-node span.nodeLabel {
+  color: #00ff00 !important;
+}

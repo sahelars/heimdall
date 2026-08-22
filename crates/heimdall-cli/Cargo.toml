@@ -1,0 +1,29 @@
+[package]
+name = "heimdall-cli"
+description = "The Heimdall command line interface and (from Phase 2) MCP server."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "heimdall"
+path = "src/main.rs"
+
+[dependencies]
+heimdall-core.workspace = true
+
+camino.workspace = true
+clap.workspace = true
+rmcp = { workspace = true, features = ["server", "macros", "schemars", "transport-io"] }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+tempfile.workspace = true

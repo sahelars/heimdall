@@ -1,0 +1,249 @@
+{
+  "main": {
+    "id": "834c70b99e7d4539",
+    "type": "split",
+    "children": [
+      {
+        "id": "c5f5aaf1f6bd2b14",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "add2ee35fb77fca0",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "aios/memories/memory.md",
+                "mode": "preview",
+                "source": true
+              },
+              "icon": "lucide-file",
+              "title": "memory"
+            }
+          }
+        ]
+      },
+      {
+        "id": "70f0745a632ba15f",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "1c42ef99d801d709",
+            "type": "leaf",
+            "state": {
+              "type": "graph",
+              "state": {},
+              "icon": "lucide-git-fork",
+              "title": "Graph view"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "2329c1d36c343ae6",
+    "type": "split",
+    "children": [
+      {
+        "id": "70cbe6d1ba6f2913",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "16bd6ce0b3941311",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "e96ba30bf814b30b",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "38a57df77fcc9ac4",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 299.86328125
+  },
+  "right": {
+    "id": "0d6d092bb972f453",
+    "type": "split",
+    "children": [
+      {
+        "id": "11e0976b11cd447d",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "b283d7b254ba2807",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "projects/heimdall/what_is_heimdall.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks"
+            }
+          },
+          {
+            "id": "6921a5703b6f5625",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links"
+            }
+          },
+          {
+            "id": "e69b4db202a26235",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "7be96101bd4b05ee",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "41512167792226e7",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline"
+            }
+          },
+          {
+            "id": "ca031f12947f8007",
+            "type": "leaf",
+            "state": {
+              "type": "file-properties",
+              "state": {
+                "file": "projects/heimdall/what_is_heimdall.md"
+              },
+              "icon": "lucide-info",
+              "title": "File properties"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 322.60546875,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "canvas:Create new canvas": true,
+      "daily-notes:Open today's daily note": true,
+      "templates:Insert template": true,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": true,
+      "graph:Open graph view": false
+    }
+  },
+  "active": "add2ee35fb77fca0",
+  "lastOpenFiles": [
+    "aios/memories/extended/memory_1.md",
+    "aios/memories/memory.md",
+    "aios/memories/extended",
+    "projects/lens/how_lens_works.md",
+    "aios/AGENTS.md",
+    "ideas/game_idea.md",
+    "ideas/test_note.md",
+    "ideas/hello_world.md",
+    "projects/heimdall/what_is_heimdall.md",
+    "projects/lens/profile.md",
+    "aios/notifications/2026_8_13.md",
+    "aios/features",
+    "aios/api/xyz_site_stock.md",
+    "aios/api",
+    "projects/lens/articles.md",
+    "finance",
+    "aios/memories/extended/memory_2.md",
+    "aios/memories",
+    "aios/notifications",
+    "aios/untitled folder",
+    "aios/conversations",
+    "2026-08-13.md",
+    "Untitled.base",
+    "projects/heimdall",
+    "Welcome.md",
+    "create a link.md",
+    "2026-08-09.md",
+    "Untitled.canvas",
+    "Untitled 1.canvas"
+  ]
+}
