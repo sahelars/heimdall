@@ -12,7 +12,7 @@ use heimdall_core::{template, Vault};
 fn vault() -> (tempfile::TempDir, Vault) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-    let vault = Vault::open(&root).unwrap();
+    let vault = Vault::open_with_lock_dir(&root, &test_lock_dir()).unwrap();
     template::scaffold_aios_only(&vault).unwrap();
     (dir, vault)
 }
@@ -353,4 +353,17 @@ fn a_relative_link_climbing_past_the_vault_root_is_unresolved_not_a_crash() {
     let response = graph(&vault);
     assert!(response.edges.is_empty());
     assert_eq!(response.unresolved[0].target, "../../../etc/passwd.md");
+}
+
+/// Where these tests keep their write locks.
+///
+/// Outside the vault, as production does, but under the system temp directory
+/// rather than the real application-data one: a test run must not leave files
+/// in a developer's home. Lock files are named by a hash of the vault's path
+/// and every vault here is a fresh temp directory, so sharing one directory
+/// cannot collide.
+fn test_lock_dir() -> camino::Utf8PathBuf {
+    camino::Utf8PathBuf::from_path_buf(std::env::temp_dir())
+        .expect("temp dir is UTF-8")
+        .join("heimdall-test-locks")
 }

@@ -68,7 +68,7 @@ pub fn write_entry(vault: &Vault, request: WriteEntryRequest) -> Result<WriteEnt
         }
     }
 
-    let new_revision = vault.with_file_lock(&path, || {
+    let new_revision = vault.with_write_lock(&path, || {
         if !vault.is_file(&path) {
             return Err(Error::not_found(format!(
                 "no {} entry with id \"{id}\"",

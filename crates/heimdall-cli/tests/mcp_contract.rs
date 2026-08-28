@@ -20,7 +20,11 @@ use serde_json::{json, Map, Value};
 async fn connect(vault: &str) -> RunningService<RoleClient, ()> {
     let transport = TokioChildProcess::new(tokio::process::Command::new(binary()).configure(
         |command| {
-            command.arg("mcp").arg("--vault").arg(vault);
+            command
+                .arg("mcp")
+                .arg("--vault")
+                .arg(vault)
+                .env("HEIMDALL_LOCK_DIR", common::lock_dir());
         },
     ))
     .expect("spawn heimdall mcp");

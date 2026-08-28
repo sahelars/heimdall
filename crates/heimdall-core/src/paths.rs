@@ -319,7 +319,12 @@ pub fn is_junk(name: &str) -> bool {
     JUNK_NAMES.iter().any(|junk| junk.eq_ignore_ascii_case(name))
 }
 
-/// Whether a name is one of Heimdall's own sidecar files (locks, write temps).
+/// Whether a name is one of Heimdall's own sidecar files.
+///
+/// Write temps are current: an atomic write lands in a temporary sibling before
+/// being renamed into place. The `.lock` half is legacy — the write lock lives
+/// outside the vault now (SPEC §14) — but a vault used before that change still
+/// has one beside every note it ever wrote, and those must stay invisible.
 pub fn is_heimdall_internal(name: &str) -> bool {
     name.starts_with('.') && (name.ends_with(".lock") || name.contains(".tmp-"))
 }

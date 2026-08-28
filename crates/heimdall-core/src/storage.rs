@@ -5,6 +5,10 @@
 //! itself, not by comparing path strings (SPEC §14), so `..` components,
 //! absolute children, and symlinks pointing out of the vault fail at the
 //! syscall boundary rather than being filtered by hand.
+//!
+//! The one thing deliberately kept outside that capability is the write lock.
+//! It is Heimdall's own coordination state rather than vault content, and a
+//! vault is a folder of the user's Markdown — nothing of ours belongs in it.
 
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,11 +27,6 @@ use crate::timestamps;
 
 /// Distinguishes concurrent temp files written by one process.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// How many times to retry opening a lock sidecar that competing writers are
-/// creating at the same moment. Each loss is another writer's win, so the
-/// contention this absorbs is bounded by the number of concurrent writers.
-const LOCK_OPEN_ATTEMPTS: usize = 64;
 
 /// How long to wait for a contended lock before reporting that the holder is
 /// stuck. Every holder does bounded work, so this is far above normal waiting.
@@ -55,7 +54,11 @@ pub struct DirChild {
 #[derive(Debug)]
 pub struct Vault {
     dir: Dir,
+    /// The canonical location of this vault. Canonical rather than as-typed
+    /// because it is the key two processes must agree on to share a lock.
     root: Utf8PathBuf,
+    /// Where this vault's write lock lives, outside the vault itself.
+    lock_dir: Utf8PathBuf,
 }
 
 impl Vault {
@@ -64,6 +67,19 @@ impl Vault {
     /// This does not check initialization; call [`Vault::ensure_initialized`]
     /// before any domain operation that reads or writes managed content.
     pub fn open(root: &Utf8Path) -> Result<Self> {
+        Self::open_inner(root, default_lock_dir())
+    }
+
+    /// Open a vault whose write lock lives somewhere chosen by the caller.
+    ///
+    /// Only tests need this. They must not write into the developer's real
+    /// application-data directory, and an environment variable would be racy
+    /// across the parallel threads the concurrency tests already use.
+    pub fn open_with_lock_dir(root: &Utf8Path, lock_dir: &Utf8Path) -> Result<Self> {
+        Self::open_inner(root, lock_dir.to_owned())
+    }
+
+    fn open_inner(root: &Utf8Path, lock_dir: Utf8PathBuf) -> Result<Self> {
         let dir = Dir::open_ambient_dir(root.as_std_path(), ambient_authority()).map_err(|err| {
             match err.kind() {
                 std::io::ErrorKind::NotFound => {
@@ -75,13 +91,23 @@ impl Vault {
                 _ => Error::from_io("open vault", &err),
             }
         })?;
+
+        // The canonical path, not the one that was typed. Two processes naming
+        // one vault differently — through a symlink, or by a relative path —
+        // must derive the same lock, or they would each take a lock of their
+        // own and exclude nothing. This grants no authority the line above did
+        // not already use: the same ambient path was just resolved to open the
+        // capability.
+        let root = canonicalize(root)?;
+
         Ok(Self {
             dir,
-            root: root.to_owned(),
+            root,
+            lock_dir,
         })
     }
 
-    /// The path this vault was opened from, as supplied by the caller.
+    /// The canonical path of this vault.
     pub fn root(&self) -> &Utf8Path {
         &self.root
     }
@@ -282,38 +308,6 @@ impl Vault {
         Ok(())
     }
 
-    /// Remove one file.
-    ///
-    /// Heimdall never calls this to destroy user content — `delete_path` moves
-    /// notes into `.trash/` instead — but the primitive is needed to clear the
-    /// lock sidecar left beside a file that has been moved away.
-    pub fn remove_file(&self, path: &RelPath) -> Result<()> {
-        self.dir
-            .remove_file(path.as_str())
-            .map_err(|err| Error::from_io_path(&format!("remove {path}"), &err))?;
-        self.sync_dir(&path.parent());
-        Ok(())
-    }
-
-    /// Drop the lock sidecar beside a file that has just moved away.
-    ///
-    /// A sidecar normally outlives the operation that made it, which is correct:
-    /// removing one while another process might be about to open it is a race,
-    /// and `paths::is_heimdall_internal` keeps them out of every listing anyway.
-    /// A sidecar whose file has been renamed away is different — nothing will
-    /// ever open it again, and leaving debris in a user's vault is not
-    /// acceptable. Best-effort by design: failing to tidy up is not a reason to
-    /// fail a move the filesystem already completed.
-    pub fn discard_lock_sidecar(&self, path: &RelPath) {
-        let Some(name) = path.file_name() else {
-            return;
-        };
-        let sidecar = path.parent().join(&format!(".{name}.lock"));
-        if self.is_file(&sidecar) {
-            let _ = self.remove_file(&sidecar);
-        }
-    }
-
     /// Write a complete file, replacing any existing content atomically.
     ///
     /// Content lands in a temporary sibling that is flushed to disk before the
@@ -377,23 +371,38 @@ impl Vault {
         Ok(Revision::of_bytes(bytes))
     }
 
-    /// Run `body` holding a cross-process exclusive lock for `path`.
+    /// Run `body` holding this vault's cross-process write lock.
     ///
-    /// The lock lives on a sidecar `.<name>.lock` file rather than the target
-    /// itself: `atomic_write` renames a new inode over the target, which would
-    /// otherwise leave each writer holding a lock on a different file.
+    /// Optimistic concurrency only holds if comparing a revision and replacing
+    /// the file are one indivisible step. Without that, two writers both read
+    /// revision A, both find it current, and both write — and one person's edit
+    /// is gone with no error at all.
+    ///
+    /// The lock is one file per vault, and it lives outside the vault (see
+    /// [`Vault::lock_path`]). It cannot live on the target: `atomic_write`
+    /// renames a new inode over it, so each writer would end up holding a lock
+    /// on a different file. It could live on a sidecar beside the target, and
+    /// used to, but a sidecar can never be safely removed — unlinking one that
+    /// another process is about to open leaves the two locking different inodes
+    /// — so every note ever written left a `.lock` file behind in the user's
+    /// vault. One lock per vault is coarser than per-file and therefore strictly
+    /// stronger, and a holder only hashes some bytes and renames a temp file, so
+    /// serialising a vault's writes costs nothing at the rate they arrive.
+    ///
+    /// `path` does not select the lock; it names what is being written, so a
+    /// timeout can say which operation was waiting.
+    ///
+    /// **Never call a locking operation from inside `body`.** With one lock per
+    /// vault that is a self-deadlock, not merely redundant: each acquire opens a
+    /// fresh descriptor, and `flock` on a second open file description blocks
+    /// even within one process.
     ///
     /// Waiting for the lock is bounded (SPEC §12). A blocking acquire would
     /// hang for as long as some other process — possibly one that is wedged, or
     /// stopped under a debugger — chooses to hold it, and a server cannot offer
     /// a bounded operation duration on top of an unbounded wait.
-    pub fn with_file_lock<T>(&self, path: &RelPath, body: impl FnOnce() -> Result<T>) -> Result<T> {
-        let name = path
-            .file_name()
-            .ok_or_else(|| Error::internal("lock target has no filename"))?;
-        let lock_path = path.parent().join(&format!(".{name}.lock"));
-
-        let file = self.open_lock_file(&lock_path, path)?;
+    pub fn with_write_lock<T>(&self, path: &RelPath, body: impl FnOnce() -> Result<T>) -> Result<T> {
+        let file = self.open_lock_file(path)?;
         acquire(&file, path, LOCK_WAIT_LIMIT)?;
 
         let result = body();
@@ -401,47 +410,49 @@ impl Vault {
         result
     }
 
-    /// Open (creating if needed) the sidecar a lock lives on.
+    /// Where this vault's write lock lives.
     ///
-    /// Opening with `O_CREAT` but no `O_EXCL` is not safe to race here:
-    /// resolving a path one component at a time, as a directory capability
-    /// must, can report `NotFound` for a leaf another process is creating at
-    /// that instant. Splitting the two cases keeps every step a single atomic
-    /// open — take the file if it exists, else claim it with `O_EXCL` — and
-    /// retries when a competing creator makes both steps miss.
-    fn open_lock_file(&self, lock_path: &RelPath, target: &RelPath) -> Result<std::fs::File> {
+    /// Named by the hash of the vault's canonical path, so every process that
+    /// opens the same directory — however it spelled the path — agrees on the
+    /// file, and two different vaults never share one.
+    ///
+    /// It sits in the per-user application-data directory rather than the cache
+    /// directory. A cache is something the system may purge, and a purge that
+    /// unlinks a held lock file is the same divergence that made sidecars
+    /// unsafe to clean up.
+    pub fn lock_path(&self) -> Utf8PathBuf {
+        let key = blake3::hash(self.root.as_str().as_bytes()).to_hex();
+        self.lock_dir.join(format!("{key}.lock"))
+    }
+
+    /// Open (creating if needed) the file this vault's lock lives on.
+    ///
+    /// One plain `O_CREAT` open, which is all that is needed: on an absolute
+    /// path this is a single atomic syscall, so every racing process either
+    /// creates the file or opens the one that already exists, and all of them
+    /// end up on the same inode.
+    ///
+    /// That was not true when the lock lived inside the vault. A directory
+    /// capability resolves a path one component at a time, so `O_CREAT` alone
+    /// was not atomic there and could report `NotFound` for a leaf another
+    /// writer was creating at that instant — which surfaced to users as a bogus
+    /// NOT_FOUND on a perfectly good write, and needed a retry loop to absorb.
+    fn open_lock_file(&self, target: &RelPath) -> Result<std::fs::File> {
         let context = format!("lock {target}");
+        let lock_path = self.lock_path();
 
-        let mut existing = OpenOptions::new();
-        existing.read(true).write(true);
-        let mut claim = OpenOptions::new();
-        claim.read(true).write(true).create_new(true);
-
-        for _ in 0..LOCK_OPEN_ATTEMPTS {
-            match self.dir.open_with(lock_path.as_str(), &existing) {
-                Ok(file) => return Ok(file.into_std()),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => return Err(Error::from_io_path(&context, &err)),
-            }
-
-            match self.dir.open_with(lock_path.as_str(), &claim) {
-                Ok(file) => return Ok(file.into_std()),
-                // Another process created it first, or is creating it right
-                // now; either way it exists on the next pass.
-                Err(err)
-                    if matches!(
-                        err.kind(),
-                        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotFound
-                    ) => {}
-                Err(err) => return Err(Error::from_io_path(&context, &err)),
-            }
-            std::thread::yield_now();
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| Error::from_io(&context, &err))?;
         }
 
-        Err(Error::io_error(format!(
-            "could not acquire a lock for \"{target}\" after {LOCK_OPEN_ATTEMPTS} attempts"
-        ))
-        .with_detail("path", target.as_str()))
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|err| Error::from_io(&context, &err))
     }
 
     /// Flush a directory entry so a rename or create survives a crash.
@@ -491,7 +502,8 @@ fn acquire(file: &std::fs::File, target: &RelPath, wait_limit: Duration) -> Resu
             Ok(false) if Instant::now() < deadline => std::thread::sleep(LOCK_POLL_INTERVAL),
             Ok(false) => {
                 return Err(Error::io_error(format!(
-                    "another process has held the lock on \"{target}\" for more than {} seconds",
+                    "another process has been writing to this vault for more than {} seconds; \
+                     \"{target}\" was not written",
                     wait_limit.as_secs_f32()
                 ))
                 .with_detail("path", target.as_str()))
@@ -499,6 +511,48 @@ fn acquire(file: &std::fs::File, target: &RelPath, wait_limit: Duration) -> Resu
             Err(err) => return Err(Error::from_io(&format!("lock {target}"), &err)),
         }
     }
+}
+
+/// Resolve a vault path to its canonical form.
+///
+/// The lock key has to be one both processes compute identically, and a path as
+/// typed is not that: `~/vault`, `./vault`, and a symlink to it are three
+/// spellings of one directory.
+fn canonicalize(root: &Utf8Path) -> Result<Utf8PathBuf> {
+    let resolved = std::fs::canonicalize(root.as_std_path())
+        .map_err(|err| Error::from_io("resolve vault path", &err))?;
+    Utf8PathBuf::from_path_buf(resolved)
+        .map_err(|_| Error::invalid_input("vault path is not valid UTF-8"))
+}
+
+/// Where write locks live when the caller has not chosen somewhere.
+///
+/// Application data rather than cache: the system may purge a cache, and a
+/// purge that unlinks a lock file some process is holding would leave the next
+/// writer locking a different inode — the divergence that makes lock files
+/// unsafe to remove at all. `HEIMDALL_LOCK_DIR` overrides it for a sandboxed
+/// deployment with no writable home.
+fn default_lock_dir() -> Utf8PathBuf {
+    if let Some(raw) = std::env::var_os("HEIMDALL_LOCK_DIR") {
+        if let Ok(path) = Utf8PathBuf::from_path_buf(raw.into()) {
+            return path;
+        }
+    }
+    // A test run must never write into the developer's real application data.
+    // Integration tests pass a directory explicitly; this covers the unit tests
+    // in this crate, which open vaults from a dozen different modules.
+    if cfg!(test) {
+        return Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .unwrap_or_else(|_| Utf8PathBuf::from("/tmp"))
+            .join("heimdall-test-locks");
+    }
+    let base = dirs::data_local_dir()
+        .and_then(|path| Utf8PathBuf::from_path_buf(path).ok())
+        .unwrap_or_else(|| {
+            Utf8PathBuf::from_path_buf(std::env::temp_dir())
+                .unwrap_or_else(|_| Utf8PathBuf::from("/tmp"))
+        });
+    base.join("heimdall").join("locks")
 }
 
 /// `cap-std` addresses the directory itself as `.`, not as an empty path.
@@ -668,10 +722,10 @@ mod tests {
         let path = rel("memory.md");
         vault.atomic_write(&path, b"one").unwrap();
 
-        let value = vault.with_file_lock(&path, || Ok(7)).unwrap();
+        let value = vault.with_write_lock(&path, || Ok(7)).unwrap();
         assert_eq!(value, 7);
         // Re-acquiring immediately proves the previous lock was dropped.
-        vault.with_file_lock(&path, || Ok(())).unwrap();
+        vault.with_write_lock(&path, || Ok(())).unwrap();
     }
 
     #[test]
@@ -681,37 +735,41 @@ mod tests {
         vault.atomic_write(&path, b"one").unwrap();
 
         let err = vault
-            .with_file_lock(&path, || Err::<(), _>(Error::internal("boom")))
+            .with_write_lock(&path, || Err::<(), _>(Error::internal("boom")))
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::InternalError);
-        vault.with_file_lock(&path, || Ok(())).unwrap();
+        vault.with_write_lock(&path, || Ok(())).unwrap();
     }
 
     #[test]
     fn waiting_for_a_stuck_holder_gives_up_instead_of_hanging() {
-        let (tmp, vault) = temp_vault();
+        let (_tmp, vault) = temp_vault();
         let path = rel("memory.md");
         vault.atomic_write(&path, b"one").unwrap();
 
-        // Hold the sidecar the way a wedged process would, then prove a second
-        // waiter reports the situation rather than blocking forever.
-        let sidecar = tmp.path().join(".memory.md.lock");
-        let holder = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&sidecar)
-            .unwrap();
+        // Hold the file this vault actually locks, the way a wedged process
+        // would, then prove a waiter reports it rather than blocking forever.
+        // Going through `lock_path` is the point: a test that held some other
+        // file would pass while proving nothing.
+        let lock = vault.lock_path();
+        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        let open = |create: bool| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(create)
+                .truncate(false)
+                .open(&lock)
+                .unwrap()
+        };
+        let holder = open(true);
         holder.lock_exclusive().unwrap();
 
-        let waiter = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&sidecar)
-            .unwrap();
+        // `acquire` directly rather than `with_write_lock`, with a deadline of
+        // milliseconds: the production limit is ten seconds, and a test that
+        // waits it out is ten seconds every run to learn nothing extra.
+        let waiter = open(false);
         let err = acquire(&waiter, &path, Duration::from_millis(50)).unwrap_err();
-
         assert_eq!(err.code, ErrorCode::IoError);
         assert_eq!(err.details["path"], "memory.md");
 
@@ -721,11 +779,63 @@ mod tests {
     }
 
     #[test]
-    fn lock_sidecars_are_never_listed_as_content() {
+    #[cfg(unix)]
+    fn one_vault_named_two_ways_shares_one_lock() {
+        // The whole point of canonicalising the root. Two processes naming one
+        // vault differently must derive the same lock file; if they did not,
+        // each would take a lock of its own, exclude nothing, and the lost
+        // write the lock exists to prevent would be back.
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("vault");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("by-another-name");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let direct = Vault::open(&Utf8PathBuf::from_path_buf(real).unwrap()).unwrap();
+        let through_link = Vault::open(&Utf8PathBuf::from_path_buf(link).unwrap()).unwrap();
+
+        assert_eq!(direct.lock_path(), through_link.lock_path());
+    }
+
+    #[test]
+    fn two_vaults_never_share_a_lock() {
+        let (_a, one) = temp_vault();
+        let (_b, other) = temp_vault();
+        assert_ne!(one.lock_path(), other.lock_path());
+    }
+
+    #[test]
+    fn locking_writes_nothing_into_the_vault() {
+        // The reason the lock moved out of the vault at all. A sidecar could
+        // never be safely removed, so every note ever written left one behind.
+        let (tmp, vault) = temp_vault();
+        let path = rel("memory.md");
+        vault.atomic_write(&path, b"one").unwrap();
+        vault.with_write_lock(&path, || Ok(())).unwrap();
+
+        let mut stack = vec![tmp.path().to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                assert!(!name.ends_with(".lock"), "left {} in the vault", entry.path().display());
+                if entry.file_type().unwrap().is_dir() {
+                    stack.push(entry.path());
+                }
+            }
+        }
+        assert!(vault.lock_path().exists(), "the lock itself must exist, outside the vault");
+    }
+
+    #[test]
+    fn legacy_lock_sidecars_are_never_listed_as_content() {
+        // Heimdall no longer writes these, but a vault used before the lock
+        // moved out still has one beside every note it ever wrote, and those
+        // must stay invisible rather than appearing as content.
         let (_tmp, vault) = temp_vault();
         let path = rel("memory.md");
         vault.atomic_write(&path, b"one").unwrap();
-        vault.with_file_lock(&path, || Ok(())).unwrap();
+        vault.atomic_write(&rel(".memory.md.lock"), b"").unwrap();
 
         let listable: Vec<_> = vault
             .children(&RelPath::root())

@@ -93,13 +93,9 @@ pub fn move_path(vault: &Vault, request: MovePathRequest) -> Result<MovePathResp
         .with_detail("path", parent.as_str()));
     }
 
-    // The destination's lock is what makes "does not already exist" and "rename
-    // onto it" one decision rather than two.
-    vault.with_file_lock(&to, || vault.rename_no_replace(&from, &to))?;
-
-    if !is_dir {
-        vault.discard_lock_sidecar(&from);
-    }
+    // The write lock is what makes "does not already exist" and "rename onto it"
+    // one decision rather than two.
+    vault.with_write_lock(&to, || vault.rename_no_replace(&from, &to))?;
 
     Ok(MovePathResponse {
         from: from.to_string(),

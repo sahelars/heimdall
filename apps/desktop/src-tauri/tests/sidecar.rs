@@ -12,12 +12,28 @@ use serde_json::json;
 use heimdall_desktop_lib::cli_bridge::{self, sidecar_path};
 
 fn staged() -> PathBuf {
+    isolate_lock_dir();
     let path = sidecar_path();
     assert!(
         path.is_file(),
         "the sidecar is not staged at {path:?}; run `npm run sidecar` first"
     );
     path
+}
+
+/// Keep the forked sidecars out of the real application-data directory.
+///
+/// The bridge spawns the CLI without a shell and without touching the
+/// environment, so the child inherits this process's. Setting it once, behind a
+/// `OnceLock`, is what makes that safe to do from tests running in parallel.
+fn isolate_lock_dir() {
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        std::env::set_var(
+            "HEIMDALL_LOCK_DIR",
+            std::env::temp_dir().join("heimdall-test-locks"),
+        );
+    });
 }
 
 fn temp_root() -> tempfile::TempDir {

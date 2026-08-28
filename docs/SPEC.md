@@ -161,7 +161,7 @@ never chosen), while `src/**/*.test.ts` covers the screens and the visual rules.
 
 Recommended baseline dependencies:
 
-- Rust: `clap`, `serde`, `serde_json`, `thiserror`, `camino`, `cap-std`, `blake3`, `fs4`, `include_dir`, `time`, and `tempfile`. (`fs4` is the maintained fork of the unmaintained `fs2`.) `time` supplies the UTC formatting that entry filenames and frontmatter require.
+- Rust: `clap`, `serde`, `serde_json`, `thiserror`, `camino`, `cap-std`, `blake3`, `dirs`, `fs4`, `include_dir`, `time`, and `tempfile`. (`fs4` is the maintained fork of the unmaintained `fs2`.) `dirs` locates the per-user application-data directory the write lock lives in (§14). `time` supplies the UTC formatting that entry filenames and frontmatter require.
 - `tokio` belongs to `heimdall-cli` only, where `rmcp` needs it. `heimdall-core` is synchronous: its work is filesystem-bound, and a blocking API keeps it testable without a runtime. The MCP adapter runs each core call on a blocking worker rather than colouring the domain layer async.
 - `schemars` is a core dependency so tool schemas derive from the domain types themselves (§12).
 - MCP: the official Rust SDK, `rmcp`, pinned to a tested release and protocol baseline (`=3.1.3`, protocol `2025-11-25`).
@@ -294,7 +294,7 @@ vault and is bounded by node, per-file, and total-byte caps rather than by pagin
 - Do not hash file content during listing. Revisions are returned by reads and successful creates/writes.
 - `list_documents` is non-recursive by default. Recursive listing requires an explicit flag, defaults to a depth of 4, and has a maximum depth of 16.
 - Documents sort by relative path, byte-wise, over the whole result set rather than by traversal order — that total order is what makes "resume strictly after this path" well defined. Entries sort newest first, breaking ties by filename. Memories list the main memory first, then extended memories by filename.
-- `list_documents` returns directories and `.md` files. Vaults may hold other files, but V1 exposes no operation that can read one, so listing them would be a dead end. Hidden entries (anything beginning with `.`), filesystem debris such as `.DS_Store`, and Heimdall's own `.lock` and write-temp sidecars are never listed.
+- `list_documents` returns directories and `.md` files. Vaults may hold other files, but V1 exposes no operation that can read one, so listing them would be a dead end. Hidden entries (anything beginning with `.`), filesystem debris such as `.DS_Store`, Heimdall's write-temp sidecars, and the `.lock` sidecars older versions left beside notes are never listed.
 - `list_documents` uses stateless continuation: when another page exists, the response includes `next_cursor`, which is simply the last relative path returned. The next call passes it as `cursor` and listing resumes strictly after that path under the same parameters. A malformed cursor is `INVALID_INPUT`. There is no server-side cursor state to invalidate.
 - As a safety guard, one `list_documents` call resolves at most 10,000 filesystem entries; if the guard is hit, return the partial page with `next_cursor`. Only entries beyond the cursor count against the guard: ground a previous page already covered was paid for by that page, and charging for it again would make the far end of a large vault permanently unreachable. Entries a call can reject on name alone — hidden, debris, not Markdown, already behind the cursor — cost nothing.
 - `list_memories` and `list_entries` do not paginate. Their folders are small and bounded in practice; they honor `limit` (default 50, maximum 200) and clients may raise `limit` when they need more.
@@ -478,7 +478,7 @@ Behavior:
 - Replace or create exactly one file inside `aios/memories/extended/` when `extended` is a safe Markdown filename.
 - Require `expected_revision` for an existing file.
 - Require explicit JSON `null` as `expected_revision` when creating a new extended memory.
-- Compare the revision again while holding a per-file cross-process lock.
+- Compare the revision again while holding the vault's cross-process write lock.
 - On a mismatch, return `REVISION_CONFLICT` with the current revision but not the current content.
 - Write to a temporary sibling, flush, atomically rename, and return `new_revision`.
 - Never truncate, merge, or summarize automatically.
@@ -653,9 +653,14 @@ Deferred features must preserve the same vault restrictions, limits, revisions, 
 - Validate a new destination beneath an already validated parent.
 - Sort reads and listings deterministically.
 - Use temporary sibling files, flush them, and atomically rename.
-- Use cross-process per-file locks (`fs4`) around revision comparison and replacement. The lock lives on a sidecar `.<filename>.lock`, not on the target: replacing a file renames a new inode over it, which would leave each writer holding a lock on a different file. Acquire the sidecar with a plain open, falling back to `O_EXCL` creation and retrying — resolving a path one component at a time can report `NotFound` for a leaf another writer is creating at that instant, so `O_CREAT` without `O_EXCL` is not safe to race.
+- Hold one cross-process write lock (`fs4`) per vault around revision comparison and replacement. Optimistic concurrency only holds if comparing and replacing are one indivisible step; without it two writers both read revision A, both find it current, and both write, and one edit is lost with no error.
+- The lock lives **outside the vault**, in the per-user application-data directory, in a file named by a hash of the vault's canonical path. It cannot live on the target, because replacing a file renames a new inode over it and each writer would hold a lock on a different file. It must not live on a sidecar beside the target either: a sidecar can never be safely removed — unlinking one another process is about to open leaves the two locking different inodes — so every note ever written left a `.lock` file in the user's vault. A vault holds the user's Markdown and nothing of Heimdall's.
+- Application data, not a cache directory: a cache is something the system may purge, and a purge that unlinks a held lock file is the same divergence that makes lock files unsafe to delete. `HEIMDALL_LOCK_DIR` overrides the location for a deployment with no writable home.
+- The vault root is canonicalized when the vault is opened, because the lock key is what two processes must agree on and a path as typed is not that — `~/vault`, `./vault`, and a symlink to it are three spellings of one directory that would otherwise take three separate locks and exclude nothing.
+- One lock per vault is coarser than one per file and therefore strictly stronger, so it cannot introduce a race. A holder only hashes some bytes and renames a temp file, so serialising a vault's writes costs nothing at the rate they arrive. It does mean a locking operation must never be called from inside another one: with a single lock that is a self-deadlock rather than merely redundant.
+- Write temps are the one thing Heimdall does put in a vault, and unavoidably: an atomic write lands in a temporary sibling and is renamed into place, and a rename cannot cross filesystems. It is removed on every path including failure, so one survives only a kill or a power loss.
 - Bound the wait for a contended lock (10 seconds) rather than blocking indefinitely. Every holder does short, bounded work, so exceeding that means another process is stuck, and reporting `IO_ERROR` beats inheriting its hang — a server cannot promise a bounded operation duration on top of an unbounded wait.
-- A rename never replaces an existing destination. `cap-std` exposes no `RENAME_NOREPLACE`, so the check and the rename both happen under the destination's file lock, and a collision is `ALREADY_EXISTS`. This serialises Heimdall processes against each other, not against another editor writing into the same vault — the same weak consistency §8 already accepts for listings.
+- A rename never replaces an existing destination. `cap-std` exposes no `RENAME_NOREPLACE`, so the check and the rename both happen under the vault's write lock, and a collision is `ALREADY_EXISTS`. This serialises Heimdall processes against each other, not against another editor writing into the same vault — the same weak consistency §8 already accepts for listings.
 - Deletion moves content into `.trash/`; nothing is ever unlinked. Collisions there take numeric suffixes, exactly as entry filenames do.
 - Compute revisions from exact stored bytes after a successful write.
 - Apply read-size, file-count, stdin-size, and execution-time limits.

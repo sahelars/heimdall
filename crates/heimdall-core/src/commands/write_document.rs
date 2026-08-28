@@ -70,7 +70,7 @@ pub fn write_document(
         .with_detail("parameter", "expected_revision"));
     };
 
-    let (new_revision, created) = vault.with_file_lock(&path, || {
+    let (new_revision, created) = vault.with_write_lock(&path, || {
         let exists = vault.is_file(&path);
 
         match (&expected_revision, exists) {

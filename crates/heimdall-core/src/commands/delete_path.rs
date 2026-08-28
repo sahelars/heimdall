@@ -102,18 +102,13 @@ pub fn delete_path(vault: &Vault, request: DeletePathRequest) -> Result<DeletePa
         };
         let candidate = destination_parent.join(&candidate_name);
 
-        // The candidate's lock makes "not taken" and "take it" one decision, so
-        // two deletes of same-named notes cannot pick the same trash slot.
-        let outcome = vault.with_file_lock(&candidate, || {
+        // The write lock makes "not taken" and "take it" one decision, so two
+        // deletes of same-named notes cannot pick the same trash slot.
+        let outcome = vault.with_write_lock(&candidate, || {
             vault.rename_no_replace(&path, &candidate)
         });
         match outcome {
             Ok(()) => {
-                // The note is gone from its folder, so the lock sidecar that
-                // guarded it there will never be opened again.
-                if !is_dir {
-                    vault.discard_lock_sidecar(&path);
-                }
                 return Ok(DeletePathResponse {
                     path: path.to_string(),
                     trashed_to: candidate.to_string(),
