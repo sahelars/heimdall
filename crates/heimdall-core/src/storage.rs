@@ -88,8 +88,9 @@ impl Vault {
 
     /// Verify the managed `aios/` structure exists, or explain how to fix it.
     ///
-    /// Both `agents.md` and `AGENTS.md` are accepted (SPEC §6); a vault created
-    /// on a case-insensitive filesystem keeps working when copied to Linux.
+    /// The managed directories plus the main memory are the whole skeleton: the
+    /// memory is the one file a vault must have, because it is where a user's
+    /// standing instructions to their assistant live (SPEC §6).
     pub fn ensure_initialized(&self) -> Result<()> {
         let mut missing: Vec<String> = Vec::new();
 
@@ -97,9 +98,6 @@ impl Vault {
             if !self.dir.is_dir(dir) {
                 missing.push(format!("{dir}/"));
             }
-        }
-        if self.agents_file().is_none() {
-            missing.push(paths::AGENTS_FILE_CANDIDATES[0].to_string());
         }
         if !self.dir.is_file(paths::MAIN_MEMORY_FILE) {
             missing.push(paths::MAIN_MEMORY_FILE.to_string());
@@ -113,14 +111,6 @@ impl Vault {
              (or initialize it from the desktop app) to add the missing managed content",
         )
         .with_detail("missing", missing))
-    }
-
-    /// The agent instructions path actually present in this vault, if any.
-    pub fn agents_file(&self) -> Option<RelPath> {
-        paths::AGENTS_FILE_CANDIDATES
-            .iter()
-            .find(|candidate| self.dir.is_file(candidate))
-            .and_then(|candidate| RelPath::parse(candidate).ok())
     }
 
     pub fn exists(&self, path: &RelPath) -> bool {
@@ -272,8 +262,8 @@ impl Vault {
     /// responsible for holding that lock.
     ///
     /// Being honest about what this does and does not guarantee: it serializes
-    /// Heimdall processes against each other, not against Obsidian writing into
-    /// the same vault. That boundary is already accepted — SPEC §8 says
+    /// Heimdall processes against each other, not against another editor writing
+    /// into the same vault. That boundary is already accepted — SPEC §8 says
     /// listings are weakly consistent while files change.
     pub fn rename_no_replace(&self, from: &RelPath, to: &RelPath) -> Result<()> {
         if self.entry_exists(to) {
@@ -552,20 +542,16 @@ mod tests {
     }
 
     #[test]
-    fn either_agents_filename_satisfies_initialization() {
-        for agents in ["aios/agents.md", "aios/AGENTS.md"] {
-            let (_tmp, vault) = temp_vault();
-            for dir in paths::REQUIRED_DIRS {
-                vault.create_dir_all(&rel(dir)).unwrap();
-            }
-            vault.atomic_write(&rel(agents), b"See [[memory]]").unwrap();
-            vault
-                .atomic_write(&rel(paths::MAIN_MEMORY_FILE), b"# Memory\n")
-                .unwrap();
-
-            vault.ensure_initialized().unwrap();
-            assert!(vault.agents_file().is_some());
+    fn the_managed_skeleton_satisfies_initialization() {
+        let (_tmp, vault) = temp_vault();
+        for dir in paths::REQUIRED_DIRS {
+            vault.create_dir_all(&rel(dir)).unwrap();
         }
+        vault
+            .atomic_write(&rel(paths::MAIN_MEMORY_FILE), b"# Memory\n")
+            .unwrap();
+
+        vault.ensure_initialized().unwrap();
     }
 
     #[test]

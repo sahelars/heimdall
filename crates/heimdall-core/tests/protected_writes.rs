@@ -1,20 +1,18 @@
 //! Human edits to protected content (SPEC §6, §15, §17).
 //!
 //! The desktop shows `aios/` in its file tree, so a human can open their own
-//! agent instructions, memories, and entries — and must be able to fix them.
-//! What that cannot do is break the invariants the protected tree exists to
-//! hold: agent instructions keep whichever spelling the vault already uses, and
-//! an entry's `created_at` and `type` stay the ones Heimdall wrote.
+//! memories and entries — and must be able to fix them. What that cannot do is
+//! break the invariants the protected tree exists to hold: an entry's
+//! `created_at` and `type` stay the ones Heimdall wrote.
 
 use camino::Utf8PathBuf;
 use heimdall_core::commands::{
-    create_entry, list_entries, read_agents, read_entry, write_agents, write_entry,
-    CreateEntryRequest, EntryKind, ListEntriesRequest, ReadAgentsRequest, ReadEntryRequest,
-    WriteAgentsRequest, WriteEntryRequest,
+    create_entry, list_entries, read_entry, write_entry, CreateEntryRequest, EntryKind,
+    ListEntriesRequest, ReadEntryRequest, WriteEntryRequest,
 };
 use heimdall_core::errors::ErrorCode;
 use heimdall_core::paths::RelPath;
-use heimdall_core::{limits, template, Vault};
+use heimdall_core::{template, Vault};
 
 fn vault() -> (tempfile::TempDir, Vault) {
     let dir = tempfile::tempdir().unwrap();
@@ -26,100 +24,6 @@ fn vault() -> (tempfile::TempDir, Vault) {
 
 fn rel(raw: &str) -> RelPath {
     RelPath::parse(raw).unwrap()
-}
-
-/// A vault whose agent instructions use one specific spelling.
-fn vault_with_agents_named(spelling: &str) -> (tempfile::TempDir, Vault) {
-    let (dir, vault) = vault();
-    for candidate in ["aios/agents.md", "aios/AGENTS.md"] {
-        let path = rel(candidate);
-        if vault.is_file(&path) && candidate != spelling {
-            vault.remove_file(&path).unwrap();
-        }
-    }
-    vault.atomic_write(&rel(spelling), b"original instructions\n").unwrap();
-    (dir, vault)
-}
-
-/// How many Markdown files sit directly inside `aios/`.
-fn agents_files(vault: &Vault) -> Vec<String> {
-    vault
-        .children(&rel("aios"))
-        .unwrap()
-        .into_iter()
-        .filter(|child| !child.is_dir && child.name.ends_with(".md"))
-        .map(|child| child.name)
-        .collect()
-}
-
-fn agents_text(vault: &Vault) -> String {
-    read_agents(vault, ReadAgentsRequest::default()).unwrap().content
-}
-
-#[test]
-fn agent_instructions_are_written_to_whichever_spelling_the_vault_already_uses() {
-    for spelling in ["aios/agents.md", "aios/AGENTS.md"] {
-        let (_dir, vault) = vault_with_agents_named(spelling);
-        let before = read_agents(&vault, ReadAgentsRequest::default()).unwrap();
-
-        write_agents(
-            &vault,
-            WriteAgentsRequest {
-                content: "rewritten instructions\n".into(),
-                expected_revision: before.revision,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(agents_text(&vault), "rewritten instructions\n");
-        // The load-bearing assertion: a write must never create the other
-        // spelling. On Linux that would orphan the user's real instructions,
-        // because `agents_file()` prefers the lowercase name.
-        assert_eq!(agents_files(&vault), vec![spelling.rsplit('/').next().unwrap()], "{spelling}");
-    }
-}
-
-#[test]
-fn agent_instructions_are_revision_guarded() {
-    let (_dir, vault) = vault_with_agents_named("aios/AGENTS.md");
-    let stale = read_agents(&vault, ReadAgentsRequest::default()).unwrap().revision;
-
-    write_agents(
-        &vault,
-        WriteAgentsRequest {
-            content: "first edit\n".into(),
-            expected_revision: stale.clone(),
-        },
-    )
-    .unwrap();
-
-    let error = write_agents(
-        &vault,
-        WriteAgentsRequest {
-            content: "second edit\n".into(),
-            expected_revision: stale,
-        },
-    )
-    .unwrap_err();
-    assert_eq!(error.code, ErrorCode::RevisionConflict);
-    assert_eq!(agents_text(&vault), "first edit\n");
-}
-
-#[test]
-fn agent_instructions_over_the_limit_are_refused_before_anything_is_written() {
-    let (_dir, vault) = vault_with_agents_named("aios/AGENTS.md");
-    let revision = read_agents(&vault, ReadAgentsRequest::default()).unwrap().revision;
-
-    let error = write_agents(
-        &vault,
-        WriteAgentsRequest {
-            content: "x".repeat(limits::AGENTS_MAX_BYTES + 1),
-            expected_revision: revision,
-        },
-    )
-    .unwrap_err();
-    assert_eq!(error.code, ErrorCode::LimitExceeded);
-    assert_eq!(agents_text(&vault), "original instructions\n");
 }
 
 /// Create one entry and return its id and current content.
@@ -205,7 +109,7 @@ fn an_entry_edit_may_add_the_users_own_frontmatter_keys() {
     let (id, original) = seed_entry(&vault, EntryKind::Notification);
     let revision = entry_revision(&vault, EntryKind::Notification, &id);
 
-    // Exactly what Obsidian's property editor produces: a `links:` list beside
+    // Exactly what a property editor produces: a `links:` list beside
     // the two fields Heimdall owns.
     let edited = original.replacen(
         "---\n\n",

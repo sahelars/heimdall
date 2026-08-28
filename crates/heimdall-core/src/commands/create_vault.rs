@@ -126,7 +126,7 @@ mod tests {
         assert_eq!(response.path, root.join("demo"));
         let vault = Vault::open(&response.path).unwrap();
         vault.ensure_initialized().unwrap();
-        assert!(vault.is_file(&RelPath::parse(".obsidian/app.json").unwrap()));
+        assert!(vault.is_file(&RelPath::parse("aios/memories/memory.md").unwrap()));
         assert!(vault.is_file(&RelPath::parse("ideas/hello_world.md").unwrap()));
     }
 
@@ -140,12 +140,14 @@ mod tests {
     #[test]
     fn an_existing_vault_gets_only_the_missing_aios_structure() {
         let (_tmp, root) = root_dir();
-        let existing = root.join("obsidian-vault");
-        std::fs::create_dir_all(existing.join(".obsidian")).unwrap();
-        std::fs::write(existing.join(".obsidian/app.json"), b"{\"mine\":true}").unwrap();
+        let existing = root.join("existing-vault");
+        // A hidden folder as well as an ordinary note: initialization must not
+        // reach into whatever other tool owns the vault's configuration.
+        std::fs::create_dir_all(existing.join(".config")).unwrap();
+        std::fs::write(existing.join(".config/app.json"), b"{\"mine\":true}").unwrap();
         std::fs::write(existing.join("my_note.md"), b"my content").unwrap();
 
-        let response = create(&root, "obsidian-vault").unwrap();
+        let response = create(&root, "existing-vault").unwrap();
         assert_eq!(response.mode, CreateMode::Initialized);
 
         let vault = Vault::open(&existing).unwrap();
@@ -156,7 +158,7 @@ mod tests {
             b"my content"
         );
         assert_eq!(
-            vault.read(&RelPath::parse(".obsidian/app.json").unwrap()).unwrap(),
+            vault.read(&RelPath::parse(".config/app.json").unwrap()).unwrap(),
             b"{\"mine\":true}"
         );
         assert!(!vault.exists(&RelPath::parse("ideas").unwrap()));

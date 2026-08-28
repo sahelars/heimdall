@@ -6,7 +6,7 @@
  * renames the file, and renaming the file changes the heading, because they are
  * the same fact shown once.
  *
- * That is Obsidian's model too, and it is why this is an editable heading rather
+ * That is the conventional model, and it is why this is an editable heading rather
  * than a text field: it should read as the title of the note, not as a form.
  */
 

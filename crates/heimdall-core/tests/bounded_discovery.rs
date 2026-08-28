@@ -120,10 +120,10 @@ mod graph_bounds {
 
         assert_eq!(response.nodes.len(), GRAPH_MAX_NODES);
         assert!(response.truncated.node_cap_hit);
-        // The aios/ files are notes too, so the overflow is the excess plus them.
+        // The main memory is a note too, so the overflow is the excess plus it.
         assert_eq!(
             response.nodes.len() + response.truncated.nodes_omitted,
-            GRAPH_MAX_NODES + over + 2
+            GRAPH_MAX_NODES + over + 1
         );
     }
 

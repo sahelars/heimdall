@@ -2,7 +2,7 @@
  * Splitting a note into its frontmatter and its body, and putting it back.
  *
  * Edits go through `yaml`'s `Document` rather than a plain object, because the
- * Properties panel changes one key of a block that an agent — or Obsidian —
+ * Properties panel changes one key of a block that an agent — or another editor —
  * wrote. Round-tripping through a JS object would reformat every other key on
  * the first edit, which in a vault three things write to is a change signature
  * nobody asked for.
@@ -112,7 +112,7 @@ function plain(node: unknown): unknown {
  * Keys that hold a list of things rather than one thing.
  *
  * The vault template's own `types.json` registers `links` as `multitext`, and
- * `tags` and `aliases` are Obsidian's built-ins. Anything else defaults to a
+ * `tags` and `aliases` are the conventional built-ins. Anything else defaults to a
  * scalar, which is what a new property usually wants to be.
  */
 const LIST_KEYS = ["links", "tags", "aliases", "cssclasses"];

@@ -42,13 +42,13 @@ impl Scaffold {
     }
 }
 
-/// Write the complete template: `.obsidian/`, `aios/`, and the example notes.
+/// Write the complete template: the `aios/` structure and the example notes.
 pub fn scaffold_full(vault: &Vault) -> Result<Scaffold> {
     scaffold(vault, false)
 }
 
-/// Add only the managed `aios/` structure, leaving every existing note,
-/// `.obsidian/`, and any other content untouched.
+/// Add only the managed `aios/` structure, leaving every existing note and any
+/// other content untouched.
 pub fn scaffold_aios_only(vault: &Vault) -> Result<Scaffold> {
     scaffold(vault, true)
 }
@@ -145,11 +145,9 @@ mod tests {
     }
 
     #[test]
-    fn the_template_is_embedded_including_the_obsidian_dotdir() {
-        // include_dir must carry dot-directories; if it ever stops, new vaults
-        // would silently lose their Obsidian settings.
-        assert!(TEMPLATE.get_file(".obsidian/app.json").is_some());
+    fn the_template_is_embedded() {
         assert!(TEMPLATE.get_dir("aios").is_some());
+        assert!(TEMPLATE.get_file("aios/memories/memory.md").is_some());
     }
 
     #[test]
@@ -158,7 +156,7 @@ mod tests {
         let scaffold = scaffold_full(&vault).unwrap();
 
         vault.ensure_initialized().unwrap();
-        assert!(vault.is_file(&rel(".obsidian/app.json")));
+        assert!(vault.is_file(&rel("aios/memories/memory.md")));
         assert!(vault.is_file(&rel("ideas/hello_world.md")));
         for dir in paths::REQUIRED_DIRS {
             assert!(vault.is_dir(&rel(dir)), "{dir} missing");
@@ -168,20 +166,31 @@ mod tests {
 
     #[test]
     fn filesystem_debris_never_reaches_a_new_vault() {
-        let (_tmp, vault) = temp_vault();
+        // Named paths would go stale the moment the template's shape changed,
+        // and a check for a file that is no longer anywhere in the template
+        // passes without testing anything. Walk what was actually written.
+        let (tmp, vault) = temp_vault();
         scaffold_full(&vault).unwrap();
-        assert!(!vault.exists(&rel(".DS_Store")));
-        assert!(!vault.exists(&rel("aios/.DS_Store")));
-        assert!(!vault.exists(&rel(".obsidian/snippets/.DS_Store")));
+
+        let mut stack = vec![tmp.path().to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                assert!(!paths::is_junk(&name), "debris copied: {}", entry.path().display());
+                if entry.file_type().unwrap().is_dir() {
+                    stack.push(entry.path());
+                }
+            }
+        }
     }
 
     #[test]
-    fn an_aios_only_scaffold_adds_no_notes_and_no_obsidian_settings() {
+    fn an_aios_only_scaffold_adds_no_top_level_content() {
         let (_tmp, vault) = temp_vault();
         scaffold_aios_only(&vault).unwrap();
 
         vault.ensure_initialized().unwrap();
-        assert!(!vault.exists(&rel(".obsidian")));
         assert!(!vault.exists(&rel("ideas")));
         assert!(!vault.exists(&rel("projects")));
     }

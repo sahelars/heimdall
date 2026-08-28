@@ -10,7 +10,6 @@
 
 export type DocumentSource =
   | "document"
-  | "agents"
   | "memory-main"
   | "memory-extended"
   | "entry-conversation"
@@ -20,7 +19,6 @@ const MAIN_MEMORY = "aios/memories/memory.md";
 const EXTENDED_PREFIX = "aios/memories/extended/";
 const CONVERSATIONS_PREFIX = "aios/conversations/";
 const NOTIFICATIONS_PREFIX = "aios/notifications/";
-const AGENTS = ["aios/agents.md", "aios/AGENTS.md"];
 
 /**
  * Compare the way the vault contract does.
@@ -39,7 +37,6 @@ function startsWith(path: string, prefix: string): boolean {
 }
 
 export function sourceOf(path: string): DocumentSource {
-  if (AGENTS.some((candidate) => is(path, candidate))) return "agents";
   if (is(path, MAIN_MEMORY)) return "memory-main";
   if (startsWith(path, EXTENDED_PREFIX)) return "memory-extended";
   if (startsWith(path, CONVERSATIONS_PREFIX)) return "entry-conversation";

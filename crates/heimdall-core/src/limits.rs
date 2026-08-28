@@ -46,14 +46,6 @@ pub const GRAPH_MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 /// dominate the response on its own.
 pub const GRAPH_MAX_LINKS_PER_FILE: usize = 1_000;
 
-/// The largest agent instructions file the client may save.
-///
-/// `AGENTS.md` is always-in-context material like the main memory — the shipped
-/// template's own first line is "MAX 10K TOKENS" — so it gets a bound of the
-/// same character, well above any reasonable instructions file and far below
-/// anything that would bloat a client's context.
-pub const AGENTS_MAX_BYTES: usize = 64 * 1024;
-
 /// The largest body any single stdin read will accept, used by the CLI to bound
 /// input before it reaches a domain limit check.
 pub const STDIN_MAX_BYTES: usize = EXTENDED_MEMORY_MAX_BYTES;

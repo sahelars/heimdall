@@ -106,7 +106,7 @@ mod tests {
         let (_tmp, vault) = vault();
         for id in [
             "../memories/memory.md",
-            "../../agents.md",
+            "../../note.md",
             "sub/entry.md",
             "/etc/passwd.md",
             "entry.txt",

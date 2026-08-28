@@ -1,7 +1,7 @@
 /**
  * Frontmatter round-tripping (SPEC §17).
  *
- * The Properties panel edits one key of a block that agents and Obsidian also
+ * The Properties panel edits one key of a block that agents and other editors also
  * write. Anything it does not touch has to come back byte for byte, or every
  * property edit becomes a diff across the whole block.
  */

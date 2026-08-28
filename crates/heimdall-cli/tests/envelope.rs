@@ -43,7 +43,7 @@ fn a_usage_error_is_distinct_from_a_domain_failure() {
 #[test]
 fn stdout_carries_only_the_envelope() {
     let (_tmp, vault) = new_vault();
-    let output = run(&["read-agents", "--vault", &vault]);
+    let output = run(&["read-memory", "--vault", &vault]);
 
     // Parsing the whole of stdout as one JSON value proves nothing else leaked
     // into it — the discipline the MCP transport will depend on in Phase 2.

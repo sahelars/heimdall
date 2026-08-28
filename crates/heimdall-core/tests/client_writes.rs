@@ -171,10 +171,10 @@ fn document_writes_cannot_reach_protected_content_in_any_casing() {
 #[test]
 fn document_writes_cannot_reach_hidden_folders() {
     let (_dir, vault) = vault();
-    // `.obsidian/` holds the user's Obsidian settings and `.trash/` holds what
-    // they deleted. Neither is content, and neither is listable, so writing
-    // there would create files nothing could ever show again.
-    for path in [".obsidian/app.md", ".trash/ideas/note.md", ".git/config.md"] {
+    // A hidden folder belongs to whatever tool created it, and `.trash/` holds
+    // what the user deleted. Neither is content, and neither is listable, so
+    // writing there would create files nothing could ever show again.
+    for path in [".config/app.md", ".trash/ideas/note.md", ".git/config.md"] {
         let error = write_document(
             &vault,
             WriteDocumentRequest {

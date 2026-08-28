@@ -5,20 +5,20 @@
 
 ## 1. Product definition
 
-Heimdall is an intent-aware MCP layer for Obsidian-compatible Markdown vaults. It lets AI clients work with notes, instructions, durable memories, and entries (conversation summaries and notifications) through constrained domain operations instead of unrestricted filesystem access.
+Heimdall is an intent-aware MCP layer for Markdown vaults. It lets AI clients work with notes, durable memories, and entries (conversation summaries and notifications) through constrained domain operations instead of unrestricted filesystem access.
 
 Heimdall has two independently installable products:
 
 1. **Heimdall CLI** — a headless Rust executable providing direct shell commands and an MCP server. The CLI is the product core; it is fully usable without the desktop application.
-2. **Heimdall Desktop** — a Tauri application with a React, TypeScript, and Vite interface. It both configures the server and works the vault: a file tree, a Markdown editor with preview, and an interactive link graph, alongside vault creation, MCP client configuration, and diagnostics. Vaults remain Obsidian-compatible in both directions — Heimdall writes nothing Obsidian cannot open, and Obsidian remains a perfectly good way to edit the same files.
+2. **Heimdall Desktop** — a Tauri application with a React, TypeScript, and Vite interface. It both configures the server and works the vault: a file tree, a Markdown editor with preview, and an interactive link graph, alongside vault creation, MCP client configuration, and diagnostics. A vault is a folder of plain Markdown files and nothing else, so any Markdown editor remains a perfectly good way to work over the same files.
 
 The desktop application bundles a version-matched CLI and calls it for every domain operation.
 
 ## 2. Terminology
 
-- **Vault** — an Obsidian vault or a user-selected folder inside one. It is the security and content boundary for a Heimdall session.
+- **Vault** — a folder of Markdown files, or a user-selected folder inside one. It is the security and content boundary for a Heimdall session.
 - **Ordinary document** — a Markdown note outside the protected `aios/` folder.
-- **Managed content** — agent instructions, memories, entries, and attachments inside `aios/`.
+- **Managed content** — memories, entries, and attachments inside `aios/`.
 - **Entry** — a create-only, timestamped managed record. V1 has two entry kinds: `conversation` (a compressed conversation summary) and `notification`.
 - **Revision** — a BLAKE3 hash of the exact file bytes, formatted as `blake3:<lowercase-hex>`.
 - **Client operation** — a domain operation the desktop calls directly through the shell CLI and the MCP surface does not expose. `heimdall create` (§7) is the original; the editor's writes and `link_graph` are the rest (§15). The distinction is enforced by the type system, not by convention: a client operation's request and response types derive no `JsonSchema`, and `rmcp` cannot build a tool without one.
@@ -61,7 +61,7 @@ MCP client                         Desktop user
 +---------+--------+
           |
           v
- Obsidian-compatible vaults
+ Markdown vaults
 ```
 
 ### Boundaries
@@ -179,7 +179,6 @@ Recommended baseline dependencies:
     └── <arbitrary files>
 ├── .trash/                     # deleted content; never listed, never read
 └── aios/
-    ├── agents.md               # or AGENTS.md; both spellings are accepted
     ├── memories/
     │   ├── memory.md
     │   └── extended/
@@ -196,13 +195,12 @@ Rules:
 
 - All managed text files use UTF-8 Markdown and the `.md` extension.
 - Vault may contain non-Markdown files.
-- Vault creation and initialization preserve existing Obsidian notes and settings.
+- Vault creation and initialization preserve every existing file, including hidden configuration folders belonging to other tools.
 - Ordinary document operations exclude the entire `aios/` tree. The comparison is case-insensitive: on macOS and Windows `AIOS/notes.md` and `aios/notes.md` are the same file, so a case-sensitive check would let ordinary operations reach protected content.
-- The agent instructions file may be named `agents.md` or `AGENTS.md`. Operations look for the lowercase spelling first and fall back to the uppercase one, so a vault created on a case-insensitive filesystem keeps working when copied to Linux.
 - Only protected-content operations may access `aios/`.
 - V1 does not expose attachment content.
-- Generated Markdown must render normally in Obsidian.
-- Memory links use Obsidian-compatible links, for example:
+- Generated Markdown must render normally in any ordinary Markdown reader.
+- Memory links use wikilinks, for example:
 
 ```markdown
 - [[aios/memories/extended/project_history|Project history]]
@@ -225,7 +223,7 @@ Compressed summary content.
 
 - `type` is `conversation` or `notification` and always matches the folder the entry lives in.
 - Heimdall owns entry frontmatter exclusively. If caller-supplied entry content itself begins with a frontmatter block (a leading `---` line), reject the call with `INVALID_INPUT` and a message explaining that Heimdall adds frontmatter. Never strip, merge, or silently rewrite supplied content.
-- A replace-style entry write (`write_entry`, §15) reads the invariant more precisely than the create rule can. What Heimdall owns is `created_at` and `type`, which must always agree with the filename and the folder; the rest of the block is the user's. So an edit must carry byte-identical values for both owned fields, and any other key — `tags`, a `links` list from Obsidian's property editor — passes through untouched. An entry with no Heimdall frontmatter, such as one copied in by hand, has nothing to preserve and may be edited freely.
+- A replace-style entry write (`write_entry`, §15) reads the invariant more precisely than the create rule can. What Heimdall owns is `created_at` and `type`, which must always agree with the filename and the folder; the rest of the block is the user's. So an edit must carry byte-identical values for both owned fields, and any other key — `tags`, a `links` list from an editor's property panel — passes through untouched. An entry with no Heimdall frontmatter, such as one copied in by hand, has nothing to preserve and may be edited freely.
 - Deleted content moves to `.trash/` at the vault root, mirroring its original folders. The leading dot means it is already excluded from every listing, and mirroring is the only layout in which restoring a file is unambiguous. Emptying the trash is not a Heimdall operation.
 - Filename timestamps and `created_at` both use UTC. The filename pattern is `YYYY-MM-DD_HH-mm-ss.md` derived from the same UTC instant as the RFC 3339 `created_at` value. UTC filenames sort correctly and cannot collide or misorder across DST transitions.
 - On a same-second collision, append `_01`, `_02`, and so on; never overwrite.
@@ -248,12 +246,12 @@ heimdall create <name> [--root <path>] --json
 
 Behavior:
 
-- If the target folder does not exist or is empty, write the complete template verbatim: `.obsidian/` settings, the `aios/` structure, and whatever example notes the template ships. A folder holding only filesystem debris (`.DS_Store` and friends) counts as empty.
+- If the target folder does not exist or is empty, write the complete template verbatim: the `aios/` structure and whatever example notes the template ships. A folder holding only filesystem debris (`.DS_Store` and friends) counts as empty.
 - Whatever `docs/vault-template/` contains is what a new vault receives, so changing the example notes needs no code change. Only the managed container directories are created programmatically — `memories/extended/`, `conversations/`, `notifications/`, and `attachments/` — because an empty directory cannot be embedded or tracked in git. Filesystem debris is never copied.
-- If the target folder already exists and has content (for example an existing Obsidian vault), create only the missing `aios/` structure. Do not add example notes or touch `.obsidian/` or any existing note.
+- If the target folder already exists and has content (for example a folder of notes already in use), create only the missing `aios/` structure. Do not add example notes and do not touch any existing file, hidden or otherwise.
 - Roll back only empty directories created by a failed operation.
 
-The canonical template contents (including the example notes and default `.obsidian/` settings) live in `docs/vault-template/` and are embedded into the binary (for example with `include_dir`) so the CLI needs no runtime assets.
+The canonical template contents (the `aios/` structure and the example notes) live in `docs/vault-template/` and are embedded into the binary (for example with `include_dir`) so the CLI needs no runtime assets. The template writes no editor configuration of any kind: a vault is Markdown files, and whatever tool a user opens them with brings its own settings.
 
 ### MCP configuration
 
@@ -296,7 +294,7 @@ vault and is bounded by node, per-file, and total-byte caps rather than by pagin
 - Do not hash file content during listing. Revisions are returned by reads and successful creates/writes.
 - `list_documents` is non-recursive by default. Recursive listing requires an explicit flag, defaults to a depth of 4, and has a maximum depth of 16.
 - Documents sort by relative path, byte-wise, over the whole result set rather than by traversal order — that total order is what makes "resume strictly after this path" well defined. Entries sort newest first, breaking ties by filename. Memories list the main memory first, then extended memories by filename.
-- `list_documents` returns directories and `.md` files. Vaults may hold other files, but V1 exposes no operation that can read one, so listing them would be a dead end. Hidden entries (anything beginning with `.`, including `.obsidian/`), filesystem debris such as `.DS_Store`, and Heimdall's own `.lock` and write-temp sidecars are never listed.
+- `list_documents` returns directories and `.md` files. Vaults may hold other files, but V1 exposes no operation that can read one, so listing them would be a dead end. Hidden entries (anything beginning with `.`), filesystem debris such as `.DS_Store`, and Heimdall's own `.lock` and write-temp sidecars are never listed.
 - `list_documents` uses stateless continuation: when another page exists, the response includes `next_cursor`, which is simply the last relative path returned. The next call passes it as `cursor` and listing resumes strictly after that path under the same parameters. A malformed cursor is `INVALID_INPUT`. There is no server-side cursor state to invalidate.
 - As a safety guard, one `list_documents` call resolves at most 10,000 filesystem entries; if the guard is hit, return the partial page with `next_cursor`. Only entries beyond the cursor count against the guard: ground a previous page already covered was paid for by that page, and charging for it again would make the far end of a large vault permanently unreachable. Entries a call can reject on name alone — hidden, debris, not Markdown, already behind the cursor — cost nothing.
 - `list_memories` and `list_entries` do not paginate. Their folders are small and bounded in practice; they honor `limit` (default 50, maximum 200) and clients may raise `limit` when they need more.
@@ -363,9 +361,8 @@ V1 is tools-only for broad client compatibility. Tool names remain snake case; s
 |---|---|
 | `list_documents` | Discover ordinary Markdown notes before choosing what to read. Never use it to access `aios/`. |
 | `read_documents` | Read selected, bounded ranges of ordinary notes returned by `list_documents`. |
-| `read_agents` | Read bounded agent instructions from `aios/agents.md`. |
 | `list_memories` | Discover the main memory and extended memory files. |
-| `read_memory` | Read a bounded range from the main memory or one selected extended memory. |
+| `read_memory` | Read a bounded range from the main memory or one selected extended memory. The main memory is where the user's standing instructions live, so read it first. |
 | `list_entries` | Discover conversation summaries and notifications by metadata, filtered by kind. |
 | `read_entry` | Read one selected entry. |
 
@@ -376,12 +373,14 @@ V1 is tools-only for broad client compatibility. Tool names remain snake case; s
 | `write_memory` | Replace the main or one extended memory using an expected revision. Do not use it for ordinary notes or append-only logs. |
 | `create_entry` | Create a new compressed conversation summary or notification. Never replaces an existing entry. |
 
-Nine tools total. Do not add a general `read_file`, `write_file`, or `execute` tool. Vault creation is shell-only (§7).
+Eight tools total. Do not add a general `read_file`, `write_file`, or `execute` tool. Vault creation is shell-only (§7).
+
+There is deliberately no agent-instructions file and no tool to read one. MCP already has a channel for telling a client how to behave — the `instructions` string published at initialization (§12) — and what varies per vault is the user's own durable context, which is the main memory. A third place to say the same thing is a third place to keep in step.
 
 The desktop's client surface is separate, and larger (§15). It is reached only through
 shell subcommands, and its request and response types deliberately derive no
 `JsonSchema` — `rmcp` builds a tool's schemas from those types, so a client operation
-cannot be given a tool without a compile error. "Nine tools" is therefore a property the
+cannot be given a tool without a compile error. "Eight tools" is therefore a property the
 compiler holds, not a promise review has to keep.
 
 ## 10. Tool contracts
@@ -425,19 +424,6 @@ Behavior:
 - Reject directories; callers discover files with `list_documents`.
 - Return each selected range with revision and continuation metadata.
 - Stop before the total byte cap and mark remaining selections as not returned.
-
-### `read_agents`
-
-Input:
-
-```json
-{
-  "start_line": 1,
-  "max_lines": 200
-}
-```
-
-Reads only `aios/agents.md` and returns standard bounded-read metadata.
 
 ### `list_memories`
 
@@ -518,7 +504,7 @@ Input:
 
 - `kind` is required: `conversation` or `notification`.
 - Returns filename (`id`), creation time, and size, newest first. Read a selected entry to obtain its revision.
-- `created_at` comes from the filename, which Heimdall derives from the UTC instant of creation, so a listing costs no file reads. Entry folders are ordinary Obsidian folders and may hold files a user added by hand; those still list, falling back to the filesystem modification time. Nothing a user puts in the vault becomes invisible.
+- `created_at` comes from the filename, which Heimdall derives from the UTC instant of creation, so a listing costs no file reads. Entry folders are ordinary folders and may hold files a user added by hand; those still list, falling back to the filesystem modification time. Nothing a user puts in the vault becomes invisible.
 
 ### `read_entry`
 
@@ -635,11 +621,19 @@ Requirements:
 
 ### Server instructions
 
+The `instructions` string returned from `initialize` is how a server tells a client how
+to work with it, and it is the only such channel Heimdall has: there is no instructions
+file for a client to go and find, because a client that had to call a tool to learn the
+rules would already have made its first call without them.
+
 Publish concise server-level instructions equivalent to:
 
-> Heimdall manages one Obsidian-compatible Markdown vault. Ordinary notes live outside `aios/`; protected agent instructions, memories, and entries (conversation summaries and notifications) live inside it. List content before reading it, request only the ranges needed, and follow continuation metadata. Use `write_memory` only for durable memory and always pass the revision returned by the latest read. Use `create_entry` for conversation summaries and notifications; it never replaces existing files.
+> Heimdall manages one Markdown vault. Ordinary notes live outside `aios/`; protected memories and entries (conversation summaries and notifications) live inside it. Read the main memory with `read_memory` at the start of a session: it holds the user's durable context and how they want you to work in this vault. List content before reading it, request only the ranges needed, and follow continuation metadata. Use `write_memory` only for durable memory and always pass the revision returned by the latest read. Use `create_entry` for conversation summaries and notifications; it never replaces existing files.
 
-Every tool also receives a strong description explaining when to use it, what it cannot access, its limits, and whether it mutates content.
+What is fixed for every vault belongs in that string; what varies per vault belongs in
+the main memory, which the string points at. Every tool also receives a strong
+description explaining when to use it, what it cannot access, its limits, and whether it
+mutates content.
 
 ## 13. Roadmap (deferred by design)
 
@@ -661,7 +655,7 @@ Deferred features must preserve the same vault restrictions, limits, revisions, 
 - Use temporary sibling files, flush them, and atomically rename.
 - Use cross-process per-file locks (`fs4`) around revision comparison and replacement. The lock lives on a sidecar `.<filename>.lock`, not on the target: replacing a file renames a new inode over it, which would leave each writer holding a lock on a different file. Acquire the sidecar with a plain open, falling back to `O_EXCL` creation and retrying — resolving a path one component at a time can report `NotFound` for a leaf another writer is creating at that instant, so `O_CREAT` without `O_EXCL` is not safe to race.
 - Bound the wait for a contended lock (10 seconds) rather than blocking indefinitely. Every holder does short, bounded work, so exceeding that means another process is stuck, and reporting `IO_ERROR` beats inheriting its hang — a server cannot promise a bounded operation duration on top of an unbounded wait.
-- A rename never replaces an existing destination. `cap-std` exposes no `RENAME_NOREPLACE`, so the check and the rename both happen under the destination's file lock, and a collision is `ALREADY_EXISTS`. This serialises Heimdall processes against each other, not against Obsidian writing into the same vault — the same weak consistency §8 already accepts for listings.
+- A rename never replaces an existing destination. `cap-std` exposes no `RENAME_NOREPLACE`, so the check and the rename both happen under the destination's file lock, and a collision is `ALREADY_EXISTS`. This serialises Heimdall processes against each other, not against another editor writing into the same vault — the same weak consistency §8 already accepts for listings.
 - Deletion moves content into `.trash/`; nothing is ever unlinked. Collisions there take numeric suffixes, exactly as entry filenames do.
 - Compute revisions from exact stored bytes after a successful write.
 - Apply read-size, file-count, stdin-size, and execution-time limits.
@@ -674,23 +668,23 @@ server is configured. It is a three-pane workspace — file tree, Markdown edito
 preview, link graph — with setup, server configuration, and diagnostics behind a Settings
 modal reached from the application menu.
 
-Obsidian is no longer required for editing, but nothing here replaces it: the vault stays
-Obsidian-compatible in both directions, and the two can be used over the same files.
+No other editor is required, and none is displaced: the vault is plain Markdown, so
+Heimdall and any other Markdown editor can be used over the same files.
 
 ### The workspace
 
 1. **Files** — the whole vault, `aios/` included. Ordinary folders come from `list_documents`; the protected tree can only come from `link_graph`, because ordinary listing excludes `aios/` at every depth by design (§6). New note, new folder, sort order, and collapse-all sit in a toolbar above the tree. A right-click offers rename and delete for ordinary content only: both operations refuse `aios/`, so offering them there would produce nothing but an error. A rename that will break inbound links says how many before it happens, and a delete says where the note is going.
 2. **Note** — a breadcrumb with back/forward history, a source/preview toggle, and an overflow menu. The heading is the filename: there is no separate title to keep in step, so editing the heading renames the file and renaming the file changes the heading. Preview renders the note, shows its YAML frontmatter as a properties table with clickable wikilinks, renders fenced `mermaid` diagrams, and lists linked mentions — the notes that link to this one, each a name to click beside its path and nothing else. The note's own outgoing links are not repeated under it: they are in its text a few lines above, and a second copy is one more list to read past. Source is a Markdown editor with the frontmatter block and heading markers dimmed.
-3. **Graph** — a force-directed graph of the whole vault, built to match Obsidian's. Pan (with inertia), zoom about the pointer, drag a node and watch its neighbours follow, click one to open it. The note being read is drawn in the accent colour; hovering one lights its links and dims everything more than a step away.
+3. **Graph** — a force-directed graph of the whole vault, built to match what a vault graph view does. Pan (with inertia), zoom about the pointer, drag a node and watch its neighbours follow, click one to open it. The note being read is drawn in the accent colour; hovering one lights its links and dims everything more than a step away.
 
    Four details carry most of the resemblance, and each is easy to get wrong:
 
-   - **Node and label size scale with the square root of the zoom**, not with the zoom. Obsidian scales its container by the zoom and counter-scales every node and label by `1/√zoom`; that half-rate growth is the signature of how its graph feels.
+   - **Node and label size scale with the square root of the zoom**, not with the zoom. The container scales by the zoom while every node and label counter-scales by `1/√zoom`; that half-rate growth is the signature of how the graph feels.
    - **Link thickness is constant on screen** at every zoom.
    - **Labels fade in over one octave of zoom** — invisible below `2^(t-1)`, opaque at `2^t`, where `t` is the text fade threshold.
    - **Everything transitions** rather than switching: dimming and colours lerp a tenth of the way per frame.
 
-   The forces are Obsidian's own, translated into d3's units and scaled for a side pane; note that Obsidian pulls toward a point with `forceX`/`forceY` rather than using `forceCenter`, which is a hard recentring translation that would make the graph impossible to drag off-centre. Its `graph.json` stores *slider positions*, not force values, which is why feeding them to d3 directly throws the layout several pane-widths across.
+   The forces are a vault graph view's, translated into d3's units and scaled for a side pane; note that the pull toward a point is `forceX`/`forceY` rather than `forceCenter`, which is a hard recentring translation that would make the graph impossible to drag off-centre. Where such a view stores its settings it stores *slider positions*, not force values, which is why feeding them to d3 directly throws the layout several pane-widths across.
 
    The view is fitted to the graph when the layout settles, and left alone once the user has panned or zoomed themselves. The fit fills 88% of the pane along whichever axis is tighter — not a fixed padding and a magnification cap, which for an ordinary vault left the graph two thirds of the way across a side pane and adrift in it — with a floor on the extent it will magnify, so two linked notes are not blown up into two dots the size of coins. What is measured is the node positions: a long label on an outermost node can run past the edge, and fitting the labels as well collapses the fit back to roughly where it was — in a side pane the longest title decides everything. Node and label sizes follow the fit through the square-root law above, and the label size is set so that at the default fit it reads at the same 12px as the application's other small text. Refitting is flown rather than assigned — the layout settles a second or two after a node is dragged, and moving the camera outright at that moment reads as the graph skipping. Recentre travels the same way, and touching the graph stops the travel. Node positions survive a re-index, so saving a note does not scatter the layout. Whatever the index had to leave out is stated in the pane; a graph that quietly showed most of a vault would make real links look broken.
 
@@ -704,7 +698,7 @@ Reached from **Heimdall → Settings…** (⌘,) in the application menu, as a m
 workspace rather than a screen inside it — these are occasional tasks, and the window
 belongs to the notes. It has four sections:
 
-1. **Vault** — create a new templated vault (`heimdall create`) or select an existing Obsidian vault/scoped folder and initialize its `aios/` structure.
+1. **Vault** — create a new templated vault (`heimdall create`) or select an existing folder of notes and initialize its `aios/` structure.
 2. **Server** — make the MCP server available: show the exact `heimdall mcp --vault ...` command, generate the `mcpServers` JSON snippet, and (with explicit user consent) write it into known client configuration files. Writing merges into the existing configuration rather than replacing it, backs the previous file up first, and saves through a temporary sibling so an interrupted write cannot leave a client with half a file. A second vault gets its own entry name instead of taking over the first one's. Provide a one-click health check that launches the server, performs an MCP handshake, and reports the result.
 3. **Appearance** — System, Light, or Dark. System is the default and is applied by the stylesheet's media query, so the first paint is correct without waiting for JavaScript.
 4. **Diagnostics** — active CLI path and versions, protocol/schema compatibility, configured vault path and initialization status, limits, and recent actionable errors.
@@ -735,13 +729,12 @@ shell subcommands the desktop calls, exactly as `heimdall create` is (§7):
 | `create_folder` | Make a folder for ordinary notes. |
 | `move_path` | Rename or move a note or folder. Refuses to cross the `aios/` boundary in either direction, and refuses the managed structure. |
 | `delete_path` | Move a note or folder into the vault's `.trash/`. Nothing is ever unlinked. |
-| `write_agents` | Replace the vault's agent instructions, at whichever spelling the vault already uses. |
 | `write_entry` | Replace one entry, preserving Heimdall's `created_at` and `type` (§6). |
 | `link_graph` | Index the whole vault's links in one call (§8). |
 
 Rules:
 
-- None of these is an MCP tool, and none of their types derives `JsonSchema`. The tool surface stays at exactly nine (§9), and a compile error is what enforces it.
+- None of these is an MCP tool, and none of their types derives `JsonSchema`. The tool surface stays at exactly eight (§9), and a compile error is what enforces it.
 - Writes are optimistically concurrent. `expected_revision` is required; explicit `null` means "create", and omitting it is `INVALID_INPUT` rather than a silent create.
 - A stale revision returns `REVISION_CONFLICT` with the current revision in `details`, and the client resolves it by asking the user — never by merging and never by overwriting.
 - Renaming a note does **not** rewrite `[[wikilinks]]` in other notes. That would be an unbounded multi-file write with no revision check on any of the files it touched. The client warns about inbound links instead, which it can do because the index already knows them.
@@ -820,8 +813,8 @@ The desktop always invokes its own bundled sidecar. It performs no CLI discovery
 
 ### Core tests
 
-- `heimdall create` writes the full template (`.obsidian/`, `aios/`, and the template's example notes) into an empty or missing target, and copies no filesystem debris
-- `heimdall create` on an existing vault adds only missing `aios/` structure and never touches existing notes, `.obsidian/`, or adds example notes
+- `heimdall create` writes the full template (`aios/` and the template's example notes) into an empty or missing target, and copies no filesystem debris
+- `heimdall create` on a folder that already has content adds only missing `aios/` structure, never touches an existing file (hidden ones included), and adds no example notes
 - `aios/` exclusion from ordinary discovery and reads
 - Listing pagination via `cursor`/`next_cursor` continuation, deterministic ordering, and the entry-scan guard
 - Multi-file selection, line continuation, and byte/file caps
@@ -852,12 +845,11 @@ The desktop always invokes its own bundled sidecar. It performs no CLI discovery
 - Deletion lands in `.trash/`, keeps the original layout, takes a numeric suffix on collision, and disappears from listings.
 - The managed structure cannot be moved or deleted, and the vault still initializes afterwards.
 - A move refuses to cross the `aios/` boundary in either direction and refuses to leave Markdown behind.
-- Agent instructions are written to whichever spelling the vault already uses, and never create the other one.
 - An entry edit preserves `created_at` and `type`, accepts the user's own keys, and cannot move an entry between kinds.
-- Link resolution matches Obsidian's, including the shortest-path tie-break, and is byte-for-byte deterministic across runs.
+- Link resolution follows the conventional wikilink rules, including the shortest-path tie-break, and is byte-for-byte deterministic across runs.
 - Links inside fenced code, inline code, and unterminated frontmatter produce no edges; links inside real frontmatter do.
 - The graph covers `aios/`, marks those nodes, carries no file content, and truncates at each cap while reporting what it left out.
-- The MCP server still advertises exactly nine tools, and none of the client operations appears among them — checked both in-process and over a real stdio connection.
+- The MCP server still advertises exactly eight tools, and none of the client operations appears among them — checked both in-process and over a real stdio connection.
 
 ### Desktop tests
 
@@ -879,7 +871,7 @@ For every supported operating system:
 
 1. Install only the CLI and exercise all headless operations, including `heimdall create`.
 2. Install the desktop app on a clean user account; create a vault, run the health check, and install a client config.
-3. Open an existing Obsidian vault and verify that its notes and `.obsidian/` remain unchanged after initialization.
+3. Open an existing folder of notes and verify that its files, hidden ones included, remain unchanged after initialization.
 4. Upgrade and uninstall; preserve all vault content.
 
 ## 18. Delivery phases
@@ -924,7 +916,7 @@ Delivered ahead of Phase 4, which does not block it.
 
 - The installed executable and MCP command are named `heimdall`.
 - The CLI works without the desktop application.
-- `heimdall create` produces the complete templated vault and safely initializes existing Obsidian vaults.
+- `heimdall create` produces the complete templated vault and safely initializes an existing folder of notes.
 - The desktop uses its bundled CLI for every domain operation and can install a working MCP client configuration.
 - No operation performs an unbounded vault read.
 - Ordinary reads cannot expose `aios/`.
@@ -934,7 +926,7 @@ Delivered ahead of Phase 4, which does not block it.
 - Stale complete-file memory writes fail with `REVISION_CONFLICT`.
 - The main memory respects the stable 32 KiB limit with a byte-based advisory warning.
 - No write can escape the vault or silently replace unrelated content.
-- The MCP surface is still exactly nine tools after the desktop editor ships, and no client operation is reachable through it.
+- The MCP surface is still exactly eight tools after the desktop editor ships, and no client operation is reachable through it.
 - No deletion unlinks user data.
 - Vault data survives CLI/Desktop upgrades and uninstallation.
 

@@ -44,6 +44,6 @@
     "copyright": "",
     "category": "Productivity",
     "shortDescription": "Setup and diagnostics for Heimdall vaults.",
-    "longDescription": "Heimdall creates and configures Obsidian-compatible Markdown vaults and makes the local MCP server available to AI clients. Obsidian remains the editing and browsing UI."
+    "longDescription": "Heimdall creates and edits Markdown vaults and makes the local MCP server available to AI clients."
   }
 }

@@ -16,7 +16,7 @@
 //!    times, and link endpoints. That is strictly less than `list_memories` and
 //!    `list_entries` already report about the same tree.
 //! 3. **The caller is the human at the keyboard**, who can open every one of
-//!    those files in Obsidian already. The same reasoning SPEC §7 applies to
+//!    those files in any editor already. The same reasoning SPEC §7 applies to
 //!    `heimdall create`.
 //!
 //! Bounds are caps rather than pagination, and hitting one is a truncated
@@ -316,12 +316,12 @@ impl Index {
         }
     }
 
-    /// Resolve one written target against the vault, Obsidian's way.
+    /// Resolve one written target against the vault, the way a vault editor does.
     fn resolve(&self, link: &links::RawLink, from: &RelPath) -> Option<usize> {
         let key = normalize(&link.target)?;
 
         // `..` is resolved here rather than left to `RelPath`, which refuses it.
-        // Obsidian's "relative path to file" setting writes `[x](../notes/a.md)`,
+        // An editor set to write relative paths produces `[x](../notes/a.md)`,
         // and dropping those would make a whole vault's Markdown links look
         // broken.
         let relative = walk_relative(&from.parent(), &key)?.to_ascii_lowercase();
@@ -343,8 +343,8 @@ impl Index {
         }
 
         // Basename match — a wikilink names a note, a Markdown link names a
-        // path. Obsidian draws the same distinction, which is why the style is
-        // carried this far.
+        // path. That distinction is the conventional one, which is why the style
+        // is carried this far.
         if link.style != LinkStyle::Wiki {
             return None;
         }
@@ -359,7 +359,7 @@ impl Index {
 
     /// Pick one of several notes sharing a basename.
     ///
-    /// Exact case first, then Obsidian's shortest-path-wins, then the shortest
+    /// Exact case first, then shortest-path-wins, then the shortest
     /// path in bytes, then the byte-wise smallest. That last step is not
     /// cosmetic: it makes the choice a total order, so two runs over an
     /// unchanged vault cannot disagree.

@@ -55,7 +55,7 @@ describe("Setup", () => {
       data: {
         path: "/Users/n/Documents/demo",
         mode: "scaffolded",
-        created: [".obsidian/", "aios/", "ideas/hello_world.md"],
+        created: ["aios/", "ideas/hello_world.md"],
       },
     });
     const onVaultChange = vi.fn();
@@ -82,7 +82,7 @@ describe("Setup", () => {
       data: {
         path: "/Users/n/Documents/Existing Vault",
         mode: "initialized",
-        created: ["aios/", "aios/agents.md"],
+        created: ["aios/", "aios/memories/memory.md"],
       },
     });
     render(<Setup vault="" onVaultChange={vi.fn()} />);
@@ -98,7 +98,7 @@ describe("Setup", () => {
       stdin: undefined,
     });
     // Nothing about example notes: initializing adds only what was missing.
-    expect(screen.getByText("aios/agents.md")).toBeInTheDocument();
+    expect(screen.getByText("aios/memories/memory.md")).toBeInTheDocument();
   });
 
   it("keeps a structured failure readable instead of crashing", async () => {
@@ -130,7 +130,7 @@ describe("Setup", () => {
         code: "NOT_INITIALIZED",
         message:
           'this vault has no complete aios/ structure; run "heimdall create" against it',
-        details: { missing: ["aios/", "aios/agents.md"] },
+        details: { missing: ["aios/", "aios/memories/memory.md"] },
       },
     });
     render(<Setup vault="/Users/n/plain-folder" onVaultChange={vi.fn()} />);

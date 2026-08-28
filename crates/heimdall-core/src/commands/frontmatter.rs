@@ -5,7 +5,7 @@
 //! *edit* needs the narrower rule: those two fields must survive untouched,
 //! while every other key belongs to the user and passes through. So this parser
 //! is deliberately incurious. It extracts two scalars and ignores everything
-//! else, including the list-valued `links:` an Obsidian vault registers as
+//! else, including the list-valued `links:` some property editors register as
 //! `multitext`.
 
 /// The Heimdall-owned scalars of a leading frontmatter block.

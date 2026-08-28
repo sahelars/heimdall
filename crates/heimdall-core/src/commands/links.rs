@@ -20,7 +20,7 @@
 /// How a link was written, which decides how it may be resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LinkStyle {
-    /// `[[target]]` — a name Obsidian resolves across the whole vault.
+    /// `[[target]]` — a name resolved across the whole vault.
     Wiki,
     /// `[text](target)` — a path, resolved relative to the linking note.
     Markdown,
@@ -285,7 +285,7 @@ fn push_markdown(destination: &str, links: &mut Vec<RawLink>) {
     });
 }
 
-/// Decode `%XX` escapes, which Obsidian writes for spaces in Markdown links.
+/// Decode `%XX` escapes, which editors write for spaces in Markdown links.
 ///
 /// Works on bytes throughout. Slicing the original `&str` by byte offset would
 /// panic whenever a `%` sits close enough to a multi-byte character for the

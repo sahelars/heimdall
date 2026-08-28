@@ -1,6 +1,6 @@
 # Heimdall — Agent Instructions
 
-Heimdall is an intent-aware MCP layer for Obsidian-compatible Markdown vaults: a headless Rust CLI (`heimdall`) that provides shell commands and a stdio MCP server, plus a Tauri desktop app that both configures the server and edits the vault — a file tree, a Markdown editor with preview, and an interactive link graph. The full product behavior is specified in **`docs/SPEC.md`** — that document is the source of truth. Read the relevant section of the spec before changing any contract, limit, or tool schema.
+Heimdall is an intent-aware MCP layer for Markdown vaults: a headless Rust CLI (`heimdall`) that provides shell commands and a stdio MCP server, plus a Tauri desktop app that both configures the server and edits the vault — a file tree, a Markdown editor with preview, and an interactive link graph. The full product behavior is specified in **`docs/SPEC.md`** — that document is the source of truth. Read the relevant section of the spec before changing any contract, limit, or tool schema.
 
 ## Repository layout
 
@@ -19,7 +19,7 @@ Heimdall is an intent-aware MCP layer for Obsidian-compatible Markdown vaults: a
 - `heimdall-core` owns every filesystem operation. The CLI, MCP adapter, and desktop bridge never touch the filesystem directly.
 - Never add a general `read_file`, `write_file`, or `execute` tool to the MCP surface.
 - Ordinary document operations must exclude the entire `aios/` tree; only protected-content operations and the client-only `link_graph` index may access it — and `link_graph` returns metadata and link endpoints, never content.
-- Client operations (`create`, `write-document`, `create-folder`, `move-path`, `delete-path`, `write-agents`, `write-entry`, `link-graph`) are shell-only. Never derive `JsonSchema` on their request or response types, and never give one a tool: the MCP surface is exactly nine tools, and the missing derive is what makes that a compile error rather than a convention.
+- Client operations (`create`, `write-document`, `create-folder`, `move-path`, `delete-path`, `write-entry`, `link-graph`) are shell-only. Never derive `JsonSchema` on their request or response types, and never give one a tool: the MCP surface is exactly eight tools, and the missing derive is what makes that a compile error rather than a convention.
 - Deletion moves content into the vault's `.trash/`; nothing is ever unlinked. A rename never replaces an existing destination.
 - A rename does not rewrite `[[wikilinks]]` in other notes. That would be an unbounded multi-file write with no revision check on any of it; the client warns using the link index instead.
 - MCP tool calls never accept vault paths. The vault is fixed by `--vault` server configuration (one vault per server process).

@@ -11,8 +11,8 @@
 //! folder.* For an edit the correct rule follows the invariant instead of the
 //! blanket ban — the incoming content must carry byte-identical values for both
 //! owned fields, and every other key is the user's to add, change, or remove.
-//! So a human can give an entry `tags:` or a `links:` list from Obsidian's
-//! property editor, and cannot reassign its identity.
+//! So a human can give an entry `tags:` or a `links:` list from an editor's
+//! property panel, and cannot reassign its identity.
 
 use serde::{Deserialize, Serialize};
 

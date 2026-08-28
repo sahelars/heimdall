@@ -257,7 +257,7 @@ mod tests {
         for path in [
             "aios/memories/memory.md",
             "AIOS/memories/memory.md",
-            "aios/agents.md",
+            "aios/attachments/notes.md",
         ] {
             let err = read_documents(
                 &vault,

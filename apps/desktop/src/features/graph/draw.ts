@@ -39,17 +39,17 @@ export interface DrawOptions {
   /**
    * The hovered note and everything one link from it.
    *
-   * Obsidian dims the rest of the graph while you hover, which is what turns a
-   * hairball into something you can read a neighbourhood out of. Null means
-   * nothing is hovered and everything is drawn at full strength.
+   * Dimming the rest of the graph while you hover is what turns a hairball into
+   * something you can read a neighbourhood out of. Null means nothing is
+   * hovered and everything is drawn at full strength.
    */
   highlighted: ReadonlySet<string> | null;
   /**
    * Per-node dim level, carried between frames and stepped toward its target.
    *
-   * Obsidian lerps every alpha 10% of the way per frame — a half-life of about
-   * seven frames — so the dimming bleeds in rather than switching. Mutated in
-   * place, because it is per-frame animation state rather than data.
+   * Every alpha lerps 10% of the way to its target per frame — a half-life of
+   * about seven frames — so the dimming bleeds in rather than switching.
+   * Mutated in place, because it is per-frame animation state rather than data.
    */
   fade: Map<string, number>;
   colours: GraphColours;
@@ -58,17 +58,17 @@ export interface DrawOptions {
   /**
    * Which zoom octave labels turn on at.
    *
-   * Obsidian's formula, exactly: `clamp(log2(zoom) + 1 - threshold, 0, 1)`. So
-   * at the default of 0, labels are invisible at or below half zoom and fully
-   * opaque at or above 1.
+   * The formula is `clamp(log2(zoom) + 1 - threshold, 0, 1)`. So at the default
+   * of 0, labels are invisible at or below half zoom and fully opaque at or
+   * above 1.
    */
   textFadeThreshold: number;
 }
 
-/** How faint a node gets while something else is hovered. Obsidian's value. */
+/** How faint a node gets while something else is hovered. */
 const DIMMED = 0.2;
 
-/** How much of the remaining gap a fade closes each frame. Obsidian's value. */
+/** How much of the remaining gap a fade closes each frame. */
 const FADE_RATE = 0.1;
 
 /**
@@ -83,7 +83,7 @@ const FADE_RATE = 0.1;
  */
 const LABEL_SIZE = 8.75;
 
-/** Line width in CSS pixels, constant at every zoom — as Obsidian draws it. */
+/** Line width in CSS pixels, constant at every zoom however far in or out. */
 const LINE_WIDTH = 1;
 
 /** Only what this drawing needs, so a test can stand in for it. */
@@ -123,9 +123,9 @@ export function draw(
   context.setTransform(options.ratio, 0, 0, options.ratio, 0, 0);
   context.clearRect(0, 0, options.width, options.height);
 
-  // Obsidian scales its container by the zoom and counter-scales every node and
-  // label by 1/sqrt(zoom), so both grow at half the rate of the layout. That
-  // half-rate growth is the signature of how its graph feels, and drawing
+  // The container scales by the zoom while every node and label counter-scales
+  // by 1/sqrt(zoom), so both grow at half the rate of the layout. That
+  // half-rate growth is the signature of how the graph feels, and drawing
   // things at full zoom instead is the single easiest way to get it wrong.
   const zoom = Math.sqrt(clamp(transform.k, 1 / 128, 8));
 
@@ -187,7 +187,7 @@ export function draw(
     context.globalAlpha = alphaOf(node.id);
     context.beginPath();
     context.arc(at.x, at.y, radius, 0, Math.PI * 2);
-    // A flat filled circle. Obsidian draws no stroke, no glow, no gradient.
+    // A flat filled circle: no stroke, no glow, no gradient.
     context.fillStyle = isActive ? colours.active : colours.node;
     context.fill();
 
@@ -202,8 +202,8 @@ export function draw(
     }
   }
 
-  // Labels fade in over one octave of zoom, which is what Obsidian's "text fade
-  // threshold" actually controls.
+  // Labels fade in over one octave of zoom, which is what the text fade
+  // threshold actually controls.
   const legibility = clamp(
     Math.log2(transform.k) + 1 - options.textFadeThreshold,
     0,

@@ -18,18 +18,10 @@ pub const CONVERSATIONS_DIR: &str = "aios/conversations";
 pub const NOTIFICATIONS_DIR: &str = "aios/notifications";
 pub const ATTACHMENTS_DIR: &str = "aios/attachments";
 
-/// Accepted spellings of the agent instructions file, most-preferred first.
-///
-/// The spec writes `aios/agents.md`; vaults in the wild (and the shipped
-/// template) may use `AGENTS.md`, matching the repo-root convention. Both are
-/// valid, so a vault created on a case-insensitive filesystem still works when
-/// copied to Linux.
-pub const AGENTS_FILE_CANDIDATES: [&str; 2] = ["aios/agents.md", "aios/AGENTS.md"];
-
 /// Where `delete_path` moves removed content.
 ///
-/// Deletion is recoverable rather than destructive, matching the `promptDelete:
-/// false` setting the vault template ships. The leading dot means
+/// Deletion is recoverable rather than destructive: content is moved here, not
+/// unlinked, so nothing a user removes is unrecoverable. The leading dot means
 /// [`is_listable`] already keeps the folder out of every listing, so trashed
 /// notes disappear from the UI and from discovery without a special case.
 pub const TRASH_DIR: &str = ".trash";
@@ -176,12 +168,12 @@ impl RelPath {
 
     /// Reject any path with a hidden component.
     ///
-    /// [`RelPath::parse`] bars only `.` and `..`, so `.obsidian/app.json` and
+    /// [`RelPath::parse`] bars only `.` and `..`, so `.config/app.json` and
     /// `.trash/note.md` both parse. Reads are safe from them by accident,
     /// because every read operation also demands a `.md` extension; a write has
-    /// no such shield, and writing into `.obsidian/` would corrupt the user's
-    /// Obsidian configuration while writing into `.trash/` would create content
-    /// no listing could ever show again.
+    /// no such shield, and writing into a hidden folder would corrupt whatever
+    /// tool owns it, while writing into `.trash/` would create content no
+    /// listing could ever show again.
     pub fn deny_hidden(&self) -> Result<()> {
         for component in self.components() {
             if is_hidden(component) {
@@ -206,10 +198,7 @@ impl RelPath {
 ///
 /// [`Vault::ensure_initialized`]: crate::storage::Vault::ensure_initialized
 pub fn is_structural(path: &RelPath) -> bool {
-    let candidates = REQUIRED_DIRS
-        .iter()
-        .chain(AGENTS_FILE_CANDIDATES.iter())
-        .chain(std::iter::once(&MAIN_MEMORY_FILE));
+    let candidates = REQUIRED_DIRS.iter().chain(std::iter::once(&MAIN_MEMORY_FILE));
 
     candidates.into_iter().any(|managed| {
         let mut wanted = managed.split('/');
@@ -390,7 +379,7 @@ mod tests {
 
     #[test]
     fn aios_detection_ignores_case() {
-        for raw in ["aios/agents.md", "AIOS/agents.md", "AiOs/memories/memory.md"] {
+        for raw in ["aios/notes.md", "AIOS/notes.md", "AiOs/memories/memory.md"] {
             let path = RelPath::parse(raw).unwrap();
             assert!(path.is_in_aios(), "{raw:?} not detected as protected");
             assert_eq!(path.deny_aios().unwrap_err().code, ErrorCode::NotFound);
@@ -415,7 +404,7 @@ mod tests {
         assert_eq!(path.file_name(), Some("profile.md"));
         assert_eq!(RelPath::parse("a.md").unwrap().parent().as_str(), "");
         assert_eq!(RelPath::root().join("aios").as_str(), "aios");
-        assert_eq!(RelPath::parse("aios").unwrap().join("agents.md").as_str(), "aios/agents.md");
+        assert_eq!(RelPath::parse("aios").unwrap().join("memories").as_str(), "aios/memories");
     }
 
     #[test]
@@ -445,7 +434,7 @@ mod tests {
     #[test]
     fn listings_exclude_hidden_junk_and_sidecar_files() {
         assert!(is_listable("notes.md"));
-        assert!(!is_listable(".obsidian"));
+        assert!(!is_listable(".config"));
         assert!(!is_listable(".DS_Store"));
         assert!(is_junk(".ds_store"));
         assert!(!is_listable(".memory.md.lock"));

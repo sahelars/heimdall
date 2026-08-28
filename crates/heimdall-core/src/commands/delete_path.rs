@@ -2,10 +2,10 @@
 //!
 //! A client operation; no `JsonSchema` derive, so it cannot become an MCP tool.
 //!
-//! Nothing is ever unlinked. The vault template ships `promptDelete: false`, so
-//! deletion is expected to be quiet — which is only acceptable if it is also
-//! recoverable. `.trash/` at the vault root is the folder Obsidian itself uses
-//! for local trash, and the leading dot means `paths::is_listable` already keeps
+//! Nothing is ever unlinked. Deletion is quiet — which is only acceptable if it
+//! is also recoverable. `.trash/` at the vault root is the conventional folder
+//! for a vault's local trash, and the leading dot means `paths::is_listable`
+//! already keeps
 //! it out of every listing, so a trashed note leaves the UI and discovery
 //! without any special case.
 //!

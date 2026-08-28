@@ -1,7 +1,7 @@
 /**
  * The force layout.
  *
- * These are Obsidian's own forces translated into d3's units. Obsidian's engine
+ * The forces are a vault graph view's, translated into d3's units. That engine
  * is a hand-ported d3-force running in WebAssembly, and the JS fallback it
  * ships spells the stack out literally:
  *
@@ -14,12 +14,12 @@
  * Two things about that are worth stating plainly, because both are easy to get
  * wrong and neither is documented:
  *
- * 1. **It is not `forceCenter`.** Obsidian pulls toward a point with `forceX`
- *    and `forceY`. `forceCenter` is a hard, alpha-independent recentring
+ * 1. **It is not `forceCenter`.** The pull toward a point is `forceX` plus
+ *    `forceY`. `forceCenter` is a hard, alpha-independent recentring
  *    translation; using it gives a rigid graph that cannot be dragged
- *    off-centre, which is not how Obsidian feels.
- * 2. **Those lengths are device pixels.** Obsidian sizes its canvas in device
- *    pixels, so on a 2x display its 250-unit link distance is 125 CSS px.
+ *    off-centre, which is not the feel being matched.
+ * 2. **Those lengths are device pixels.** That canvas is sized in device
+ *    pixels, so on a 2x display a 250-unit link distance is 125 CSS px.
  *
  * The numbers below are that layout scaled for a side pane a few hundred CSS
  * pixels wide. The scaling law is that lengths scale by k and charge by k
@@ -40,19 +40,19 @@ import {
 } from "d3-force";
 
 export interface GraphSettings {
-  /** Pull toward the middle of the pane. Obsidian's "Center force". */
+  /** Pull toward the middle of the pane — the "center force". */
   centerStrength: number;
-  /** How hard nodes push apart. Obsidian's "Repel force", as a d3 charge. */
+  /** How hard nodes push apart — the "repel force", as a d3 charge. */
   repelStrength: number;
-  /** Multiplier on each link's spring. Obsidian's "Link force". */
+  /** Multiplier on each link's spring — the "link force". */
   linkStrength: number;
-  /** The length a link settles at. Obsidian's "Link distance". */
+  /** The length a link settles at — the "link distance". */
   linkDistance: number;
   /**
    * Which zoom octave labels turn on at.
    *
-   * Obsidian's "Text fade threshold". Labels are invisible below `2^(t-1)` and
-   * fully opaque at `2^t`.
+   * The "text fade threshold". Labels are invisible below `2^(t-1)` and fully
+   * opaque at `2^t`.
    */
   textFadeThreshold: number;
   showOrphans: boolean;
@@ -69,7 +69,7 @@ export const GRAPH_DEFAULTS: GraphSettings = {
   hideUnresolved: false,
 };
 
-/** Obsidian's alpha decay: cools to the 0.001 floor over about 300 ticks. */
+/** Alpha decay: cools to the 0.001 floor over about 300 ticks. */
 export const ALPHA_DECAY = 1 - Math.pow(0.001, 1 / 300);
 /** What a drag, a data change, or a force change reheats to. */
 export const REHEAT_ALPHA = 0.3;
@@ -109,8 +109,8 @@ export function buildModel(
   settings: GraphSettings,
   previous?: GraphModel | null,
 ): GraphModel {
-  // Obsidian counts a node's weight as outgoing plus incoming links, so a
-  // reciprocal pair counts twice for each end.
+  // A node's weight is its outgoing plus incoming links, so a reciprocal pair
+  // counts twice for each end.
   const degree = new Map<string, number>();
   for (const edge of input.edges) {
     const from = input.nodes[edge.from];
@@ -178,9 +178,9 @@ export function createSimulation(
       forceManyBody<SimNode>()
         .strength(-settings.repelStrength)
         .distanceMin(8)
-        // Obsidian has no maximum; this one sits far outside any settled
-        // layout, so it costs nothing visually and bounds the work on a large
-        // vault.
+        // The reference layout has no maximum; this one sits far outside any
+        // settled layout, so it costs nothing visually and bounds the work on a
+        // large vault.
         .distanceMax(400)
         .theta(0.9),
     )
@@ -197,10 +197,10 @@ export function createSimulation(
 /**
  * A node's radius in CSS pixels at zoom 1.
  *
- * Obsidian's is `max(8, min(3 * sqrt(degree + 1), 30))` in device pixels; this
- * is that halved. Note the floor: for a vault of a few dozen notes almost every
- * node comes out at the minimum, which is why an Obsidian graph reads as evenly
- * sized dots rather than a spread of sizes.
+ * The reference formula is `max(8, min(3 * sqrt(degree + 1), 30))` in device
+ * pixels; this is that halved. Note the floor: for a vault of a few dozen notes
+ * almost every node comes out at the minimum, which is why the graph reads as
+ * evenly sized dots rather than a spread of sizes.
  */
 export function radiusOf(node: SimNode): number {
   return Math.max(4, Math.min(1.5 * Math.sqrt(node.degree + 1), 15));

@@ -139,8 +139,8 @@ describe("drawing the graph", () => {
   });
 
   it("keeps links exactly one pixel wide at every zoom", () => {
-    // Obsidian's lines are a constant screen thickness however far in or out
-    // the graph is zoomed.
+    // Links are a constant screen thickness however far in or out the graph is
+    // zoomed.
     for (const k of [0.2, 1, 4, 8]) {
       const recording = recorder();
       draw(recording.painter, model(), options({ transform: { x: 0, y: 0, k } }));
@@ -161,8 +161,7 @@ describe("drawing the graph", () => {
 
 describe("hovering a neighbourhood", () => {
   it("dims everything that is not the hovered note or one of its links", () => {
-    // What turns a hairball into something a neighbourhood can be read out of,
-    // and what Obsidian does on hover.
+    // What turns a hairball into something a neighbourhood can be read out of.
     const recording = recorder();
     const graph = model();
     graph.nodes.push({ id: "c.md", title: "c", inAios: false, degree: 0, x: 90, y: 0 });
@@ -215,8 +214,8 @@ describe("hovering a neighbourhood", () => {
   });
 
   it("fades toward the dimmed level over frames rather than switching", () => {
-    // Obsidian lerps every alpha a tenth of the way per frame, so the dimming
-    // bleeds in. Snapping to 0.2 in one frame is a different, harsher thing.
+    // Every alpha lerps a tenth of the way per frame, so the dimming bleeds in.
+    // Snapping to 0.2 in one frame is a different, harsher thing.
     const fade = new Map<string, number>();
     const graph = model();
 
@@ -271,8 +270,8 @@ describe("zooming", () => {
   });
 
   it("drops labels below the zoom the threshold names", () => {
-    // Obsidian's formula: labels are invisible at or below 2^(t-1), which at
-    // the default threshold of 0 is half zoom.
+    // Labels are invisible at or below 2^(t-1), which at the default threshold
+    // of 0 is half zoom.
     const recording = recorder();
     draw(recording.painter, model(), options({ transform: { x: 0, y: 0, k: 0.4 } }));
 

@@ -67,7 +67,6 @@ const ALLOWED: &[(&str, &[&str])] = &[
         "read-documents",
         &["vault", "doc", "start-line", "max-lines", "max-total-bytes"],
     ),
-    ("read-agents", &["vault", "start-line", "max-lines"]),
     ("list-memories", &["vault", "limit"]),
     ("read-memory", &["vault", "extended", "start-line", "max-lines"]),
     ("write-memory", &["vault", "extended", "expected-revision", "create"]),
@@ -83,7 +82,6 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("create-folder", &["vault", "path"]),
     ("move-path", &["vault", "from", "to"]),
     ("delete-path", &["vault", "path", "expected-revision"]),
-    ("write-agents", &["vault", "expected-revision"]),
     ("write-entry", &["vault", "kind", "id", "expected-revision"]),
     ("link-graph", &["vault", "exclude-aios", "max-depth"]),
 ];
@@ -101,7 +99,6 @@ const MUTATES: &[&str] = &[
     "create-folder",
     "move-path",
     "delete-path",
-    "write-agents",
     "write-entry",
 ];
 
@@ -806,7 +803,6 @@ mod tests {
             "create-folder",
             "move-path",
             "delete-path",
-            "write-agents",
             "write-entry",
             "link-graph",
         ] {
@@ -847,11 +843,11 @@ mod tests {
 
     #[test]
     fn only_allowlisted_arguments_can_be_passed() {
-        let error = build_args("read-agents", &json!({ "exec": "/bin/sh" })).unwrap_err();
+        let error = build_args("read-memory", &json!({ "exec": "/bin/sh" })).unwrap_err();
         assert_eq!(error.code, "INVALID_INPUT");
 
         // An argument that belongs to a different subcommand is still refused.
-        let error = build_args("read-agents", &json!({ "kind": "conversation" })).unwrap_err();
+        let error = build_args("read-memory", &json!({ "kind": "conversation" })).unwrap_err();
         assert_eq!(error.code, "INVALID_INPUT");
     }
 

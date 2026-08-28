@@ -296,7 +296,7 @@ export function App() {
   /**
    * Catch up on edits made elsewhere.
    *
-   * Nothing watches the filesystem, so a note changed in Obsidian or by an
+   * Nothing watches the filesystem, so a note changed in another editor or by an
    * agent while this window was in the background would otherwise show stale
    * links until something else happened to trigger a reload.
    */
@@ -836,7 +836,7 @@ export function App() {
       ) : (
         <p className="empty">
           No vault yet. Open <strong>Heimdall → Settings…</strong> to create one or choose an
-          existing Obsidian vault.
+          existing folder.
         </p>
       )}
 

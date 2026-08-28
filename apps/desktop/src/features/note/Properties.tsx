@@ -1,5 +1,5 @@
 /**
- * The frontmatter table, as Obsidian's property editor shows it.
+ * The frontmatter table, as a property editor shows it.
  *
  * Edits are applied to the parsed YAML document and handed back, so everything
  * the user did not touch keeps its formatting.

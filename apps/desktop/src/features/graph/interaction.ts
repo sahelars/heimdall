@@ -11,15 +11,15 @@ export interface Transform {
   k: number;
 }
 
-/** Obsidian's zoom limits. */
+/** The zoom limits. */
 export const MIN_SCALE = 1 / 128;
 export const MAX_SCALE = 8;
 
 /**
  * How far one wheel notch zooms.
  *
- * Obsidian multiplies the target scale by `1.5^(-deltaY/120)`, so a standard
- * notch is exactly 1.5x.
+ * The target scale is multiplied by `1.5^(-deltaY/120)`, so a standard notch
+ * is exactly 1.5x.
  */
 export function wheelFactor(deltaY: number, deltaMode = 0): number {
   const lines = deltaMode === 1 ? deltaY * 40 : deltaMode === 2 ? deltaY * 800 : deltaY;
@@ -29,8 +29,8 @@ export function wheelFactor(deltaY: number, deltaMode = 0): number {
 /**
  * How much of the remaining gap a frame closes.
  *
- * Zoom is eased rather than applied outright, which is most of why Obsidian's
- * graph feels smooth: `scale = scale*0.85 + target*0.15` per frame.
+ * Zoom is eased rather than applied outright, which is most of why the graph
+ * feels smooth: `scale = scale*0.85 + target*0.15` per frame.
  */
 export const ZOOM_EASE = 0.15;
 
