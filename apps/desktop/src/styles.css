@@ -78,14 +78,16 @@
    * the top: tao resizes the title bar container to the button's height plus
    * y and leaves the button where it sits inside it, which measures out as
    * `centre = y - 2`. Hence y: 24. The buttons are 14pt across and 23 apart,
-   * and x: 9 is the position macOS itself uses, so the last of the three ends
-   * at 69 and 76 clears it.
+   * so their top edge sits at 15 — and x: 15 puts them the same distance from
+   * the left as from the top. macOS itself uses x: 9, which against a 22px
+   * centre reads as pinned to the left edge and floating below the top one.
+   * The last of the three then ends at 75, and 82 clears it.
    *
    * All of it measured against AppKit rather than guessed — the first two
    * attempts at this assumed 12pt buttons and an inset y, and were wrong on
    * both counts.
    */
-  --traffic-lights: 76px;
+  --traffic-lights: 82px;
   --titlebar: 44px;
 
   /*
