@@ -1025,6 +1025,46 @@ pre {
   min-width: var(--note-min);
 }
 
+/*
+ * The note's heading in source mode.
+ *
+ * Outside the scrolling body, so it stays put; sized and spaced as the
+ * editor's own first line would be, because that is what it is — the one line
+ * of the document that lives above the caret rather than under it.
+ */
+.note__title-bar {
+  padding: 8px 24px 4px;
+  min-width: var(--note-min);
+}
+
+.note__title {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.6;
+  display: flex;
+  gap: 0.5ch;
+  align-items: baseline;
+}
+
+.note__title-marker {
+  color: var(--faint);
+}
+
+.note__title-field {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  width: 100%;
+}
+
+.note__title-field:focus {
+  outline: none;
+}
+
 /* Preview ----------------------------------------------------------------- */
 
 .preview {
@@ -1040,13 +1080,6 @@ pre {
 .preview__title {
   font-size: 28px;
   margin-bottom: 4px;
-}
-
-.preview__rule {
-  border: none;
-  border-top: 1px solid var(--line-soft);
-  width: 100%;
-  margin: 4px 0;
 }
 
 .preview__content {

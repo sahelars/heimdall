@@ -17,6 +17,8 @@ import { EditorState, StateField, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, keymap, type DecorationSet } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 
+import { findFrontmatterBlock } from "../../markdown/frontmatter";
+
 /**
  * Source-mode highlighting.
  *
@@ -61,11 +63,15 @@ const theme = EditorView.theme({
 });
 
 /**
- * Dim the leading `---` block.
+ * Dim the `---` block.
  *
  * `@codemirror/lang-markdown` has no frontmatter support, and writing a Lezer
  * block parser for it would be a lot of machinery for what the screenshot asks
  * for, which is only that the block reads as metadata rather than as prose.
+ *
+ * Which lines are the block is `findFrontmatterBlock`'s answer and not this
+ * file's. Deciding it twice is how the editor came to disagree with the preview
+ * about a byte order mark and about a fence with a space after it.
  */
 const frontmatterField = StateField.define<DecorationSet>({
   create: (state) => frontmatterDecoration(state),
@@ -77,16 +83,18 @@ const frontmatterField = StateField.define<DecorationSet>({
 const frontmatterMark = Decoration.mark({ class: "cm-frontmatter" });
 
 function frontmatterDecoration(state: EditorState): DecorationSet {
-  if (state.doc.lines === 0) return Decoration.none;
-  if (state.doc.line(1).text.trimEnd() !== "---") return Decoration.none;
+  const lines: string[] = [];
+  for (let line = 1; line <= state.doc.lines; line += 1) lines.push(state.doc.line(line).text);
+  // Only for the matching: stripping it from the document would shift every
+  // offset the decoration is measured in.
+  if (lines[0]?.startsWith("\ufeff")) lines[0] = lines[0].slice(1);
 
-  for (let line = 2; line <= state.doc.lines; line += 1) {
-    const candidate = state.doc.line(line);
-    if (candidate.text.trimEnd() !== "---") continue;
-    return Decoration.set([frontmatterMark.range(0, candidate.to)]);
-  }
-  // An unterminated block is not a block — the same rule the vault applies.
-  return Decoration.none;
+  const block = findFrontmatterBlock(lines);
+  if (!block) return Decoration.none;
+
+  return Decoration.set([
+    frontmatterMark.range(state.doc.line(block.start + 1).from, state.doc.line(block.end + 1).to),
+  ]);
 }
 
 export interface EditorConfig {

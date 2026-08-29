@@ -29,6 +29,7 @@ import {
 import { baseName, isProtected, parentOf, sourceOf, titleOf } from "./api/source";
 import type { CliStatus, DomainError, LinkGraphData } from "./api/types";
 import { Button, Failure } from "./components";
+import { withTitle } from "./markdown/frontmatter";
 import { Explorer } from "./features/explorer/Explorer";
 import type { TreeInput, TreeNode } from "./features/explorer/tree";
 import { GraphPane } from "./features/graph/GraphPane";
@@ -362,7 +363,10 @@ export function App() {
         if (!current()) return;
 
         disk.current = { path, text: document.content, revision: document.revision };
-        setNote({
+        // Assigned here as well as on render: a caller that awaits `open` and
+        // then reads the note back would otherwise be reading the note that
+        // was on screen before it.
+        noteNow.current = {
           path,
           buffer: document.content,
           dirty: false,
@@ -370,7 +374,8 @@ export function App() {
           saving: false,
           conflict: null,
           error: null,
-        });
+        };
+        setNote(noteNow.current);
       } catch (thrown) {
         const error =
           thrown instanceof CliFailure
@@ -636,6 +641,26 @@ export function App() {
   /* Renaming and deleting ------------------------------------------------ */
 
   /** Rename by path, which is what the title field and the tree both do. */
+  /**
+   * Bring the open note's heading into line with its filename, or with a name
+   * being committed. Reports whether anything changed.
+   *
+   * Nothing is written here: leaving the buffer dirty hands the write to
+   * autosave and to `save`, which are the only two things in the application
+   * that write a note.
+   */
+  const retitleOpen = useCallback((path: string, name?: string): boolean => {
+    const current = noteNow.current;
+    if (!current || current.path !== path || !current.editable) return false;
+
+    const retitled = withTitle(current.buffer, name ?? titleOf(path));
+    if (retitled === current.buffer) return false;
+
+    noteNow.current = { ...current, buffer: retitled, dirty: retitled !== disk.current?.text };
+    setNote(noteNow.current);
+    return true;
+  }, []);
+
   const renamePath = useCallback(
     async (path: string, kind: "document" | "directory", name: string) => {
       setRenaming(null);
@@ -655,7 +680,13 @@ export function App() {
           return next;
         });
         await reload(vault);
-        if (kind === "document") await open(to);
+        if (kind === "document") {
+          await open(to);
+          // The heading and the filename are one fact. A rename from the tree
+          // moves only one of them, so the other follows here; left dirty
+          // rather than written, because autosave is what writes.
+          retitleOpen(to);
+        }
       } catch (thrown) {
         if (thrown instanceof CliFailure) {
           record(`rename ${path}`, thrown.error);
@@ -663,7 +694,29 @@ export function App() {
         }
       }
     },
-    [vault, reload, open, record],
+    [vault, reload, open, record, retitleOpen],
+  );
+
+  /**
+   * Commit a new name typed into the note's heading.
+   *
+   * Both halves of the one fact move, and in this order: `renamePath` ends by
+   * reopening the note from disk, so a heading written into the buffer after it
+   * would be written into a buffer that is about to be replaced. The save is
+   * awaited for the same reason `open` flushes one — the write has to land on
+   * the old path, before the move.
+   */
+  const retitle = useCallback(
+    async (name: string) => {
+      const current = noteNow.current;
+      if (!current) return;
+
+      if (current.editable && retitleOpen(current.path, name)) {
+        if (!(await save())) return;
+      }
+      if (titleOf(current.path) !== name) await renamePath(current.path, "document", name);
+    },
+    [retitleOpen, save, renamePath],
   );
 
   const rename = useCallback(
@@ -836,13 +889,10 @@ export function App() {
               onOpenLink={openLink}
               resolves={resolves}
               onResolveConflict={(choice) => void resolveConflict(choice)}
-              // The title is the filename, so editing one renames the other.
-              // Protected content is Heimdall's to name, so it is not offered.
-              onRename={
-                note && !isProtected(note.path)
-                  ? (name) => void renamePath(note.path, "document", name)
-                  : null
-              }
+              // The heading and the filename are the same fact, so editing one
+              // moves both. Protected content is Heimdall's to name, so it is
+              // not offered.
+              onRename={note && !isProtected(note.path) ? (name) => void retitle(name) : null}
             />
           }
           right={

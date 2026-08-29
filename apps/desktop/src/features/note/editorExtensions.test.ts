@@ -29,8 +29,24 @@ describe("dimming frontmatter", () => {
     expect(doc.slice(range!.from, range!.to)).toBe('---\nlinks:\n  - "[[profile]]"\n---');
   });
 
-  it("leaves a note that does not open with a block alone", () => {
+  it("covers a block written under the note's heading, where a titled note puts it", () => {
+    // The heading is drawn above the editor, so what the editor holds opens
+    // with the block — but a note edited elsewhere may well not.
+    const doc = "# Title\n\n---\ntags: [a]\n---\n\nBody\n";
+    const [range] = marks(doc);
+
+    expect(range).toBeDefined();
+    expect(doc.slice(range!.from, range!.to)).toBe("---\ntags: [a]\n---");
+  });
+
+  it("leaves a lone rule alone", () => {
     expect(marks("# Body\n\n---\n")).toEqual([]);
+  });
+
+  it("leaves a pair of rules holding prose alone", () => {
+    // `---` is a horizontal rule too, and dimming everything between two of
+    // them would grey out a paragraph the user can see is a paragraph.
+    expect(marks("# T\n\n---\n\nA break.\n\n---\n\nMore.\n")).toEqual([]);
   });
 
   it("does not dim the rest of the file when the block is unterminated", () => {

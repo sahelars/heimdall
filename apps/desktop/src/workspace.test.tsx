@@ -30,13 +30,13 @@ const { App } = await import("./App");
 const AUTOSAVE_WINDOWS = 3600;
 
 /**
- * The note's title, which is its filename.
+ * The note's title in preview, which is the heading it opens with.
  *
- * Rendered as an editable field rather than static text, because renaming the
- * note and retitling it are the same act.
+ * Static text here and a field in source: renaming the note and retitling it
+ * are the same act, but preview is for reading.
  */
 function titleOf(within_: HTMLElement) {
-  return (within_.querySelector(".preview__title-field") as HTMLInputElement | null)?.value ?? "";
+  return within_.querySelector(".preview__title")?.textContent ?? "";
 }
 
 const STATUS = {
@@ -48,8 +48,9 @@ const STATUS = {
   outputSchemaVersion: 1,
 };
 
-/** Answer each bridge call with what the CLI really returned. */
-function bridge() {
+/** Answer each bridge call with what the CLI really returned, or with a note
+ * of the caller's own when what is under test is the note itself. */
+function bridge(content?: string) {
   invoke.mockImplementation((command: string, args: Record<string, unknown>) => {
     if (command === "cli_status") return Promise.resolve(STATUS);
     if (command !== "invoke_cli") return Promise.resolve({ ok: true, data: {} });
@@ -61,7 +62,24 @@ function bridge() {
       case "list-documents":
         return Promise.resolve({ ok: true, data: listingFixture });
       case "read-documents":
-        return Promise.resolve({ ok: true, data: readFixture });
+        return Promise.resolve({
+          ok: true,
+          data:
+            content === undefined
+              ? readFixture
+              : {
+                  ...readFixture,
+                  documents: [
+                    {
+                      ...readFixture.documents[0],
+                      content,
+                      // The reader checks what it assembled against this, so a
+                      // note supplied here has to report its own length.
+                      size_bytes: new TextEncoder().encode(content).length,
+                    },
+                  ],
+                },
+        });
       default:
         return Promise.resolve({ ok: true, data: {} });
     }
@@ -309,7 +327,9 @@ describe("opening notes in quick succession", () => {
 
       if (request.command === "read-documents") {
         const path = request.request.doc![0]!;
-        const body = `# ${path}\n`;
+        // A note opens with its own name as its heading, which is what the
+        // preview shows as the title.
+        const body = `# ${path.split("/").pop()!.replace(/\.md$/, "")}\n`;
         const answer = {
           ok: true,
           data: {
@@ -618,6 +638,10 @@ describe("the note's title", () => {
     await userEvent.click(within(files).getByText("test_note"));
 
     const note = screen.getByRole("region", { name: "Note" });
+    // The heading is typed into in source and read in preview.
+    expect(within(note).queryByLabelText("Note name")).toBeNull();
+    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
+
     const field = await within(note).findByLabelText("Note name");
     expect(field).toHaveValue("test_note");
 
@@ -643,6 +667,7 @@ describe("the note's title", () => {
     await userEvent.click(within(files).getByText("test_note"));
 
     const note = screen.getByRole("region", { name: "Note" });
+    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
     expect(await within(note).findByLabelText("Note name")).toHaveValue("test_note");
   });
 
@@ -656,6 +681,37 @@ describe("the note's title", () => {
     const note = screen.getByRole("region", { name: "Note" });
     await waitFor(() => expect(within(note).getByRole("heading", { level: 1 })).toBeInTheDocument());
     expect(within(note).queryByLabelText("Note name")).toBeNull();
+
+    await userEvent.click(within(note).getByRole("button", { name: "Edit" }));
+    expect(within(note).queryByLabelText("Note name")).toBeNull();
+  });
+
+  it("shows the heading once, not once as the name and again as a heading", async () => {
+    // The heading and the filename are one fact. Drawing the file's own `# `
+    // under a copy of it is the same name printed twice.
+    bridge("# how_lens_works\n\nBody text.\n");
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await userEvent.click(within(files).getByText("how_lens_works"));
+
+    const note = screen.getByRole("region", { name: "Note" });
+    await waitFor(() => expect(titleOf(note)).toBe("how_lens_works"));
+    expect(within(note).getAllByRole("heading", { level: 1 })).toHaveLength(1);
+  });
+
+  it("keeps the heading out of the editor, where it would be the same line twice", async () => {
+    bridge("# how_lens_works\n\nBody text.\n");
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await userEvent.click(within(files).getByText("how_lens_works"));
+
+    const note = screen.getByRole("region", { name: "Note" });
+    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
+
+    expect(await within(note).findByLabelText("Note name")).toHaveValue("how_lens_works");
+    expect(within(note).getByTestId("source-editor").textContent).not.toContain("# how_lens_works");
   });
 
   it("abandons an edit on Escape", async () => {
@@ -666,6 +722,10 @@ describe("the note's title", () => {
     await userEvent.click(within(files).getByText("test_note"));
 
     const note = screen.getByRole("region", { name: "Note" });
+    // The heading is typed into in source and read in preview.
+    expect(within(note).queryByLabelText("Note name")).toBeNull();
+    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
+
     const field = await within(note).findByLabelText("Note name");
     await userEvent.clear(field);
     await userEvent.type(field, "abandoned{Escape}");
@@ -674,6 +734,63 @@ describe("the note's title", () => {
     expect(
       invoke.mock.calls.find((call) => (call[1] as { command?: string })?.command === "move-path"),
     ).toBeUndefined();
+  });
+});
+
+describe("rules in a note", () => {
+  it("draws none under the properties, where the note has none", async () => {
+    // A rule that is part of the furniture is a rule nobody can remove, and one
+    // the note does not contain.
+    bridge("# how_lens_works\n\nBody text.\n");
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await userEvent.click(within(files).getByText("how_lens_works"));
+
+    const note = screen.getByRole("region", { name: "Note" });
+    await waitFor(() => expect(titleOf(note)).toBe("how_lens_works"));
+    expect(note.querySelectorAll("hr")).toHaveLength(0);
+  });
+
+  it("draws one where the author wrote one", async () => {
+    bridge("# how_lens_works\n\nAbove.\n\n---\n\nBelow.\n");
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await userEvent.click(within(files).getByText("how_lens_works"));
+
+    const note = screen.getByRole("region", { name: "Note" });
+    await waitFor(() => expect(note.querySelectorAll("hr")).toHaveLength(1));
+  });
+});
+
+describe("properties that are not on the first line", () => {
+  it("renders a block written under the note's heading", async () => {
+    // Which is where a note that opens with its name has to put them.
+    bridge('# how_lens_works\n\n---\nlinks:\n  - "[[profile]]"\n---\n\nBody text.\n');
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await userEvent.click(within(files).getByText("how_lens_works"));
+
+    const note = screen.getByRole("region", { name: "Note" });
+    expect(await within(note).findByText("links")).toBeInTheDocument();
+    const properties = note.querySelector(".properties") as HTMLElement;
+    expect(within(properties).getByRole("button", { name: "profile" })).toBeInTheDocument();
+    // The fences are properties, not two rules.
+    expect(note.querySelectorAll("hr")).toHaveLength(0);
+  });
+
+  it("reads only the first block, because a note has one set of properties", async () => {
+    bridge("# how_lens_works\n\n---\nstatus: draft\n---\n\nBody.\n\n---\nlater: block\n---\n");
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await userEvent.click(within(files).getByText("how_lens_works"));
+
+    const note = screen.getByRole("region", { name: "Note" });
+    expect(await within(note).findByText("status")).toBeInTheDocument();
+    expect(within(note).queryByText("later")).toBeNull();
   });
 });
 
@@ -915,6 +1032,10 @@ describe("the note's title", () => {
     await userEvent.click(within(files).getByText("test_note"));
 
     const note = screen.getByRole("region", { name: "Note" });
+    // The heading is typed into in source and read in preview.
+    expect(within(note).queryByLabelText("Note name")).toBeNull();
+    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
+
     const field = await within(note).findByLabelText("Note name");
     expect(field).toHaveValue("test_note");
 
@@ -940,6 +1061,7 @@ describe("the note's title", () => {
     await userEvent.click(within(files).getByText("test_note"));
 
     const note = screen.getByRole("region", { name: "Note" });
+    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
     expect(await within(note).findByLabelText("Note name")).toHaveValue("test_note");
   });
 
@@ -953,6 +1075,9 @@ describe("the note's title", () => {
     const note = screen.getByRole("region", { name: "Note" });
     await waitFor(() => expect(within(note).getByRole("heading", { level: 1 })).toBeInTheDocument());
     expect(within(note).queryByLabelText("Note name")).toBeNull();
+
+    await userEvent.click(within(note).getByRole("button", { name: "Edit" }));
+    expect(within(note).queryByLabelText("Note name")).toBeNull();
   });
 
   it("abandons an edit on Escape", async () => {
@@ -963,6 +1088,10 @@ describe("the note's title", () => {
     await userEvent.click(within(files).getByText("test_note"));
 
     const note = screen.getByRole("region", { name: "Note" });
+    // The heading is typed into in source and read in preview.
+    expect(within(note).queryByLabelText("Note name")).toBeNull();
+    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
+
     const field = await within(note).findByLabelText("Note name");
     await userEvent.clear(field);
     await userEvent.type(field, "abandoned{Escape}");
