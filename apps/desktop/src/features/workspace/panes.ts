@@ -9,9 +9,10 @@
  * The narrowest a side pane is allowed to get.
  *
  * The file pane's toolbar is what sets this: it now starts to the right of the
- * window's own buttons, so it needs the 76px they take, four 28px icon buttons
- * with 2px between them, and the 6px it keeps at its other end — 200 in all.
- * Below that its last icon would be cut off by the divider.
+ * window's own buttons, so it needs the 76px they take (the last of the three
+ * ends at 69), four 28px icon buttons with 2px between them, and the 6px it
+ * keeps at its other end — 200 in all. Below that its last icon would be cut
+ * off by the divider.
  */
 export const MIN_PANE = 204;
 /**

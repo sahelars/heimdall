@@ -64,15 +64,23 @@
   --pad: 16px;
 
   /*
-   * The corner the macOS window controls take out of the window, and the band
-   * they sit in.
+   * The macOS title bar, which the window no longer draws for itself.
    *
-   * The title bar is an overlay (tauri.conf.json), so the workspace runs to the
-   * top of the window and the two toolbars in that band have to leave the
-   * traffic lights their room rather than draw underneath them.
+   * `titleBarStyle: Overlay` (tauri.conf.json) puts the workspace under it, so
+   * the window controls float over whatever is in the top-left. These are the
+   * room they take, measured from AppKit rather than guessed: the band is 32pt
+   * tall, the three buttons are 14pt across at x = 9, 32 and 55 — so the last
+   * of them ends at 69 — and they are centred in the band, at y = 16.
+   *
+   * The controls are left exactly where the platform puts them and the two
+   * toolbars come to *them*: no vertical padding, and a 28px icon button in a
+   * 32px band, which centres every icon on 16 alongside them. Moving the
+   * controls instead (`trafficLightPosition`) is the same alignment reached
+   * from the harder end — the offset is an AppKit internal, and the answer
+   * would go stale the first time Apple changed the band.
    */
   --traffic-lights: 76px;
-  --chrome: 38px;
+  --titlebar: 32px;
 
   /*
    * The narrowest the note's content will draw itself.
@@ -414,7 +422,7 @@ pre {
  * toolbar was carrying.
  */
 .workspace[data-left-collapsed] .divider--left {
-  margin-top: var(--chrome);
+  margin-top: var(--titlebar);
 }
 
 .workspace[data-left-collapsed] .note__header {
@@ -446,8 +454,8 @@ pre {
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 8px 6px 8px var(--traffic-lights);
-  min-height: var(--chrome);
+  padding: 0 6px 0 var(--traffic-lights);
+  min-height: var(--titlebar);
 }
 
 .explorer__scroll {
@@ -913,9 +921,9 @@ pre {
   display: flex;
   align-items: center;
   gap: var(--gap);
-  padding: 8px 12px;
+  padding: 0 12px;
   /* Level with the file pane's toolbar, and with the window controls. */
-  min-height: var(--chrome);
+  min-height: var(--titlebar);
 }
 
 .note__nav,
@@ -1455,7 +1463,7 @@ pre {
   gap: var(--gap);
   padding: 12px var(--pad) 12px var(--traffic-lights);
   border-bottom: 1px solid var(--line);
-  min-height: var(--chrome);
+  min-height: var(--titlebar);
 }
 
 .app__banner .notice {
