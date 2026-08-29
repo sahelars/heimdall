@@ -87,13 +87,38 @@ export function backlinksOf(index: VaultIndex | null, path: string): string[] {
 }
 
 /**
- * What a rename would break.
+ * What a move will carry with it.
  *
- * Heimdall deliberately does not rewrite other notes' links when a file moves —
- * that would be an unbounded multi-file write with no revision check on any of
- * it. The client warns instead, which it can do because the index already knows
- * who points where.
+ * A rename is followed by `relink`, which retargets the links that pointed at
+ * the old path. This is the count the user is told before it happens, and it is
+ * free because the index already knows who points where.
  */
 export function inboundLinkCount(index: VaultIndex | null, path: string): number {
   return backlinksOf(index, path).length;
+}
+
+/**
+ * The notes a move will have to rewrite, whether it moves a note or a folder.
+ *
+ * A folder has no backlinks of its own — nothing links to a directory — so
+ * asking `backlinksOf` about one always answers nothing, which for a rename
+ * that repaths every note inside is the wrong answer rather than a small one.
+ * Everything underneath it is asked about instead.
+ *
+ * A link from inside the folder to another note inside it is left out: both
+ * ends move together, so nothing about it changes, and naming it would pad the
+ * list the user is being asked to agree to.
+ *
+ * Sorted, and each note named once however many times it links.
+ */
+export function backlinksUnder(index: VaultIndex | null, prefix: string): string[] {
+  if (!index) return [];
+  const inside = (path: string) => path === prefix || path.startsWith(`${prefix}/`);
+
+  const sources = new Set<string>();
+  for (const [target, linking] of index.inbound) {
+    if (!inside(target)) continue;
+    for (const source of linking) if (!inside(source)) sources.add(source);
+  }
+  return [...sources].sort();
 }

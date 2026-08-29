@@ -157,6 +157,34 @@ fn no_command_can_name_a_vault_path_in_its_payload() {
 }
 
 #[test]
+fn relink_follows_a_move_through_the_real_binary() {
+    // The desktop's actual sequence, over two processes and a real vault: the
+    // move renames the file, and the follow-up call carries the links.
+    let (_tmp, vault) = new_vault();
+    std::fs::write(format!("{vault}/roadmap.md"), "# Roadmap\n").unwrap();
+    std::fs::write(
+        format!("{vault}/source.md"),
+        "See [[roadmap]] and [[roadmap|it]].\n",
+    )
+    .unwrap();
+
+    let moved = run(&["move-path", "--vault", &vault, "--from", "roadmap.md", "--to", "plan.md"]);
+    assert_eq!(moved.status.code(), Some(0));
+
+    let output = run(&["relink", "--vault", &vault, "--from", "roadmap.md", "--to", "plan.md"]);
+    let envelope = envelope(&output);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["meta"]["schema_version"], 1);
+    assert_eq!(envelope["data"]["updated"][0]["path"], "source.md");
+    assert_eq!(envelope["data"]["updated"][0]["links"], 2);
+    assert!(envelope["data"]["skipped"].as_array().unwrap().is_empty());
+    assert_eq!(output.status.code(), Some(0));
+
+    let source = std::fs::read_to_string(format!("{vault}/source.md")).unwrap();
+    assert_eq!(source, "See [[plan]] and [[plan|it]].\n");
+}
+
+#[test]
 fn version_reports_component_and_schema_versions() {
     let output = run(&["--version", "--json"]);
     let data = data(&output);

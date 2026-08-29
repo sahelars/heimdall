@@ -405,12 +405,14 @@ mod tests {
             "write_document",
             "create_folder",
             "move_path",
+            "relink",
             "delete_path",
             "write_entry",
             "link_graph",
             "write-document",
             "delete-path",
             "link-graph",
+            "relink",
         ] {
             assert!(!names.contains(&forbidden.to_string()), "{forbidden} exposed");
         }

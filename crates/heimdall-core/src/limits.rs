@@ -46,6 +46,15 @@ pub const GRAPH_MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 /// dominate the response on its own.
 pub const GRAPH_MAX_LINKS_PER_FILE: usize = 1_000;
 
+/// At most this many files one `relink` will rewrite (SPEC §8).
+///
+/// `relink` reads the whole vault under the graph's caps, but it also *writes*,
+/// and a write budget is a different promise from a read one: it bounds how much
+/// of a vault a single rename can change. Past this the operation reports what
+/// it left alone rather than continuing, so the note that says how many links
+/// moved is always the truth.
+pub const RELINK_MAX_FILES: usize = 1_000;
+
 /// The largest body any single stdin read will accept, used by the CLI to bound
 /// input before it reaches a domain limit check.
 pub const STDIN_MAX_BYTES: usize = EXTENDED_MEMORY_MAX_BYTES;

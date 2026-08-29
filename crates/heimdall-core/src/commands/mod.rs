@@ -15,6 +15,8 @@ mod read_documents;
 mod read_entry;
 mod read_memory;
 mod read_range;
+mod relink;
+mod resolve;
 mod types;
 mod write_document;
 mod write_entry;
@@ -37,6 +39,9 @@ pub use read_documents::{
     SkipReason,
 };
 pub use read_entry::{read_entry, ReadEntryRequest};
+pub use relink::{
+    relink, RelinkRequest, RelinkResponse, RelinkSkip, RelinkTruncation, RelinkUpdate, RelinkSkipReason,
+};
 pub use read_memory::{read_memory, ReadMemoryRequest};
 pub use types::{DocumentKind, EntryKind, MemoryKind, ReadResult};
 pub use write_document::{write_document, WriteDocumentRequest, WriteDocumentResponse};

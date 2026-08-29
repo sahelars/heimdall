@@ -204,6 +204,24 @@ enum Command {
         to: String,
     },
 
+    /// Retarget the links that pointed at a path a move has just changed.
+    ///
+    /// Called after move-path, never instead of it. Only files holding a link
+    /// to the moved path are written.
+    Relink {
+        #[command(flatten)]
+        vault: VaultArg,
+        /// Where the note or folder was, before the move.
+        #[arg(long)]
+        from: String,
+        /// Where it is now.
+        #[arg(long)]
+        to: String,
+        /// Report what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Move a note or folder into the vault's .trash/ folder.
     DeletePath {
         #[command(flatten)]
@@ -477,6 +495,16 @@ fn dispatch(command: Command) -> Result<ExitCode> {
         Command::MovePath { vault, from, to } => envelope::ok(&commands::move_path(
             &vault.open()?,
             commands::MovePathRequest { from, to },
+        )?),
+
+        Command::Relink {
+            vault,
+            from,
+            to,
+            dry_run,
+        } => envelope::ok(&commands::relink(
+            &vault.open()?,
+            commands::RelinkRequest { from, to, dry_run },
         )?),
 
         Command::DeletePath {

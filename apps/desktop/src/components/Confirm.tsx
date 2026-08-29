@@ -15,6 +15,13 @@ interface ConfirmProps {
   confirmLabel: string;
   onConfirm: () => void;
   onCancel: () => void;
+  /**
+   * A third way out, between cancelling and confirming.
+   *
+   * A rename with inbound links has one: going ahead without rewriting them is
+   * a real answer, and neither of the other two buttons means it.
+   */
+  secondary?: { label: string; onSelect: () => void };
   children: ReactNode;
 }
 
@@ -24,6 +31,7 @@ export function Confirm({
   confirmLabel,
   onConfirm,
   onCancel,
+  secondary,
   children,
 }: ConfirmProps) {
   const dialog = useRef<HTMLDialogElement | null>(null);
@@ -54,6 +62,7 @@ export function Confirm({
         {children}
         <div className="row confirm__actions">
           <Button onClick={onCancel}>Cancel</Button>
+          {secondary ? <Button onClick={secondary.onSelect}>{secondary.label}</Button> : null}
           <Button primary onClick={onConfirm}>
             {confirmLabel}
           </Button>

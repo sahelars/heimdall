@@ -28,11 +28,13 @@ const SIDECAR_NAME: &str = "heimdall";
 /// already generous. `link-graph` is the exception and gets its own budget.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long a whole-vault index may take.
+/// How long a whole-vault operation may take.
 ///
-/// `link-graph` reads every note in the vault (SPEC §8). On a cold disk a large
-/// vault can approach the ordinary ceiling, and killing a graph the user asked
-/// for is worse than waiting for it.
+/// `link-graph` reads every note in the vault (SPEC §8), and `relink` reads it
+/// and then writes the notes that linked at what moved. On a cold disk a large
+/// vault can approach the ordinary ceiling, and killing either one — a graph
+/// the user asked for, or a rename's follow-up half done — is worse than
+/// waiting for it.
 const GRAPH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How long the MCP health check waits for a handshake response.
@@ -81,10 +83,15 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ),
     ("create-folder", &["vault", "path"]),
     ("move-path", &["vault", "from", "to"]),
+    ("relink", &["vault", "from", "to", "dry-run"]),
     ("delete-path", &["vault", "path", "expected-revision"]),
     ("write-entry", &["vault", "kind", "id", "expected-revision"]),
     ("link-graph", &["vault", "exclude-aios", "max-depth"]),
 ];
+
+/// The subcommands that read or write the whole vault, and so need the longer
+/// budget rather than the ordinary one.
+const WHOLE_VAULT: &[&str] = &["link-graph", "relink"];
 
 /// The subcommands that change the vault.
 ///
@@ -98,6 +105,7 @@ const MUTATES: &[&str] = &[
     "write-document",
     "create-folder",
     "move-path",
+    "relink",
     "delete-path",
     "write-entry",
 ];
@@ -397,7 +405,7 @@ pub fn run(command: &str, request: &Value, stdin: Option<&str>) -> CliResponse {
     // Hold the vault's lock for the whole call so two writes to one vault cannot
     // interleave into a conflict the user never caused. A read only needs the
     // shared side, so reads never queue behind each other.
-    let timeout = if command == "link-graph" {
+    let timeout = if WHOLE_VAULT.contains(&command) {
         GRAPH_TIMEOUT
     } else {
         CALL_TIMEOUT
@@ -845,6 +853,7 @@ mod tests {
         for command in [
             "create-folder",
             "move-path",
+            "relink",
             "delete-path",
             "write-entry",
             "link-graph",
@@ -882,6 +891,42 @@ mod tests {
         for command in ["list-documents", "read-documents", "read-memory", "link-graph"] {
             assert!(!mutates(command), "{command} should not need exclusive access");
         }
+    }
+
+    #[test]
+    fn a_whole_vault_command_gets_the_longer_budget() {
+        // `relink` reads every note and then writes the ones that linked at what
+        // moved. Killed at the ordinary 30 seconds it would leave a large vault
+        // half rewritten, which is the one outcome worse than not starting.
+        for command in ["link-graph", "relink"] {
+            assert!(WHOLE_VAULT.contains(&command), "{command} needs the graph budget");
+            assert!(
+                ALLOWED.iter().any(|(name, _)| *name == command),
+                "{command} cannot be run at all"
+            );
+        }
+        assert!(!WHOLE_VAULT.contains(&"write-document"));
+    }
+
+    #[test]
+    fn relink_takes_the_exclusive_guard() {
+        // It writes, so it must serialise against autosave rather than run
+        // beside it — unlike `link-graph`, which only reads.
+        assert!(mutates("relink"));
+        assert_eq!(
+            build_args(
+                "relink",
+                &json!({ "vault": "/v", "from": "a.md", "to": "b.md", "dry-run": true }),
+            )
+            .unwrap(),
+            ["relink", "--dry-run", "--from", "a.md", "--to", "b.md", "--vault", "/v"]
+        );
+        assert_eq!(
+            build_args("relink", &json!({ "vault": "/v", "path": "a.md" }))
+                .unwrap_err()
+                .code,
+            "INVALID_INPUT"
+        );
     }
 
     #[test]

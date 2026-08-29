@@ -145,6 +145,38 @@ export interface MovePathData {
   kind: DocumentKind;
 }
 
+export interface RelinkUpdate {
+  path: string;
+  /** How many links in this file were retargeted. */
+  links: number;
+  new_revision: string;
+}
+
+export interface RelinkSkip {
+  path: string;
+  /** The link's target, exactly as it still stands in the file. */
+  target: string;
+  reason: "unresolvable";
+}
+
+export interface RelinkTruncation {
+  file_cap_hit: boolean;
+  node_cap_hit: boolean;
+  total_bytes_cap_hit: boolean;
+  nodes_omitted: number;
+  files_unscanned: number;
+  scanned_bytes: number;
+}
+
+export interface RelinkData {
+  from: string;
+  to: string;
+  dry_run: boolean;
+  updated: RelinkUpdate[];
+  skipped: RelinkSkip[];
+  truncated: RelinkTruncation;
+}
+
 export interface DeletePathData {
   path: string;
   trashed_to: string;

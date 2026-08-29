@@ -20,6 +20,7 @@ import type {
   ListDocumentsData,
   MovePathData,
   ReadDocumentsData,
+  RelinkData,
   WriteDocumentData,
 } from "./types";
 import type { DomainError } from "./types";
@@ -269,6 +270,28 @@ export async function movePath(vault: string, from: string, to: string): Promise
   const response = await invokeCli<MovePathData>("move-path", { vault, from, to });
   if (!response.ok || !response.data) {
     throw new CliFailure(response.error ?? { code: "INTERNAL_ERROR", message: "the move failed" });
+  }
+  return response.data;
+}
+
+/**
+ * Carry the links that pointed at `from` over to `to`.
+ *
+ * Called straight after `movePath`, never instead of it. Only the notes holding
+ * a link to the moved path are written, each one retargeted by the same
+ * resolver the graph is drawn from — so a rewritten link goes exactly where the
+ * reader could already see it going.
+ *
+ * Whole-vault work, so the bridge gives it the long timeout rather than the
+ * ordinary one.
+ */
+export async function relinkPaths(vault: string, from: string, to: string): Promise<RelinkData> {
+  const response = await invokeCli<RelinkData>("relink", { vault, from, to });
+  if (!response.ok || !response.data) {
+    throw new CliFailure(
+      response.error ?? { code: "INTERNAL_ERROR", message: "the links were not updated" },
+      response.stderr,
+    );
   }
   return response.data;
 }

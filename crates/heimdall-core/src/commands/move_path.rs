@@ -2,14 +2,12 @@
 //!
 //! A client operation; no `JsonSchema` derive, so it cannot become an MCP tool.
 //!
-//! Inbound `[[wikilinks]]` are deliberately **not** rewritten. Doing it here
-//! would make one command an unbounded whole-vault read (SPEC §8) followed by an
-//! unbounded multi-file write with no `expected_revision` on any of the files it
-//! touched — silently editing notes the user never opened, which is exactly what
-//! the revision contract exists to prevent. The client already has what it
-//! needs: `link_graph` gives it the reverse edges, so it can warn about the
-//! links a rename will break and then rewrite them with ordinary
-//! `write_document` calls, each guarded by that file's own revision.
+//! Inbound `[[wikilinks]]` are deliberately **not** rewritten here. `relink` is
+//! that work, and it is a separate operation on purpose: a move is one rename,
+//! and folding an unbounded whole-vault read (SPEC §8) and a multi-file write
+//! into it would leave a command that half succeeded with no way to say which
+//! half. Keeping them apart means a move either happened or did not, and what
+//! the rewrite did afterwards is reported on its own terms.
 
 use serde::{Deserialize, Serialize};
 

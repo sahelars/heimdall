@@ -328,6 +328,12 @@ A cap is a truncated success, not a failure — the same treatment `list_documen
 its scan guard. `scanned: false` is the difference between "this note has no links" and
 "its links were not read", and the response never conflates the two.
 
+`relink` (§15) reads the vault under those same caps and adds one of its own: at most
+1,000 files written in a single call. A read budget bounds how much of a vault an
+operation looks at; a write budget bounds how much of it one rename can change, which is
+a different promise and needs saying separately. Past it the response reports what it did
+not reach, so the count of links that moved is never larger than the truth.
+
 Edge endpoints are indices into `nodes`, not paths. That is a payload decision rather
 than a stylistic one: with string endpoints a 5,000-note vault would nearly fill the
 desktop bridge's stdout ceiling, and the failure would arrive as unreadable output rather
@@ -678,7 +684,9 @@ Heimdall and any other Markdown editor can be used over the same files.
 
 ### The workspace
 
-1. **Files** — the whole vault, `aios/` included. Ordinary folders come from `list_documents`; the protected tree can only come from `link_graph`, because ordinary listing excludes `aios/` at every depth by design (§6). New note, new folder, sort order, and collapse-all sit in a toolbar above the tree. A right-click offers rename and delete for ordinary content only: both operations refuse `aios/`, so offering them there would produce nothing but an error. A rename that will break inbound links says how many before it happens, and a delete says where the note is going.
+1. **Files** — the whole vault, `aios/` included. Ordinary folders come from `list_documents`; the protected tree can only come from `link_graph`, because ordinary listing excludes `aios/` at every depth by design (§6). New note, new folder, sort order, and collapse-all sit in a toolbar above the tree. A right-click offers rename and delete for ordinary content only: both operations refuse `aios/`, so offering them there would produce nothing but an error. A move that would break inbound links — a rename, a folder rename, or a drag — stops and asks first, **naming** the notes it would rewrite rather than counting them, since those are the files being agreed to. Three answers: update the links, rename only, or cancel; nothing at all is written until one is chosen, so cancelling leaves the vault as it was, and "rename only" is a real position rather than something the dialog talks you out of. A move that breaks no links does not ask, because a rename that touches one file is not worth a dialog. Afterwards nothing is said when every link was carried — the user agreed to it and is looking at the result — and a dialog reports anything left behind, which is the one outcome they would otherwise meet later as a dead link. A folder is asked about its contents, since nothing links to a directory. A delete still warns rather than offering: deletion has no new name to point links at.
+
+A report of that kind must not be a banner. The workspace clears its banner whenever the vault reloads, and autosave triggers a reload a second and a half after any edit — so a banner raised by a write is wiped by a refresh nobody asked for, usually before it has been read. The banner's own vault-level failure is the one thing a successful reload may clear, because it is the one thing a successful reload disproves.
 2. **Note** — a breadcrumb with back/forward history, a source/preview toggle, and an overflow menu. The heading is the note's own `# ` line, and it is the filename: one fact, so editing the heading renames the file and renaming the file rewrites the heading. It is shown in both modes and typed into in one — source, with its `#` dimmed like every other marker, drawn above the editor rather than inside it so that it cannot be scrolled away from and the same line is not on screen twice. In preview it is a rendered heading and inert, because preview is for reading and a rendered heading that quietly accepts typing is one nobody can tell from the rest of the note. It cannot be removed: a note emptied of its name gets the name back, and a note that never had a heading is given one from its filename the first time it is written. Preview renders the note, shows its frontmatter as a properties table with clickable wikilinks, renders fenced `mermaid` diagrams, and lists linked mentions — the notes that link to this one, each a name to click beside its path and nothing else. The note's own outgoing links are not repeated under it: they are in its text a few lines above, and a second copy is one more list to read past. The properties block is found wherever its author put it, which for a note that opens with its name is under the heading rather than on the first line; because `---` is a horizontal rule as well as a fence, a block counts only when it is closed, sits at the top of the note or under a blank line, and encloses a non-empty mapping — and only the first such block is the note's properties, since a note has one set of them. Every other `---` is the rule it looks like, and no rule is drawn that the note does not contain. Source is a Markdown editor with the frontmatter block and the remaining heading markers dimmed.
 3. **Graph** — a force-directed graph of the whole vault, built to match what a vault graph view does. Pan (with inertia), zoom about the pointer, drag a node and watch its neighbours follow, click one to open it. The note being read is drawn in the accent colour; hovering one lights its links and dims everything more than a step away.
 
@@ -733,6 +741,7 @@ shell subcommands the desktop calls, exactly as `heimdall create` is (§7):
 | `write_document` | Replace or create one ordinary note, guarded by `expected_revision`. |
 | `create_folder` | Make a folder for ordinary notes. |
 | `move_path` | Rename or move a note or folder. Refuses to cross the `aios/` boundary in either direction, and refuses the managed structure. |
+| `relink` | Retarget the links that pointed at a path `move_path` has just changed. |
 | `delete_path` | Move a note or folder into the vault's `.trash/`. Nothing is ever unlinked. |
 | `write_entry` | Replace one entry, preserving Heimdall's `created_at` and `type` (§6). |
 | `link_graph` | Index the whole vault's links in one call (§8). |
@@ -742,7 +751,12 @@ Rules:
 - None of these is an MCP tool, and none of their types derives `JsonSchema`. The tool surface stays at exactly eight (§9), and a compile error is what enforces it.
 - Writes are optimistically concurrent. `expected_revision` is required; explicit `null` means "create", and omitting it is `INVALID_INPUT` rather than a silent create.
 - A stale revision returns `REVISION_CONFLICT` with the current revision in `details`, and the client resolves it by asking the user — never by merging and never by overwriting.
-- Renaming a note does **not** rewrite `[[wikilinks]]` in other notes. That would be an unbounded multi-file write with no revision check on any of the files it touched. The client warns about inbound links instead, which it can do because the index already knows them.
+- Renaming a note does not rewrite `[[wikilinks]]` **inside `move_path`**. A move is one rename, and folding an unbounded multi-file write into it would leave a rename that half succeeded with no way to say so. `relink` is that work, as its own operation with its own report, and the client calls it next.
+- `relink` is bounded and checked, which is what the older rule was protecting. **Bounded:** only files holding a link to the moved path are written; the scan is the whole vault under the graph's caps (§8) plus a substring prefilter, and the writes are capped again. **Checked:** the whole read-modify-write runs inside one write lock, which is strictly stronger than an `expected_revision` a caller could pass — a revision check closes the gap between a client's read and its write, and here there is no gap. That is also why it uses the vault primitives directly rather than `write_document`: a locking operation inside a lock body is a self-deadlock (§14).
+- A rewrite is **proposed and then verified**. The replacement is written in the shape the link was written in — a bare name stays bare, a vault path stays a path, a note-relative link is re-expressed from the linking note, an extension and a percent encoding are preserved — and is then resolved again through the post-move index. It is spliced in only if it lands on the moved note; if it does not, because the new basename is now ambiguous, the vault-relative path is tried instead. A link that no proposal satisfies is reported and left exactly as written. Retargeting a link at the wrong note is worse than leaving one broken: the first is invisible.
+- Only the target substring is replaced, so an alias, a `#heading` or `#^block` anchor, an `![[` embed marker, and a Markdown link's text and title come out byte-identical. Frontmatter is never reassembled, which is what keeps an entry's `created_at` and `type` (§6) intact when a link inside one moves.
+- `relink` may write into `aios/`. Memories link out with wikilinks (§6), and a memory left pointing at a renamed note is as broken as a note is. It is a protected-content operation for that reason, and it writes nothing but link targets.
+- Both ends of a link can be what moved: a note that changed folders takes its own note-relative links with it, and those are re-expressed from its new home.
 - `link_graph` is a load-and-refresh operation, not an interactive one: it reads every note in the vault. Call it when a vault is opened and after a structural change, never per keystroke.
 
 ### Reading a whole note
@@ -856,6 +870,13 @@ The desktop always invokes its own bundled sidecar. It performs no CLI discovery
 - A move refuses to cross the `aios/` boundary in either direction and refuses to leave Markdown behind.
 - An entry edit preserves `created_at` and `type`, accepts the user's own keys, and cannot move an entry between kinds.
 - Link resolution follows the conventional wikilink rules, including the shortest-path tie-break, and is byte-for-byte deterministic across runs.
+- Every link span slices back to the target exactly as written, including past a byte-order mark, across a masked inline-code span, and for a percent-encoded Markdown destination. A span off by one byte corrupts a note, so this is checked directly rather than through its callers.
+- A rename carries a bare name, a vault path, and a note-relative link, each in its own written form; an alias, an anchor, an embed marker, a Markdown title and angle brackets all survive byte-identical.
+- A rename into a now-ambiguous basename escalates to the vault-relative path rather than retargeting the link at the wrong note.
+- A link in fenced or inline code is never rewritten; one in real frontmatter is. A note with no link to the moved path is not written at all, and `.trash/` is left alone.
+- A folder rename carries every link into it, and a moved note's own relative links are re-expressed from its new home.
+- An `aios/` entry's `created_at` and `type` round-trip through a rewrite.
+- A dry run reports the revision the real write produces and writes nothing; a second run over a settled vault changes nothing.
 - Links inside fenced code, inline code, and unterminated frontmatter produce no edges; links inside real frontmatter do.
 - The graph covers `aios/`, marks those nodes, carries no file content, and truncates at each cap while reporting what it left out.
 - The MCP server still advertises exactly eight tools, and none of the client operations appears among them — checked both in-process and over a real stdio connection.
