@@ -21,6 +21,9 @@ blake3 = "1"
 camino = { version = "1", features = ["serde1"] }
 cap-std = "3"
 clap = { version = "4", features = ["derive"] }
+# Locates the per-user application-data directory the write lock lives in, so
+# nothing of Heimdall's is written into a user's vault (SPEC §14).
+dirs = "6"
 fs4 = { version = "0.13", features = ["sync"] }
 include_dir = "0.7"
 # Pinned deliberately: the MCP protocol baseline moves with this crate, and

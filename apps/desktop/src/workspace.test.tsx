@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import graphFixture from "./test/fixtures/link-graph.json";
 import listingFixture from "./test/fixtures/list-documents.json";
 import readFixture from "./test/fixtures/read-documents.json";
+import type { RelinkData } from "./api/types";
 
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
@@ -30,13 +31,13 @@ const { App } = await import("./App");
 const AUTOSAVE_WINDOWS = 3600;
 
 /**
- * The note's title, which is its filename.
+ * The note's title in preview, which is the heading it opens with.
  *
- * Rendered as an editable field rather than static text, because renaming the
- * note and retitling it are the same act.
+ * Static text here and a field in source: renaming the note and retitling it
+ * are the same act, but preview is for reading.
  */
 function titleOf(within_: HTMLElement) {
-  return (within_.querySelector(".preview__title-field") as HTMLInputElement | null)?.value ?? "";
+  return within_.querySelector(".preview__title")?.textContent ?? "";
 }
 
 const STATUS = {
@@ -48,8 +49,31 @@ const STATUS = {
   outputSchemaVersion: 1,
 };
 
-/** Answer each bridge call with what the CLI really returned. */
-function bridge() {
+/** Answer each bridge call with what the CLI really returned, or with a note
+ * of the caller's own when what is under test is the note itself. */
+/** What the `relink` that follows every move should answer, if a test cares. */
+interface Extras {
+  relink?: RelinkData;
+  relinkFails?: { code: string; message: string };
+}
+
+const EMPTY_TRUNCATION = {
+  file_cap_hit: false,
+  node_cap_hit: false,
+  total_bytes_cap_hit: false,
+  nodes_omitted: 0,
+  files_unscanned: 0,
+  scanned_bytes: 0,
+};
+
+/** Every CLI subcommand the app has asked for, in order. */
+function commandsCalled(): string[] {
+  return invoke.mock.calls
+    .filter((call) => call[0] === "invoke_cli")
+    .map((call) => (call[1] as { command: string }).command);
+}
+
+function bridge(content?: string, extra: Extras = {}) {
   invoke.mockImplementation((command: string, args: Record<string, unknown>) => {
     if (command === "cli_status") return Promise.resolve(STATUS);
     if (command !== "invoke_cli") return Promise.resolve({ ok: true, data: {} });
@@ -60,8 +84,42 @@ function bridge() {
         return Promise.resolve({ ok: true, data: graphFixture });
       case "list-documents":
         return Promise.resolve({ ok: true, data: listingFixture });
+      case "relink":
+        if (extra.relinkFails) {
+          return Promise.resolve({ ok: false, error: { ...extra.relinkFails, details: {} } });
+        }
+        return Promise.resolve({
+          ok: true,
+          data:
+            extra.relink ??
+            ({
+              from: String(request.request.from ?? ""),
+              to: String(request.request.to ?? ""),
+              dry_run: false,
+              updated: [],
+              skipped: [],
+              truncated: EMPTY_TRUNCATION,
+            } satisfies RelinkData),
+        });
       case "read-documents":
-        return Promise.resolve({ ok: true, data: readFixture });
+        return Promise.resolve({
+          ok: true,
+          data:
+            content === undefined
+              ? readFixture
+              : {
+                  ...readFixture,
+                  documents: [
+                    {
+                      ...readFixture.documents[0],
+                      content,
+                      // The reader checks what it assembled against this, so a
+                      // note supplied here has to report its own length.
+                      size_bytes: new TextEncoder().encode(content).length,
+                    },
+                  ],
+                },
+        });
       default:
         return Promise.resolve({ ok: true, data: {} });
     }
@@ -309,7 +367,9 @@ describe("opening notes in quick succession", () => {
 
       if (request.command === "read-documents") {
         const path = request.request.doc![0]!;
-        const body = `# ${path}\n`;
+        // A note opens with its own name as its heading, which is what the
+        // preview shows as the title.
+        const body = `# ${path.split("/").pop()!.replace(/\.md$/, "")}\n`;
         const answer = {
           ok: true,
           data: {
@@ -393,6 +453,18 @@ describe("renaming and deleting", () => {
     return screen.findByRole("menu");
   }
 
+  /** Right-click a tree row, choose Rename…, and commit a new name. */
+  async function renameFromTree(row: string, name: string) {
+    const menu = await rightClick(row);
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Rename…" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Rename" });
+    const field = within(dialog).getByLabelText("Note name");
+    await userEvent.clear(field);
+    await userEvent.type(field, name);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Rename" }));
+  }
+
   it("offers rename and delete on an ordinary note", async () => {
     bridge();
     render(<App />);
@@ -438,18 +510,172 @@ describe("renaming and deleting", () => {
     });
   });
 
-  it("warns before a rename that will break inbound links", async () => {
-    // Heimdall deliberately does not rewrite other notes' links, so the user has
-    // to be told rather than discovering it afterwards.
+  it("asks before it rewrites anything, and writes nothing until it is answered", async () => {
+    // The whole point of the dialog: notes the user never opened are about to
+    // change, so the rewrite has to be something they asked for by name.
     bridge();
     render(<App />);
-
-    const menu = await rightClick("how_lens_works");
-    await userEvent.click(within(menu).getByRole("menuitem", { name: "Rename…" }));
+    await renameFromTree("how_lens_works", "how_lens_work");
 
     const dialog = await screen.findByRole("dialog", { name: "Rename" });
-    expect(within(dialog).getByText(/link here/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/does not rewrite/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/2 notes link here/)).toBeInTheDocument();
+    // Named, not counted: the user is agreeing to these files specifically.
+    expect(within(dialog).getByText("projects/lens/articles.md")).toBeInTheDocument();
+    expect(within(dialog).getByText("projects/lens/profile.md")).toBeInTheDocument();
+
+    // Nothing has happened yet — not even the rename.
+    expect(commandsCalled()).not.toContain("move-path");
+    expect(commandsCalled()).not.toContain("relink");
+  });
+
+  it("asks about links without a ring drawn around Cancel", async () => {
+    // `showModal` focuses the first control it finds, which in this dialog is
+    // Cancel — so the question arrived looking as though it had been answered.
+    bridge();
+    render(<App />);
+    await renameFromTree("how_lens_works", "how_lens_work");
+
+    const dialog = await screen.findByRole("dialog", { name: "Rename" });
+    expect(document.activeElement).toBe(dialog);
+    expect(document.activeElement).not.toBe(
+      within(dialog).getByRole("button", { name: "Cancel" }),
+    );
+  });
+
+  it("renames and carries the links when told to update them", async () => {
+    bridge();
+    render(<App />);
+    await renameFromTree("how_lens_works", "how_lens_work");
+
+    const dialog = await screen.findByRole("dialog", { name: "Rename" });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Update links" }));
+
+    await waitFor(() => expect(commandsCalled()).toContain("relink"));
+    // Order matters: rewriting first would retarget links at a path that does
+    // not exist yet.
+    const order = commandsCalled();
+    expect(order.indexOf("move-path")).toBeLessThan(order.indexOf("relink"));
+
+    const call = invoke.mock.calls.find(
+      (entry) => (entry[1] as { command?: string })?.command === "relink",
+    );
+    expect(call?.[1]).toMatchObject({
+      request: {
+        from: "projects/lens/how_lens_works.md",
+        to: "projects/lens/how_lens_work.md",
+      },
+    });
+  });
+
+  it("renames without touching other notes when told to rename only", async () => {
+    bridge();
+    render(<App />);
+    await renameFromTree("how_lens_works", "how_lens_work");
+
+    const dialog = await screen.findByRole("dialog", { name: "Rename" });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Rename only" }));
+
+    await waitFor(() => expect(commandsCalled()).toContain("move-path"));
+    expect(commandsCalled()).not.toContain("relink");
+  });
+
+  it("does nothing at all when the rename is cancelled", async () => {
+    bridge();
+    render(<App />);
+    await renameFromTree("how_lens_works", "how_lens_work");
+
+    const dialog = await screen.findByRole("dialog", { name: "Rename" });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(commandsCalled()).not.toContain("move-path");
+    expect(commandsCalled()).not.toContain("relink");
+  });
+
+  it("does not ask when nothing links to the note", async () => {
+    // A rename that touches only the file itself is not worth a dialog.
+    bridge();
+    render(<App />);
+    await renameFromTree("test_note", "renamed");
+
+    await waitFor(() => expect(commandsCalled()).toContain("move-path"));
+    expect(screen.queryByRole("dialog", { name: "Rename" })).not.toBeInTheDocument();
+  });
+
+  it("reports links it could not rewrite, and the report survives a refresh", async () => {
+    // A banner would not: `reload` clears it on success, and autosave triggers
+    // a reload a second and a half after any edit. This is the one message the
+    // user cannot be left to discover by following a dead link.
+    bridge(undefined, {
+      relink: {
+        from: "projects/lens/how_lens_works.md",
+        to: "projects/lens/how_lens_work.md",
+        dry_run: false,
+        updated: [],
+        skipped: [
+          { path: "projects/lens/profile.md", target: "how_lens_works", reason: "unresolvable" },
+        ],
+        truncated: EMPTY_TRUNCATION,
+      },
+    });
+    render(<App />);
+    await renameFromTree("how_lens_works", "how_lens_work");
+    await userEvent.click(
+      within(await screen.findByRole("dialog", { name: "Rename" })).getByRole("button", {
+        name: "Update links",
+      }),
+    );
+
+    const report = await screen.findByRole("dialog", { name: /left behind/ });
+    expect(within(report).getByText(/could not be rewritten/)).toBeInTheDocument();
+    expect(within(report).getByText(/profile\.md/)).toBeInTheDocument();
+
+    // Still there after the refresh that used to wipe it.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(screen.getByRole("dialog", { name: /left behind/ })).toBeInTheDocument();
+  });
+
+  it("says nothing when every link was carried", async () => {
+    bridge(undefined, {
+      relink: {
+        from: "projects/lens/how_lens_works.md",
+        to: "projects/lens/how_lens_work.md",
+        dry_run: false,
+        updated: [{ path: "projects/lens/profile.md", links: 1, new_revision: "blake3:aa" }],
+        skipped: [],
+        truncated: EMPTY_TRUNCATION,
+      },
+    });
+    render(<App />);
+    await renameFromTree("how_lens_works", "how_lens_work");
+    await userEvent.click(
+      within(await screen.findByRole("dialog", { name: "Rename" })).getByRole("button", {
+        name: "Update links",
+      }),
+    );
+
+    await waitFor(() => expect(commandsCalled()).toContain("relink"));
+    // The user agreed to it and can see the result; a dialog saying it worked
+    // is one to dismiss for no information.
+    expect(screen.queryByRole("dialog", { name: /left behind/ })).not.toBeInTheDocument();
+  });
+
+  it("reports a failed rewrite without pretending the rename failed", async () => {
+    // The move landed and the rewrite did not. Rolling the rename back would be
+    // a second unchecked write, so both facts are reported instead.
+    bridge(undefined, {
+      relinkFails: { code: "IO_ERROR", message: "the vault could not be read" },
+    });
+    render(<App />);
+    await renameFromTree("how_lens_works", "how_lens_work");
+    await userEvent.click(
+      within(await screen.findByRole("dialog", { name: "Rename" })).getByRole("button", {
+        name: "Update links",
+      }),
+    );
+
+    expect(await screen.findByText(/the vault could not be read/)).toBeInTheDocument();
+    expect(commandsCalled()).toContain("move-path");
   });
 
   it("confirms a delete and says where the note goes", async () => {
@@ -618,6 +844,10 @@ describe("the note's title", () => {
     await userEvent.click(within(files).getByText("test_note"));
 
     const note = screen.getByRole("region", { name: "Note" });
+    // The heading is typed into in source and read in preview.
+    expect(within(note).queryByLabelText("Note name")).toBeNull();
+    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
+
     const field = await within(note).findByLabelText("Note name");
     expect(field).toHaveValue("test_note");
 
@@ -643,6 +873,7 @@ describe("the note's title", () => {
     await userEvent.click(within(files).getByText("test_note"));
 
     const note = screen.getByRole("region", { name: "Note" });
+    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
     expect(await within(note).findByLabelText("Note name")).toHaveValue("test_note");
   });
 
@@ -656,6 +887,37 @@ describe("the note's title", () => {
     const note = screen.getByRole("region", { name: "Note" });
     await waitFor(() => expect(within(note).getByRole("heading", { level: 1 })).toBeInTheDocument());
     expect(within(note).queryByLabelText("Note name")).toBeNull();
+
+    await userEvent.click(within(note).getByRole("button", { name: "Edit" }));
+    expect(within(note).queryByLabelText("Note name")).toBeNull();
+  });
+
+  it("shows the heading once, not once as the name and again as a heading", async () => {
+    // The heading and the filename are one fact. Drawing the file's own `# `
+    // under a copy of it is the same name printed twice.
+    bridge("# how_lens_works\n\nBody text.\n");
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await userEvent.click(within(files).getByText("how_lens_works"));
+
+    const note = screen.getByRole("region", { name: "Note" });
+    await waitFor(() => expect(titleOf(note)).toBe("how_lens_works"));
+    expect(within(note).getAllByRole("heading", { level: 1 })).toHaveLength(1);
+  });
+
+  it("keeps the heading out of the editor, where it would be the same line twice", async () => {
+    bridge("# how_lens_works\n\nBody text.\n");
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await userEvent.click(within(files).getByText("how_lens_works"));
+
+    const note = screen.getByRole("region", { name: "Note" });
+    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
+
+    expect(await within(note).findByLabelText("Note name")).toHaveValue("how_lens_works");
+    expect(within(note).getByTestId("source-editor").textContent).not.toContain("# how_lens_works");
   });
 
   it("abandons an edit on Escape", async () => {
@@ -666,6 +928,10 @@ describe("the note's title", () => {
     await userEvent.click(within(files).getByText("test_note"));
 
     const note = screen.getByRole("region", { name: "Note" });
+    // The heading is typed into in source and read in preview.
+    expect(within(note).queryByLabelText("Note name")).toBeNull();
+    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
+
     const field = await within(note).findByLabelText("Note name");
     await userEvent.clear(field);
     await userEvent.type(field, "abandoned{Escape}");
@@ -674,6 +940,63 @@ describe("the note's title", () => {
     expect(
       invoke.mock.calls.find((call) => (call[1] as { command?: string })?.command === "move-path"),
     ).toBeUndefined();
+  });
+});
+
+describe("rules in a note", () => {
+  it("draws none under the properties, where the note has none", async () => {
+    // A rule that is part of the furniture is a rule nobody can remove, and one
+    // the note does not contain.
+    bridge("# how_lens_works\n\nBody text.\n");
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await userEvent.click(within(files).getByText("how_lens_works"));
+
+    const note = screen.getByRole("region", { name: "Note" });
+    await waitFor(() => expect(titleOf(note)).toBe("how_lens_works"));
+    expect(note.querySelectorAll("hr")).toHaveLength(0);
+  });
+
+  it("draws one where the author wrote one", async () => {
+    bridge("# how_lens_works\n\nAbove.\n\n---\n\nBelow.\n");
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await userEvent.click(within(files).getByText("how_lens_works"));
+
+    const note = screen.getByRole("region", { name: "Note" });
+    await waitFor(() => expect(note.querySelectorAll("hr")).toHaveLength(1));
+  });
+});
+
+describe("properties that are not on the first line", () => {
+  it("renders a block written under the note's heading", async () => {
+    // Which is where a note that opens with its name has to put them.
+    bridge('# how_lens_works\n\n---\nlinks:\n  - "[[profile]]"\n---\n\nBody text.\n');
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await userEvent.click(within(files).getByText("how_lens_works"));
+
+    const note = screen.getByRole("region", { name: "Note" });
+    expect(await within(note).findByText("links")).toBeInTheDocument();
+    const properties = note.querySelector(".properties") as HTMLElement;
+    expect(within(properties).getByRole("button", { name: "profile" })).toBeInTheDocument();
+    // The fences are properties, not two rules.
+    expect(note.querySelectorAll("hr")).toHaveLength(0);
+  });
+
+  it("reads only the first block, because a note has one set of properties", async () => {
+    bridge("# how_lens_works\n\n---\nstatus: draft\n---\n\nBody.\n\n---\nlater: block\n---\n");
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await userEvent.click(within(files).getByText("how_lens_works"));
+
+    const note = screen.getByRole("region", { name: "Note" });
+    expect(await within(note).findByText("status")).toBeInTheDocument();
+    expect(within(note).queryByText("later")).toBeNull();
   });
 });
 
@@ -764,6 +1087,19 @@ describe("dragging a note between folders", () => {
     expect(
       invoke.mock.calls.find((call) => (call[1] as { command?: string })?.command === "move-path"),
     ).toBeUndefined();
+  });
+
+  it("asks before a drag that would break links, too", async () => {
+    // A drag changes a path just as a rename does, so it breaks the same links.
+    bridge();
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await drag(row(files, "how_lens_works"), row(files, "ideas"));
+
+    const dialog = await screen.findByRole("dialog", { name: "Rename" });
+    expect(within(dialog).getByText(/2 notes link here/)).toBeInTheDocument();
+    expect(commandsCalled()).not.toContain("move-path");
   });
 
   it("opens a note on a click, and not on a drag", async () => {
@@ -915,6 +1251,10 @@ describe("the note's title", () => {
     await userEvent.click(within(files).getByText("test_note"));
 
     const note = screen.getByRole("region", { name: "Note" });
+    // The heading is typed into in source and read in preview.
+    expect(within(note).queryByLabelText("Note name")).toBeNull();
+    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
+
     const field = await within(note).findByLabelText("Note name");
     expect(field).toHaveValue("test_note");
 
@@ -940,6 +1280,7 @@ describe("the note's title", () => {
     await userEvent.click(within(files).getByText("test_note"));
 
     const note = screen.getByRole("region", { name: "Note" });
+    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
     expect(await within(note).findByLabelText("Note name")).toHaveValue("test_note");
   });
 
@@ -953,6 +1294,9 @@ describe("the note's title", () => {
     const note = screen.getByRole("region", { name: "Note" });
     await waitFor(() => expect(within(note).getByRole("heading", { level: 1 })).toBeInTheDocument());
     expect(within(note).queryByLabelText("Note name")).toBeNull();
+
+    await userEvent.click(within(note).getByRole("button", { name: "Edit" }));
+    expect(within(note).queryByLabelText("Note name")).toBeNull();
   });
 
   it("abandons an edit on Escape", async () => {
@@ -963,6 +1307,10 @@ describe("the note's title", () => {
     await userEvent.click(within(files).getByText("test_note"));
 
     const note = screen.getByRole("region", { name: "Note" });
+    // The heading is typed into in source and read in preview.
+    expect(within(note).queryByLabelText("Note name")).toBeNull();
+    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
+
     const field = await within(note).findByLabelText("Note name");
     await userEvent.clear(field);
     await userEvent.type(field, "abandoned{Escape}");

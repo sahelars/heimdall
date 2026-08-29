@@ -17,6 +17,8 @@ import { EditorState, StateField, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, keymap, type DecorationSet } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 
+import { findFrontmatterBlock, type Block } from "../../markdown/frontmatter";
+
 /**
  * Source-mode highlighting.
  *
@@ -57,36 +59,87 @@ const theme = EditorView.theme({
     backgroundColor: "var(--bg-selected)",
   },
   ".cm-frontmatter": { color: "var(--muted)" },
+  ".cm-rule": { color: "var(--faint)" },
   ".cm-scroller": { overflow: "auto", lineHeight: "1.6" },
 });
 
 /**
- * Dim the leading `---` block.
+ * The two things the grammar does not say for itself: the `---` block, and a
+ * rule part-way through being typed.
  *
  * `@codemirror/lang-markdown` has no frontmatter support, and writing a Lezer
  * block parser for it would be a lot of machinery for what the screenshot asks
  * for, which is only that the block reads as metadata rather than as prose.
+ *
+ * Which lines are the block is `findFrontmatterBlock`'s answer and not this
+ * file's. Deciding it twice is how the editor came to disagree with the preview
+ * about a byte order mark and about a fence with a space after it. Both marks
+ * come out of one field for the same reason: the block is found once per edit.
  */
-const frontmatterField = StateField.define<DecorationSet>({
-  create: (state) => frontmatterDecoration(state),
+const markerField = StateField.define<DecorationSet>({
+  create: (state) => markerDecorations(state),
   update: (value, transaction) =>
-    transaction.docChanged ? frontmatterDecoration(transaction.state) : value,
+    transaction.docChanged ? markerDecorations(transaction.state) : value,
   provide: (field) => EditorView.decorations.from(field),
 });
 
 const frontmatterMark = Decoration.mark({ class: "cm-frontmatter" });
+const ruleMark = Decoration.mark({ class: "cm-rule" });
 
-function frontmatterDecoration(state: EditorState): DecorationSet {
-  if (state.doc.lines === 0) return Decoration.none;
-  if (state.doc.line(1).text.trimEnd() !== "---") return Decoration.none;
+/** A line that is nothing but dashes — a rule, or one on its way to being one. */
+const DASHES = /^([ \t]*)(-+)[ \t]*$/;
 
-  for (let line = 2; line <= state.doc.lines; line += 1) {
-    const candidate = state.doc.line(line);
-    if (candidate.text.trimEnd() !== "---") continue;
-    return Decoration.set([frontmatterMark.range(0, candidate.to)]);
+/** The document's lines, with a leading byte order mark taken off the first. */
+function textLines(state: EditorState): string[] {
+  const lines: string[] = [];
+  for (let line = 1; line <= state.doc.lines; line += 1) lines.push(state.doc.line(line).text);
+  // Only for the matching: stripping it from the document would shift every
+  // offset the decoration is measured in.
+  if (lines[0]?.startsWith("\ufeff")) lines[0] = lines[0].slice(1);
+  return lines;
+}
+
+function frontmatterRange(state: EditorState, block: Block) {
+  return frontmatterMark.range(
+    state.doc.line(block.start + 1).from,
+    state.doc.line(block.end + 1).to,
+  );
+}
+
+/**
+ * Hold a rule's dashes at one colour from the first keystroke to the last.
+ *
+ * The grammar changes its mind twice on the way to `---`: a lone `-` is a
+ * `ListMark` and a `---` is a `HorizontalRule`, both of which this file dims,
+ * but `--` is neither and comes back as ordinary paragraph text — so the
+ * dashes flashed to full contrast between the second keystroke and the third.
+ * Marking the whole run keeps every stage the colour the finished rule is.
+ *
+ * Lines inside the frontmatter block are left out: its fences are `---` too,
+ * and the block already has a grey of its own that says it is metadata.
+ */
+function markerDecorations(state: EditorState): DecorationSet {
+  const lines = textLines(state);
+  const block = findFrontmatterBlock(lines);
+  const ranges = block ? [frontmatterRange(state, block)] : [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (block && index >= block.start && index <= block.end) {
+      index = block.end;
+      continue;
+    }
+    const dashes = DASHES.exec(lines[index]!);
+    if (!dashes) continue;
+    const line = state.doc.line(index + 1);
+    // Measured against the line the document actually holds, so a byte order
+    // mark `textLines` took off the first line does not shift the range.
+    const from = line.from + (line.text.length - lines[index]!.length) + dashes[1]!.length;
+    ranges.push(ruleMark.range(from, from + dashes[2]!.length));
   }
-  // An unterminated block is not a block — the same rule the vault applies.
-  return Decoration.none;
+
+  // Sorted here rather than by construction: the block is pushed first and a
+  // rule above it would come before it in the document.
+  return ranges.length === 0 ? Decoration.none : Decoration.set(ranges, true);
 }
 
 export interface EditorConfig {
@@ -120,7 +173,7 @@ export function editorExtensions({ onChange, onSave, editable }: EditorConfig): 
     ]),
     markdown(),
     syntaxHighlighting(highlight),
-    frontmatterField,
+    markerField,
     theme,
     EditorView.lineWrapping,
     EditorView.updateListener.of((update) => {
@@ -130,4 +183,4 @@ export function editorExtensions({ onChange, onSave, editable }: EditorConfig): 
 }
 
 /** Exported for tests, which build a state rather than mounting a view. */
-export const testables = { frontmatterDecoration };
+export const testables = { markerDecorations };

@@ -9,14 +9,14 @@
 mod common;
 
 use std::io::Write;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 
 use common::*;
 
 const WRITERS: usize = 8;
 
 fn spawn_writer(vault: &str, revision: &str, content: &str) -> Child {
-    let mut child = Command::new(binary())
+    let mut child = common::command()
         .args(["write-memory", "--vault", vault, "--expected-revision", revision])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -80,7 +80,7 @@ fn concurrent_creates_of_one_extended_memory_leave_a_single_file() {
 
     let children: Vec<_> = (0..WRITERS)
         .map(|index| {
-            let mut child = Command::new(binary())
+            let mut child = common::command()
                 .args([
                     "write-memory",
                     "--vault",
@@ -129,7 +129,7 @@ fn concurrent_entry_creation_never_overwrites_an_existing_entry() {
 
     let children: Vec<_> = (0..WRITERS)
         .map(|index| {
-            let mut child = Command::new(binary())
+            let mut child = common::command()
                 .args(["create-entry", "--vault", &vault, "--kind", "conversation"])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())

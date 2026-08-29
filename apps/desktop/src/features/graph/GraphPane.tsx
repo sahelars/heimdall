@@ -1,14 +1,13 @@
 /**
  * The right pane: the vault's link graph on a canvas.
  *
- * Built to match Obsidian's graph view, whose renderer and force worker are
- * readable in its shipped bundle. The details that matter, and that are easy to
- * get wrong:
+ * Built to match the graph view a reader of Markdown vaults expects. The
+ * details that matter, and that are easy to get wrong:
  *
  * - **Node and label size scale with the square root of the zoom**, not with
- *   the zoom. Obsidian scales its container by the zoom and then counter-scales
- *   every node and label by `1/sqrt(zoom)`; that half-rate growth is the
- *   signature of how its graph feels.
+ *   the zoom. The container scales by the zoom while every node and label
+ *   counter-scales by `1/sqrt(zoom)`; that half-rate growth is the signature of
+ *   how the graph feels.
  * - **Line thickness is constant on screen** at every zoom.
  * - **Zoom is eased**, closing 15% of the gap per frame, and anchors on the
  *   pointer.
@@ -160,11 +159,14 @@ export function GraphPane({ data, activePath, settings = GRAPH_DEFAULTS, onOpen 
     const onSystemChange = () => readPalette();
     media?.addEventListener?.("change", onSystemChange);
 
-    // The Settings override writes `data-theme` on the root element.
+    // The Settings overrides both land on the root element: the theme as
+    // `data-theme`, the accent as an inline custom property — which shows up
+    // as a change to `style` and would otherwise leave the graph its old
+    // colour until something else made it read the palette again.
     const observer = new MutationObserver(() => readPalette());
     observer.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ["data-theme"],
+      attributeFilter: ["data-theme", "style"],
     });
 
     return () => {
@@ -419,9 +421,8 @@ export function GraphPane({ data, activePath, settings = GRAPH_DEFAULTS, onOpen 
           if (!state) return;
 
           if (state.node) {
-            // Released rather than pinned, the way Obsidian does it: the node
-            // drifts back into the layout instead of staying where it was
-            // dropped.
+            // Released rather than pinned: the node drifts back into the
+            // layout instead of staying where it was dropped.
             state.node.fx = null;
             state.node.fy = null;
             simulation.current?.alphaTarget(0);

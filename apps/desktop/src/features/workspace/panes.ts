@@ -5,7 +5,16 @@
  * only be tested for calling this, so this is where the behaviour has to live.
  */
 
-export const MIN_PANE = 180;
+/**
+ * The narrowest a side pane is allowed to get.
+ *
+ * The file pane's toolbar is what sets this: it now starts to the right of the
+ * window's own buttons, so it needs the 76px they take (the last of the three
+ * ends at 69), four 28px icon buttons with 2px between them, and the 6px it
+ * keeps at its other end — 200 in all. Below that its last icon would be cut
+ * off by the divider.
+ */
+export const MIN_PANE = 204;
 /**
  * The narrowest the note is allowed to get.
  *
@@ -42,12 +51,20 @@ export const DEFAULT_SHARES = { left: 0.14, right: 0.4 };
 /** The pair the shares fall back to before anything has been measured. */
 const UNMEASURED_PANES: PaneWidths = { left: 240, right: 280 };
 
-/** Starting widths for a window of this width. */
+/**
+ * Starting widths for a window of this width.
+ *
+ * Floored at the same minimum a drag is: a share of a small window can be
+ * narrower than a pane is allowed to be, and a file pane that opens too narrow
+ * to hold its own toolbar has cut an icon off before anyone has touched a
+ * divider. `fitPanes` is what gives the note its room back if the floors do not
+ * fit; that is its job, and it already runs on every resize.
+ */
 export function defaultPanes(containerWidth: number): PaneWidths {
   if (containerWidth <= 0) return UNMEASURED_PANES;
   return {
-    left: Math.round(containerWidth * DEFAULT_SHARES.left),
-    right: Math.round(containerWidth * DEFAULT_SHARES.right),
+    left: Math.max(MIN_PANE, Math.round(containerWidth * DEFAULT_SHARES.left)),
+    right: Math.max(MIN_PANE, Math.round(containerWidth * DEFAULT_SHARES.right)),
   };
 }
 

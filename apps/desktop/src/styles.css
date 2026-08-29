@@ -1,16 +1,17 @@
 /*
  * The visual system (SPEC §15).
  *
- * Monochrome with exactly one accent. Dark mode is pure black behind white;
+ * Monochrome with one accent per theme. Dark mode is pure black behind white;
  * light mode is the exact inverse; the system preference decides unless the
  * user overrides it in Settings. Every border in the application — inputs and
  * buttons included — is 1px solid and squared.
  *
  * The accent is spent only on links, the note open in the file tree, the active
- * graph node, and mermaid diagrams, and it is written literally in exactly one
- * place per theme. Every
- * other rule reaches it through var(--accent) or var(--link), which is what
- * lets design.test.ts check the whole palette by reading this file.
+ * graph node, and mermaid diagrams. There is one per theme, both the user's to
+ * set in Settings; until they are set, light mode's is black and dark mode's is
+ * white. So nothing in this file is a hue at all — every rule reaches the
+ * accent through var(--accent) or var(--link), which is what lets
+ * design.test.ts check the whole palette by reading this file.
  *
  * Colour lives here and nowhere else. The CodeMirror theme and the graph
  * renderer are JavaScript, so a literal in either would be a colour no test
@@ -44,8 +45,33 @@
   --line-soft: #d4d4d4;
   --line-strong: #000000;
 
-  /* The one accent. Light mode has no hue at all: its links are black. */
-  --accent: #000000;
+  /*
+   * The accent, and the only way a hue reaches the application at all.
+   *
+   * There is one per theme, because there is no single colour that works on
+   * both grounds: white is the right accent on black and invisible on white,
+   * and black is the reverse. A shared accent would make every choice a
+   * compromise between the two, and the obvious ones unusable in one theme.
+   *
+   * `--accent-light` and `--accent-dark` are what Settings → Appearance writes,
+   * and neither is ever declared here. An unset custom property falls through
+   * to its `var()` fallback, so the base below is the default until something is
+   * chosen, and the choice overrides it with no theme logic in TypeScript —
+   * each theme reads only its own property, so writing either is safe whatever
+   * is currently showing.
+   *
+   * Both bases are declared on `:root`, not inside their own theme blocks, for
+   * two reasons: the picker shows a well per theme and has to read the default
+   * for the theme that is *not* showing, and reading a declared property does
+   * not depend on how a browser computes a `var()` chain.
+   *
+   * They are the two ends of the monochrome palette rather than colours, which
+   * is what keeps this file greyscale: until an accent is picked the
+   * application has no hue at all.
+   */
+  --accent-light-base: #000000;
+  --accent-dark-base: #ffffff;
+  --accent: var(--accent-light, var(--accent-light-base));
   --link: var(--accent);
 
   --font: "Helvetica Neue", Helvetica, Arial, sans-serif;
@@ -53,6 +79,33 @@
 
   --gap: 12px;
   --pad: 16px;
+
+  /*
+   * The band at the top of the window, and the corner the macOS window
+   * controls take out of it.
+   *
+   * `titleBarStyle: Overlay` (tauri.conf.json) puts the workspace under the
+   * title bar, so the controls float over whatever is in the top-left and the
+   * two toolbars have to leave them their room rather than draw underneath.
+   *
+   * 44px is what those toolbars measure — a 28px icon button (a 16px icon,
+   * 5px of padding, a hairline border) with 8px above and below — so their
+   * icons centre at 22. The controls are brought down to meet them by
+   * `trafficLightPosition` in tauri.conf.json, whose y is *not* an inset from
+   * the top: tao resizes the title bar container to the button's height plus
+   * y and leaves the button where it sits inside it, which measures out as
+   * `centre = y - 2`. Hence y: 24. The buttons are 14pt across and 23 apart,
+   * so their top edge sits at 15 — and x: 15 puts them the same distance from
+   * the left as from the top. macOS itself uses x: 9, which against a 22px
+   * centre reads as pinned to the left edge and floating below the top one.
+   * The last of the three then ends at 75, and 82 clears it.
+   *
+   * All of it measured against AppKit rather than guessed — the first two
+   * attempts at this assumed 12pt buttons and an inset y, and were wrong on
+   * both counts.
+   */
+  --traffic-lights: 82px;
+  --titlebar: 44px;
 
   /*
    * The narrowest the note's content will draw itself.
@@ -82,7 +135,7 @@
     --line: #333333;
     --line-soft: #333333;
     --line-strong: #ffffff;
-    --accent: #00ff00;
+    --accent: var(--accent-dark, var(--accent-dark-base));
     color-scheme: dark;
   }
 }
@@ -99,7 +152,7 @@
   --line: #333333;
   --line-soft: #333333;
   --line-strong: #ffffff;
-  --accent: #00ff00;
+  --accent: var(--accent-dark, var(--accent-dark-base));
   color-scheme: dark;
 }
 
@@ -182,7 +235,8 @@ button,
 a[href],
 label[for],
 input[type="checkbox"],
-input[type="radio"] {
+input[type="radio"],
+input[type="color"] {
   cursor: pointer;
 }
 
@@ -383,6 +437,23 @@ pre {
   outline: none;
 }
 
+/*
+ * With the file pane shut, the window controls sit over the top-left of the
+ * workspace itself.
+ *
+ * The first divider stops below them rather than running under them — a
+ * hairline nobody can grab, drawn through the close button, is worse than a
+ * slightly shorter one — and the note's own bar takes the inset the file
+ * toolbar was carrying.
+ */
+.workspace[data-left-collapsed] .divider--left {
+  margin-top: var(--titlebar);
+}
+
+.workspace[data-left-collapsed] .note__header {
+  padding-left: var(--traffic-lights);
+}
+
 .empty {
   margin: auto;
   padding: var(--pad);
@@ -400,11 +471,16 @@ pre {
   height: 100%;
 }
 
+/*
+ * The file pane's toolbar shares the top band with the window controls, so it
+ * starts to the right of them rather than beneath them.
+ */
 .explorer__toolbar {
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 8px 6px;
+  padding: 8px 6px 8px var(--traffic-lights);
+  min-height: var(--titlebar);
 }
 
 .explorer__scroll {
@@ -493,10 +569,10 @@ pre {
 }
 
 /*
- * The note you have open is named in the accent — green in dark mode, black in
- * light, the same ink every link in the application is written in. A row of
- * grey behind it said "selected" the way a list box does; the colour says it
- * the way the rest of this application does.
+ * The note you have open is named in the accent — the chosen colour in dark
+ * mode, black in light, the same ink every link in the application is written
+ * in. A row of grey behind it said "selected" the way a list box does; the
+ * colour says it the way the rest of this application does.
  *
  * `aria-current` still marks the row for anything that is listening; it is the
  * class that carries the colour, so `design.test.ts` can name the one surface
@@ -601,6 +677,20 @@ pre {
   color: var(--fg);
 }
 
+/*
+ * A button reached with the keyboard, drawn in ink rather than in the system's
+ * blue. Same hairline as `.input:focus`, and inset for the same reason: an
+ * outline outside the border would nudge the row it sits in.
+ *
+ * `:focus-visible` and not `:focus`, so a button that was merely clicked does
+ * not keep a ring after the press.
+ */
+.button:focus-visible,
+.icon-button:focus-visible {
+  outline: 1px solid var(--fg);
+  outline-offset: -2px;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -644,6 +734,37 @@ pre {
 
 .input::placeholder {
   color: var(--muted);
+}
+
+/*
+ * The accent well.
+ *
+ * A colour input arrives with a rounded, inset swatch of its own, so the
+ * appearance is dropped and the block redrawn with the same hairline border
+ * every other control in the application has.
+ */
+.swatch {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: 1px solid var(--line);
+  /*
+   * As tall as the field beside it: 14px of text at 1.5, the input's 7px of
+   * padding top and bottom, and its hairline. A row lines its controls up
+   * along the bottom, so a shorter well would sit there looking like it had
+   * slipped.
+   */
+  width: 44px;
+  height: 37px;
+  padding: 0;
+}
+
+.swatch::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.swatch::-webkit-color-swatch {
+  border: none;
 }
 
 .choice {
@@ -840,6 +961,8 @@ pre {
   align-items: center;
   gap: var(--gap);
   padding: 8px 12px;
+  /* Level with the file pane's toolbar, and with the window controls. */
+  min-height: var(--titlebar);
 }
 
 .note__nav,
@@ -891,6 +1014,12 @@ pre {
 
 .breadcrumb__separator {
   color: var(--faint);
+  /*
+   * The spaces around the slash are the spacing. Without this the last one,
+   * sitting at the end of the folders box, collapses away and the note's own
+   * name runs into its slash: "lens /how_lens_works".
+   */
+  white-space: pre;
 }
 
 .breadcrumb__current {
@@ -910,6 +1039,46 @@ pre {
   min-width: var(--note-min);
 }
 
+/*
+ * The note's heading in source mode.
+ *
+ * Outside the scrolling body, so it stays put; sized and spaced as the
+ * editor's own first line would be, because that is what it is — the one line
+ * of the document that lives above the caret rather than under it.
+ */
+.note__title-bar {
+  padding: 8px 24px 4px;
+  min-width: var(--note-min);
+}
+
+.note__title {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.6;
+  display: flex;
+  gap: 0.5ch;
+  align-items: baseline;
+}
+
+.note__title-marker {
+  color: var(--faint);
+}
+
+.note__title-field {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  width: 100%;
+}
+
+.note__title-field:focus {
+  outline: none;
+}
+
 /* Preview ----------------------------------------------------------------- */
 
 .preview {
@@ -925,13 +1094,6 @@ pre {
 .preview__title {
   font-size: 28px;
   margin-bottom: 4px;
-}
-
-.preview__rule {
-  border: none;
-  border-top: 1px solid var(--line-soft);
-  width: 100%;
-  margin: 4px 0;
 }
 
 .preview__content {
@@ -976,7 +1138,17 @@ pre {
   gap: 4px;
 }
 
+/*
+ * The rule a `---` draws, in the same hairline as the divider above Linked
+ * mentions.
+ *
+ * The width is stated rather than left to the default: the preview is a flex
+ * column, and WebKit's own `margin-inline: auto` on an `hr` stops a flex item
+ * stretching to the line, which left the rule a pixel tall and no pixels wide.
+ */
 .md-rule {
+  width: 100%;
+  margin: 0;
   border: none;
   border-top: 1px solid var(--line-soft);
 }
@@ -1221,8 +1393,9 @@ pre {
 /* Mermaid ----------------------------------------------------------------- */
 
 /*
- * Ported from the vault template's mermaid_green.css, with the literals swapped
- * for tokens so light mode inherits black and the accent stays defined once.
+ * The literals are swapped for tokens throughout, so a diagram follows the
+ * accent in whichever theme is showing rather than carrying a palette of its
+ * own.
  */
 .mermaid {
   background: var(--bg);
@@ -1363,16 +1536,39 @@ pre {
   justify-content: flex-end;
 }
 
+/*
+ * A banner is the top of the window while it is up, so it clears the window
+ * controls the same way the two toolbars beneath it do.
+ */
 .app__banner {
   display: flex;
   align-items: flex-start;
   gap: var(--gap);
-  padding: 12px var(--pad);
+  padding: 12px var(--pad) 12px var(--traffic-lights);
   border-bottom: 1px solid var(--line);
+  min-height: var(--titlebar);
 }
 
 .app__banner .notice {
   flex: 1;
+}
+
+/*
+ * The notes a rename is about to rewrite, listed in the dialog that asks. Paths
+ * rather than prose, so the list is scanned rather than read.
+ */
+.confirm__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  padding: 8px;
+}
+
+.confirm__list li {
+  padding: 2px 0;
 }
 
 /* Context menu ------------------------------------------------------------ */

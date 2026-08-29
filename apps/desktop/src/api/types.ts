@@ -36,6 +36,8 @@ export interface CliStatus {
   /** Absolute path of the bundled sidecar this app runs. */
   path: string;
   available: boolean;
+  /** Whether that path is a build artifact rather than a shipped app's. */
+  developmentBuild: boolean;
   cliVersion?: string;
   coreVersion?: string;
   mcpProtocolVersion?: string;
@@ -60,6 +62,8 @@ export interface KnownClient {
   path: string;
   present: boolean;
   installed: boolean;
+  /** Whether the entry already there names a command that has gone. */
+  stale: boolean;
   serverKey: string;
 }
 
@@ -139,6 +143,38 @@ export interface MovePathData {
   from: string;
   to: string;
   kind: DocumentKind;
+}
+
+export interface RelinkUpdate {
+  path: string;
+  /** How many links in this file were retargeted. */
+  links: number;
+  new_revision: string;
+}
+
+export interface RelinkSkip {
+  path: string;
+  /** The link's target, exactly as it still stands in the file. */
+  target: string;
+  reason: "unresolvable";
+}
+
+export interface RelinkTruncation {
+  file_cap_hit: boolean;
+  node_cap_hit: boolean;
+  total_bytes_cap_hit: boolean;
+  nodes_omitted: number;
+  files_unscanned: number;
+  scanned_bytes: number;
+}
+
+export interface RelinkData {
+  from: string;
+  to: string;
+  dry_run: boolean;
+  updated: RelinkUpdate[];
+  skipped: RelinkSkip[];
+  truncated: RelinkTruncation;
 }
 
 export interface DeletePathData {

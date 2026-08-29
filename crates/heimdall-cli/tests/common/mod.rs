@@ -13,12 +13,30 @@ pub fn binary() -> PathBuf {
     assert_cmd::cargo::cargo_bin("heimdall")
 }
 
+/// Where the forked binaries keep their write locks.
+///
+/// These are real `heimdall` processes, so they resolve the production lock
+/// directory — the developer's actual application-data folder — unless told
+/// otherwise. `HEIMDALL_LOCK_DIR` is what tells them otherwise. Every vault
+/// here is a fresh temp directory and lock files are named by a hash of the
+/// vault path, so one shared directory cannot collide.
+pub fn lock_dir() -> PathBuf {
+    std::env::temp_dir().join("heimdall-test-locks")
+}
+
+/// A `heimdall` command that will not write into the real application data.
+pub fn command() -> std::process::Command {
+    let mut command = std::process::Command::new(binary());
+    command.env("HEIMDALL_LOCK_DIR", lock_dir());
+    command
+}
+
 /// Create a scaffolded vault and return its directory and path.
 pub fn new_vault() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_str().unwrap().to_string();
 
-    let output = std::process::Command::new(binary())
+    let output = command()
         .args(["create", "demo", "--root", &root])
         .output()
         .unwrap();
@@ -29,14 +47,14 @@ pub fn new_vault() -> (tempfile::TempDir, String) {
 }
 
 pub fn run(args: &[&str]) -> Output {
-    std::process::Command::new(binary()).args(args).output().unwrap()
+    command().args(args).output().unwrap()
 }
 
 pub fn run_with_stdin(args: &[&str], stdin: &[u8]) -> Output {
     use std::io::Write;
     use std::process::Stdio;
 
-    let mut child = std::process::Command::new(binary())
+    let mut child = command()
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

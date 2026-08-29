@@ -18,12 +18,11 @@ use crate::{envelope, mcp};
 #[derive(Debug, Parser)]
 #[command(
     name = "heimdall",
-    about = "An intent-aware layer over Obsidian-compatible Markdown vaults.",
-    long_about = "Heimdall gives AI clients constrained, purpose-aware operations over an \
-                  Obsidian-compatible Markdown vault instead of unrestricted filesystem \
-                  access.\n\nOrdinary notes live outside aios/; protected agent instructions, \
-                  memories, and entries live inside it. Every command prints a JSON envelope \
-                  on stdout.",
+    about = "An intent-aware layer over Markdown vaults.",
+    long_about = "Heimdall gives AI clients constrained, purpose-aware operations over a \
+                  Markdown vault instead of unrestricted filesystem access.\n\nOrdinary notes \
+                  live outside aios/; protected memories and entries live inside it. Every \
+                  command prints a JSON envelope on stdout.",
     disable_version_flag = true
 )]
 pub struct Cli {
@@ -100,16 +99,6 @@ enum Command {
         /// Use this for per-document line ranges.
         #[arg(long, conflicts_with_all = ["doc", "start_line", "max_lines", "max_total_bytes"])]
         request: bool,
-    },
-
-    /// Read the vault's agent instructions.
-    ReadAgents {
-        #[command(flatten)]
-        vault: VaultArg,
-        #[arg(long)]
-        start_line: Option<u32>,
-        #[arg(long)]
-        max_lines: Option<u32>,
     },
 
     /// List the main memory and extended memories.
@@ -215,6 +204,24 @@ enum Command {
         to: String,
     },
 
+    /// Retarget the links that pointed at a path a move has just changed.
+    ///
+    /// Called after move-path, never instead of it. Only files holding a link
+    /// to the moved path are written.
+    Relink {
+        #[command(flatten)]
+        vault: VaultArg,
+        /// Where the note or folder was, before the move.
+        #[arg(long)]
+        from: String,
+        /// Where it is now.
+        #[arg(long)]
+        to: String,
+        /// Report what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Move a note or folder into the vault's .trash/ folder.
     DeletePath {
         #[command(flatten)]
@@ -224,15 +231,6 @@ enum Command {
         /// The revision from the latest read, for a file.
         #[arg(long, value_name = "REVISION")]
         expected_revision: Option<String>,
-    },
-
-    /// Replace the vault's agent instructions. Content comes from stdin.
-    WriteAgents {
-        #[command(flatten)]
-        vault: VaultArg,
-        /// The revision from the latest read.
-        #[arg(long, value_name = "REVISION")]
-        expected_revision: String,
     },
 
     /// Build the vault's whole link graph in one call.
@@ -390,18 +388,6 @@ fn dispatch(command: Command) -> Result<ExitCode> {
             envelope::ok(&commands::read_documents(&vault.open()?, request)?)
         }
 
-        Command::ReadAgents {
-            vault,
-            start_line,
-            max_lines,
-        } => envelope::ok(&commands::read_agents(
-            &vault.open()?,
-            commands::ReadAgentsRequest {
-                start_line,
-                max_lines,
-            },
-        )?),
-
         Command::ListMemories { vault, limit } => envelope::ok(&commands::list_memories(
             &vault.open()?,
             commands::ListMemoriesRequest { limit },
@@ -511,6 +497,16 @@ fn dispatch(command: Command) -> Result<ExitCode> {
             commands::MovePathRequest { from, to },
         )?),
 
+        Command::Relink {
+            vault,
+            from,
+            to,
+            dry_run,
+        } => envelope::ok(&commands::relink(
+            &vault.open()?,
+            commands::RelinkRequest { from, to, dry_run },
+        )?),
+
         Command::DeletePath {
             vault,
             path,
@@ -522,17 +518,6 @@ fn dispatch(command: Command) -> Result<ExitCode> {
                 expected_revision: expected_revision
                     .map(|raw| raw.parse::<Revision>())
                     .transpose()?,
-            },
-        )?),
-
-        Command::WriteAgents {
-            vault,
-            expected_revision,
-        } => envelope::ok(&commands::write_agents(
-            &vault.open()?,
-            commands::WriteAgentsRequest {
-                content: read_stdin()?,
-                expected_revision: expected_revision.parse::<Revision>()?,
             },
         )?),
 
@@ -661,7 +646,6 @@ mod tests {
             // The MCP surface, mirrored one-to-one (SPEC §9).
             "list-documents",
             "read-documents",
-            "read-agents",
             "list-memories",
             "read-memory",
             "write-memory",
@@ -674,7 +658,6 @@ mod tests {
             "create-folder",
             "move-path",
             "delete-path",
-            "write-agents",
             "write-entry",
             "link-graph",
             "mcp",

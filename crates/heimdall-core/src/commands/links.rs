@@ -17,10 +17,12 @@
 //! Links inside HTML comments are not suppressed either. Worth knowing; not
 //! worth an HTML parser.
 
+use std::ops::Range;
+
 /// How a link was written, which decides how it may be resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LinkStyle {
-    /// `[[target]]` — a name Obsidian resolves across the whole vault.
+    /// `[[target]]` — a name resolved across the whole vault.
     Wiki,
     /// `[text](target)` — a path, resolved relative to the linking note.
     Markdown,
@@ -30,11 +32,32 @@ pub(crate) enum LinkStyle {
 pub(crate) struct RawLink {
     pub target: String,
     pub style: LinkStyle,
+    /// Where the target sits in the text it was scanned from, in bytes.
+    ///
+    /// This is the range of the *written* target — before a Markdown link's
+    /// percent escapes are decoded, and inside the delimiters rather than
+    /// around them — so replacing exactly this range leaves the `|alias`, the
+    /// `#heading`, an `![[` embed marker, and a Markdown link's text and title
+    /// untouched. `relink` is what needs it; `link_graph` ignores it.
+    pub span: Range<usize>,
+}
+
+/// The byte offset of `part` within `whole`, where `part` is a subslice of it.
+///
+/// Every narrowing this module does — `split`, `trim`, `strip_prefix` — yields a
+/// subslice of its input, so the two pointers are into one allocation and the
+/// difference between them is an offset. `str::substr_range` says the same thing
+/// and is newer than this crate's MSRV.
+fn offset_of(whole: &str, part: &str) -> usize {
+    (part.as_ptr() as usize) - (whole.as_ptr() as usize)
 }
 
 /// Every link in one file, in the order they appear.
 pub(crate) fn scan(text: &str) -> Vec<RawLink> {
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    // Offsets are computed against the stripped text and shifted back at the
+    // end, so a caller splicing by span never has to know a BOM was there.
+    let bom = text.len() - text.trim_start_matches('\u{feff}').len();
+    let text = &text[bom..];
     let mut links = Vec::new();
 
     let body_start = match frontmatter_end(text) {
@@ -44,14 +67,18 @@ pub(crate) fn scan(text: &str) -> Vec<RawLink> {
             // the vault's own `types.json` registers as `multitext`.
             // Scanning the whole block rather than one known key catches
             // `related:`, `up:`, and any inline reference too.
-            scan_wikilinks(&text[..end], &mut links);
+            scan_wikilinks(&text[..end], 0, &mut links);
             end
         }
         None => 0,
     };
 
     let mut fence: Option<Fence> = None;
+    let mut offset = body_start;
     for line in text[body_start..].split('\n') {
+        // The separator `split` removed, so the next line starts one past this
+        // one. A `\r` sits inside the line, so stripping it moves no offset.
+        let stride = line.len() + 1;
         let line = line.strip_suffix('\r').unwrap_or(line);
 
         match &fence {
@@ -59,17 +86,37 @@ pub(crate) fn scan(text: &str) -> Vec<RawLink> {
                 if closes(line, open) {
                     fence = None;
                 }
+                offset += stride;
                 continue;
             }
             None => {
                 if let Some(open) = opens(line) {
                     fence = Some(open);
+                    offset += stride;
                     continue;
                 }
             }
         }
 
-        scan_line(&mask_inline_code(line), &mut links);
+        // Masking preserves byte length, so an offset into the masked line is
+        // the same offset into the original one.
+        scan_line(&mask_inline_code(line), offset, &mut links);
+        offset += stride;
+    }
+
+    for link in &mut links {
+        // Take the target from the original text rather than from the masked
+        // line it was found in, so a span always slices back to exactly what
+        // was written. The two differ only for a target straddling a code span
+        // — ``[[a`b`c]]`` — which resolves to nothing either way, but the
+        // invariant is what a caller splicing by span is entitled to rely on.
+        let written = &text[link.span.clone()];
+        link.target = match link.style {
+            LinkStyle::Wiki => written.to_string(),
+            LinkStyle::Markdown => percent_decode(written),
+        };
+        link.span.start += bom;
+        link.span.end += bom;
     }
 
     links
@@ -192,18 +239,18 @@ fn closing_run(bytes: &[u8], from: usize, length: usize) -> Option<usize> {
     None
 }
 
-fn scan_wikilinks(text: &str, links: &mut Vec<RawLink>) {
+fn scan_wikilinks(text: &str, base: usize, links: &mut Vec<RawLink>) {
     let mut rest = text;
     while let Some(start) = rest.find("[[") {
         let after = &rest[start + 2..];
         let Some(end) = after.find("]]") else { break };
-        push_wiki(&after[..end], links);
+        push_wiki(&after[..end], base + offset_of(text, after), links);
         rest = &after[end + 2..];
     }
 }
 
 /// One line, already masked, scanned for both link styles.
-fn scan_line(line: &str, links: &mut Vec<RawLink>) {
+fn scan_line(line: &str, base: usize, links: &mut Vec<RawLink>) {
     let bytes = line.as_bytes();
     let mut index = 0usize;
 
@@ -218,7 +265,7 @@ fn scan_line(line: &str, links: &mut Vec<RawLink>) {
             let after = &line[index + 2..];
             match after.find("]]") {
                 Some(end) => {
-                    push_wiki(&after[..end], links);
+                    push_wiki(&after[..end], base + index + 2, links);
                     index += 2 + end + 2;
                 }
                 None => index += 2,
@@ -239,7 +286,7 @@ fn scan_line(line: &str, links: &mut Vec<RawLink>) {
         let destination = &after[close + 2..];
         match destination.find(')') {
             Some(end) => {
-                push_markdown(&destination[..end], links);
+                push_markdown(&destination[..end], base + index + 1 + close + 2, links);
                 index += 1 + close + 2 + end + 1;
             }
             None => index += 1,
@@ -247,7 +294,7 @@ fn scan_line(line: &str, links: &mut Vec<RawLink>) {
     }
 }
 
-fn push_wiki(inner: &str, links: &mut Vec<RawLink>) {
+fn push_wiki(inner: &str, base: usize, links: &mut Vec<RawLink>) {
     // `[[target|alias]]`, then `[[target#heading]]` and `[[target#^block]]`.
     let target = inner.split('|').next().unwrap_or_default();
     let target = target.split('#').next().unwrap_or_default().trim();
@@ -255,13 +302,15 @@ fn push_wiki(inner: &str, links: &mut Vec<RawLink>) {
     if target.is_empty() {
         return;
     }
+    let start = base + offset_of(inner, target);
     links.push(RawLink {
         target: target.to_string(),
         style: LinkStyle::Wiki,
+        span: start..start + target.len(),
     });
 }
 
-fn push_markdown(destination: &str, links: &mut Vec<RawLink>) {
+fn push_markdown(destination: &str, base: usize, links: &mut Vec<RawLink>) {
     let mut target = destination.trim();
 
     // An optional title: `[text](path "Title")`.
@@ -279,13 +328,17 @@ fn push_markdown(destination: &str, links: &mut Vec<RawLink>) {
         return;
     }
 
+    // The span covers the written form: `percent_decode` allocates, so the
+    // decoded target has no offsets of its own to give.
+    let start = base + offset_of(destination, target);
     links.push(RawLink {
         target: percent_decode(target),
         style: LinkStyle::Markdown,
+        span: start..start + target.len(),
     });
 }
 
-/// Decode `%XX` escapes, which Obsidian writes for spaces in Markdown links.
+/// Decode `%XX` escapes, which editors write for spaces in Markdown links.
 ///
 /// Works on bytes throughout. Slicing the original `&str` by byte offset would
 /// panic whenever a `%` sits close enough to a multi-byte character for the
@@ -456,5 +509,63 @@ mod tests {
     #[test]
     fn an_unterminated_wikilink_does_not_consume_the_line() {
         assert_eq!(wiki("[[broken and [[good]]"), ["broken and [[good"]);
+    }
+
+    /// Every span slices the text back to the target exactly as it was written.
+    ///
+    /// This is the whole basis of `relink`'s splice: it replaces a span and
+    /// leaves the delimiters, the alias, the anchor and a Markdown link's text
+    /// where they are. A span off by one byte corrupts a note.
+    fn spans_slice_back(text: &str) {
+        for link in scan(text) {
+            let written = &text[link.span.clone()];
+            let expected = match link.style {
+                LinkStyle::Wiki => written.to_string(),
+                LinkStyle::Markdown => percent_decode(written),
+            };
+            assert_eq!(expected, link.target, "span {:?} in {text:?}", link.span);
+        }
+    }
+
+    #[test]
+    fn every_span_slices_back_to_its_target() {
+        for text in [
+            "[[plain]] [[target|alias]] [[target#heading]] [[folder/target]] ![[embed]]",
+            "---\nlinks:\n  - \"[[profile]]\"\n  - \"[[articles]]\"\n---\n\n# Body [[after]]\n",
+            "before [[a]]\n```mermaid\n[[not_a_link]]\n```\nafter [[b]]\n",
+            "write `[[literal]]` or [[real]]",
+            "café `code` [[naïve]] 日本語 and [[another]]",
+            "[a](notes/one.md) [e](<my note.md>) [f](caf%C3%A9.md) [g](note.md \"A title\")",
+            "one\r\ntwo [[crlf]]\r\nthree\r\n",
+            "\u{feff}[[after_a_bom]] and [[a_second]]",
+            "  [[indented]]\n\n    [[four_spaces_is_not_code]]\n",
+        ] {
+            spans_slice_back(text);
+        }
+    }
+
+    #[test]
+    fn a_span_survives_a_masked_code_span_earlier_on_the_line() {
+        // Masking is byte-length preserving, which is the property that lets a
+        // masked-line offset be used against the original text.
+        let links = scan("`x` and [[target]]");
+        assert_eq!(links.len(), 1);
+        assert_eq!(&"`x` and [[target]]"[links[0].span.clone()], "target");
+    }
+
+    #[test]
+    fn a_span_is_measured_past_a_byte_order_mark() {
+        let text = "\u{feff}# Title\n\n[[target]]\n";
+        let links = scan(text);
+        assert_eq!(links.len(), 1);
+        assert_eq!(&text[links[0].span.clone()], "target");
+    }
+
+    #[test]
+    fn a_markdown_span_covers_the_written_form_not_the_decoded_one() {
+        let text = "[x](my%20note.md)";
+        let links = scan(text);
+        assert_eq!(links[0].target, "my note.md");
+        assert_eq!(&text[links[0].span.clone()], "my%20note.md");
     }
 }

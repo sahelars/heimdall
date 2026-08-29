@@ -51,8 +51,8 @@ pub fn list_entries(vault: &Vault, request: ListEntriesRequest) -> Result<ListEn
 
         // Heimdall names its own entries after the UTC instant that created
         // them, so the filename is authoritative and costs no file read. A file
-        // a user added by hand in Obsidian still lists — it just falls back to
-        // the filesystem's modification time.
+        // a user added by hand in another editor still lists — it just falls
+        // back to the filesystem's modification time.
         let created_at =
             timestamps::parse_entry_stem(&child.name).unwrap_or(child.meta.modified_at);
 

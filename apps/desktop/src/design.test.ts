@@ -5,10 +5,11 @@
  * look like, and a rendered snapshot would not notice a stray colour on a
  * screen this test never mounts.
  *
- * The palette rule is no longer "no colour". It is "one accent, defined once,
- * spent only on links, the active graph node, and mermaid" — which is still
- * something a machine can check, so it is still checked here rather than
- * trusted to review.
+ * The palette rule is "no hue in this file at all": light mode's accent is
+ * black, dark mode's is the user's and arrives at runtime, and both are spent
+ * only on links, the open note, the active graph node, and mermaid. All of
+ * that is still something a machine can check, so it is still checked here
+ * rather than trusted to review.
  */
 
 import { readFileSync } from "node:fs";
@@ -84,9 +85,6 @@ describe("borders", () => {
     }
   });
 });
-
-/** The single permitted hue, from the vault template's own green_accent.css. */
-const ACCENT = "#00ff00";
 
 /**
  * The only classes allowed to spend the accent.
@@ -288,6 +286,39 @@ describe("pane dividers", () => {
   });
 });
 
+describe("keyboard focus", () => {
+  it("draws a button's focus ring in ink rather than in the system's blue", () => {
+    // WebKit's default ring is the one colour in the application that is not
+    // the application's: a hue, on a surface the palette says is greyscale.
+    for (const control of [".button:focus-visible", ".icon-button:focus-visible"]) {
+      const rule = rules(declarations).find((candidate) =>
+        candidate.selector.split(",").some((part) => part.trim() === control),
+      );
+      expect(rule, `${control} has no rule, so the system ring shows through`).toBeDefined();
+      expect(rule!.body).toMatch(/outline:\s*1px solid var\(--fg\);/);
+    }
+  });
+
+  it("never hides a focus ring without putting something in its place", () => {
+    // `outline: none` is allowed only where the element is a container nobody
+    // is being pointed at, or where a rule of its own is drawn instead.
+    const REPLACED = [
+      ".divider:focus-visible",
+      ".modal:focus",
+      ".note__title-field:focus",
+      ".switcher__input:focus",
+      ".preview__title-field:focus",
+    ];
+    for (const rule of rules(declarations)) {
+      if (!/outline:\s*none/.test(rule.body)) continue;
+      expect(
+        REPLACED.some((surface) => rule.selector.includes(surface)),
+        `"${rule.selector}" hides a focus ring with nothing in its place`,
+      ).toBe(true);
+    }
+  });
+});
+
 describe("the settings sheet", () => {
   it("draws no rule under its title", () => {
     // The tab strip below draws its own, and two hairlines a row apart boxed
@@ -327,34 +358,83 @@ describe("palette", () => {
     expect(declarations).toMatch(/:root:not\(\[data-theme="light"\]\)/);
   });
 
-  it("carries one accent and no other hue: every remaining value is a true grey", () => {
+  it("carries no hue at all: the accent is the user's, and is never written here", () => {
     const hexes = declarations.match(/#[0-9a-fA-F]{3,8}\b/g) ?? [];
     expect(hexes.length).toBeGreaterThan(0);
 
     for (const hex of hexes) {
-      if (hex.toLowerCase() === ACCENT) continue;
-      expect(isGrey(hex), `${hex} is neither a grey nor the one accent`).toBe(true);
+      expect(isGrey(hex), `${hex} is not a grey`).toBe(true);
     }
   });
 
-  it("writes the accent only as --accent, so there is one place to change it", () => {
-    const literals = declarations.match(new RegExp(ACCENT, "gi")) ?? [];
-    const definitions = (declarations.match(/--accent:\s*#[0-9a-fA-F]{3,8};/g) ?? []).filter(
-      (line) => line.toLowerCase().includes(ACCENT),
-    );
-    expect(definitions.length).toBeGreaterThan(0);
-    expect(literals.length, "the accent is written somewhere other than --accent").toBe(
-      definitions.length,
-    );
-
-    // Light mode has no hue at all: its links are black (SPEC §15).
+  it("gives each theme its own accent, resolved from its own property", () => {
+    // One accent per theme (SPEC §15): a single shared one is invisible against
+    // one of the two backgrounds. Each theme reads only its own property, and
+    // the fallback beside it is that theme's monochrome default.
     const root = declarations.match(/:root\s*\{[^}]*\}/)?.[0] ?? "";
-    expect(root).toMatch(/--accent:\s*#000000;/);
+    expect(root).toMatch(/--accent:\s*var\(--accent-light,\s*var\(--accent-light-base\)\);/);
+
+    const media = declarations.match(/@media \(prefers-color-scheme: dark\)\s*\{[\s\S]*?\n\}/)?.[0] ?? "";
+    const override = declarations.match(/:root\[data-theme="dark"\]\s*\{[^}]*\}/)?.[0] ?? "";
+    for (const block of [media, override]) {
+      expect(block).toMatch(/--accent:\s*var\(--accent-dark,\s*var\(--accent-dark-base\)\);/);
+    }
+  });
+
+  it("states both defaults on :root, as opposite ends of the palette", () => {
+    // On `:root` rather than inside their own theme blocks, so the picker can
+    // read the default for the theme that is not currently showing — it shows a
+    // well for each. Opposite ends is the point: black on white, white on black.
+    const root = declarations.match(/:root\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(root).toMatch(/--accent-light-base:\s*#000000;/);
+    expect(root).toMatch(/--accent-dark-base:\s*#ffffff;/);
+  });
+
+  it("spends an accent in light mode too, not only in dark", () => {
+    // The regression this guards: the accent used to be read only by the dark
+    // blocks, so a colour chosen in Settings did nothing at all in light mode.
+    const root = declarations.match(/:root\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(root).toContain("var(--accent-light");
+  });
+
+  it("never declares the chosen accents, so each theme's fallback is its default", () => {
+    // The whole mechanism. An unset custom property falls through to its var()
+    // fallback, which is how the property Settings writes can be absent and
+    // still leave a working colour behind. Declaring either here would make a
+    // choice impossible to clear.
+    for (const property of ["--accent-light", "--accent-dark"]) {
+      expect(declarations, `${property} must not be declared`).not.toMatch(
+        new RegExp(`${property}:\\s*[^;]+;`),
+      );
+    }
+
+    // And every read carries a fallback, or the unset state resolves to nothing
+    // at all rather than to a colour.
+    const reads = declarations.match(/var\(--accent-(?:light|dark)[^;]*\)/g) ?? [];
+    expect(reads.length).toBeGreaterThan(0);
+    for (const read of reads) {
+      expect(read, `${read} has no fallback`).toMatch(
+        /var\(--accent-(light|dark),\s*var\(--accent-\1-base\)/,
+      );
+    }
+
+    // Only the theme blocks read them. Everything else goes through `--accent`,
+    // so there is exactly one place per theme that decides what the accent is
+    // and no rule can reach past it for the raw choice.
+    for (const rule of rules(declarations)) {
+      if (!/var\(--accent-(?:light|dark),/.test(rule.body)) continue;
+      expect(
+        rule.selector.startsWith(":root"),
+        `"${rule.selector}" reads a chosen accent instead of --accent`,
+      ).toBe(true);
+    }
   });
 
   it("spends the accent only on links, the open note, the active graph node, and mermaid", () => {
     for (const rule of rules(declarations)) {
-      if (!/var\(--accent\)|var\(--link\)/.test(rule.body)) continue;
+      // The theme properties as well as `--accent`: a new surface must not be
+      // able to spend the accent by reaching past it for a token behind it.
+      if (!/var\(--accent[a-z-]*\)|var\(--link\)/.test(rule.body)) continue;
       if (rule.selector.startsWith(":root")) continue;
       const allowed = ACCENT_SURFACES.some((surface) => rule.selector.includes(`.${surface}`));
       expect(allowed, `"${rule.selector}" is not a surface the accent may be spent on`).toBe(true);

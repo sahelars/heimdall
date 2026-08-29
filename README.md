@@ -1,8 +1,11 @@
 # Heimdall
 
-An intent-aware layer over Obsidian-compatible Markdown vaults. Heimdall gives AI
-clients constrained, purpose-aware operations over notes, agent instructions,
-durable memories, and entries — instead of unrestricted filesystem access.
+An intent-aware layer over Markdown vaults. Heimdall gives AI clients
+constrained, purpose-aware operations over notes, durable memories, and
+entries — instead of unrestricted filesystem access.
+
+A vault is a folder of Markdown files and nothing else, so any Markdown editor
+opens the same files.
 
 `docs/SPEC.md` is the source of truth for product behavior.
 
@@ -23,7 +26,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Use
 
-Create a vault, or add the managed structure to an existing Obsidian vault:
+Create a vault, or add the managed structure to a folder of notes you already have:
 
 ```bash
 heimdall create my-vault --root ~/Documents
@@ -37,7 +40,6 @@ V=~/Documents/my-vault
 
 heimdall list-documents --vault "$V" --recursive
 heimdall read-documents --vault "$V" --doc ideas/hello_world.md
-heimdall read-agents    --vault "$V"
 
 heimdall list-memories  --vault "$V"
 heimdall read-memory    --vault "$V"
@@ -73,11 +75,17 @@ heimdall mcp --vault ~/Documents/my-vault
 }
 ```
 
-Nine tools: `list_documents`, `read_documents`, `read_agents`, `list_memories`,
-`read_memory`, `write_memory`, `list_entries`, `read_entry`, `create_entry`.
-There is no general file read, write, or execute tool, and no tool takes a vault
-path — the vault is fixed by `--vault` and cannot be named, switched, or
-discovered by a call. Creating a vault stays a shell command.
+Eight tools: `list_documents`, `read_documents`, `list_memories`, `read_memory`,
+`write_memory`, `list_entries`, `read_entry`, `create_entry`. There is no general
+file read, write, or execute tool, and no tool takes a vault path — the vault is
+fixed by `--vault` and cannot be named, switched, or discovered by a call.
+Creating a vault stays a shell command.
+
+There is no agent-instructions file and no tool to read one. MCP already carries
+that: the server publishes an `instructions` string at initialization, so a
+client has the rules before its first call rather than after it. What varies per
+vault — how this user wants their assistant to work — is durable context, and
+lives in the main memory, which those instructions point at.
 
 Each tool publishes an input and output schema derived from the same Rust types
 the shell returns, so the two adapters cannot drift. Results come back as typed
@@ -92,7 +100,7 @@ heimdall --version --json
 
 ## Desktop app
 
-An Obsidian-style workspace over the same vault.
+A three-pane workspace over the same vault.
 
 ```bash
 cd apps/desktop
@@ -106,17 +114,20 @@ folder, sort, and collapse-all, and rename/delete on right-click. **Middle** is 
 back/forward, and a toggle between a Markdown source editor and a rendered
 preview that shows YAML frontmatter as a properties table, draws `mermaid`
 diagrams, and lists linked mentions. **Right** is a force-directed graph of the
-vault, built to match Obsidian's: pan with inertia, zoom about the pointer, drag
+vault: pan with inertia, zoom about the pointer, drag
 a node and its neighbours follow, click one to open it, hover to light up its
 neighbourhood and dim the rest. `⌘O` finds a note by name.
 
 The note's heading is its filename — editing one renames the other.
 
-Dark mode is pure black with `#00ff00` links; light mode is the exact inverse
-with black links. The system preference decides unless overridden.
+Dark mode is pure black behind white; light mode is the exact inverse. The
+system preference decides unless overridden. Each theme has its own accent
+colour, set in Settings, spent on links, the open note, the active graph node,
+and mermaid. Until you pick one that theme is monochrome — black links on white,
+white on black.
 
 **Heimdall → Settings…** (`⌘,`) opens a modal with four sections: **Vault**
-creates a templated vault or initializes an existing Obsidian one; **Server**
+creates a templated vault or initializes a folder you already have; **Server**
 shows the exact `heimdall mcp` command, generates the `mcpServers` snippet, offers
 to write it into a detected client's configuration, and proves it works with a
 real MCP handshake; **Appearance** overrides the theme; **Diagnostics** reports
@@ -125,9 +136,9 @@ recent failures.
 
 Editing needs writes the MCP surface deliberately does not have, so the desktop
 calls shell subcommands instead — `write-document`, `create-folder`, `move-path`,
-`delete-path`, `write-agents`, `write-entry`, and `link-graph`. None of them is
+`delete-path`, `write-entry`, and `link-graph`. None of them is
 an MCP tool, and none of their types derives `JsonSchema`, so giving one a tool
-would not compile. The tool surface stays at nine. Saving carries the revision
+would not compile. The tool surface stays at eight. Saving carries the revision
 the note was read at, and a stale one becomes a conflict the user resolves —
 never a silent overwrite. Deleting moves a note into the vault's `.trash/`;
 nothing is ever unlinked.

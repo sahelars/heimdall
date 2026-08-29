@@ -20,6 +20,7 @@ import type {
   ListDocumentsData,
   MovePathData,
   ReadDocumentsData,
+  RelinkData,
   WriteDocumentData,
 } from "./types";
 import type { DomainError } from "./types";
@@ -83,8 +84,6 @@ async function readChunk(
 
   const call = () => {
     switch (source) {
-      case "agents":
-        return invokeCli<ReadResult>("read-agents", { vault, ...range });
       case "memory-main":
         return invokeCli<ReadResult>("read-memory", { vault, ...range });
       case "memory-extended":
@@ -195,8 +194,8 @@ export interface SaveResult {
  * is what the CLI treats as a caller mistake, precisely so a stale editor cannot
  * silently overwrite someone else's change.
  *
- * Entries and agent instructions have no create form: both always exist in an
- * initialized vault, so `null` there is a caller error rather than a shorthand.
+ * Entries have no create form: an entry always exists by the time the editor can
+ * open it, so `null` there is a caller error rather than a shorthand.
  */
 export async function saveDocument(
   vault: string,
@@ -211,15 +210,6 @@ export async function saveDocument(
 
   const call = () => {
     switch (source) {
-      case "agents":
-        if (expectedRevision === null) {
-          fail("INVALID_INPUT", "the agent instructions already exist; pass their revision");
-        }
-        return invokeCli<WriteDocumentData>(
-          "write-agents",
-          { vault, "expected-revision": expectedRevision },
-          content,
-        );
       case "memory-main":
         return invokeCli<WriteDocumentData>("write-memory", { vault, ...revisionArgs }, content);
       case "memory-extended":
@@ -280,6 +270,28 @@ export async function movePath(vault: string, from: string, to: string): Promise
   const response = await invokeCli<MovePathData>("move-path", { vault, from, to });
   if (!response.ok || !response.data) {
     throw new CliFailure(response.error ?? { code: "INTERNAL_ERROR", message: "the move failed" });
+  }
+  return response.data;
+}
+
+/**
+ * Carry the links that pointed at `from` over to `to`.
+ *
+ * Called straight after `movePath`, never instead of it. Only the notes holding
+ * a link to the moved path are written, each one retargeted by the same
+ * resolver the graph is drawn from — so a rewritten link goes exactly where the
+ * reader could already see it going.
+ *
+ * Whole-vault work, so the bridge gives it the long timeout rather than the
+ * ordinary one.
+ */
+export async function relinkPaths(vault: string, from: string, to: string): Promise<RelinkData> {
+  const response = await invokeCli<RelinkData>("relink", { vault, from, to });
+  if (!response.ok || !response.data) {
+    throw new CliFailure(
+      response.error ?? { code: "INTERNAL_ERROR", message: "the links were not updated" },
+      response.stderr,
+    );
   }
   return response.data;
 }

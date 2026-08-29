@@ -11,8 +11,8 @@
 //! folder.* For an edit the correct rule follows the invariant instead of the
 //! blanket ban — the incoming content must carry byte-identical values for both
 //! owned fields, and every other key is the user's to add, change, or remove.
-//! So a human can give an entry `tags:` or a `links:` list from Obsidian's
-//! property editor, and cannot reassign its identity.
+//! So a human can give an entry `tags:` or a `links:` list from an editor's
+//! property panel, and cannot reassign its identity.
 
 use serde::{Deserialize, Serialize};
 
@@ -68,7 +68,7 @@ pub fn write_entry(vault: &Vault, request: WriteEntryRequest) -> Result<WriteEnt
         }
     }
 
-    let new_revision = vault.with_file_lock(&path, || {
+    let new_revision = vault.with_write_lock(&path, || {
         if !vault.is_file(&path) {
             return Err(Error::not_found(format!(
                 "no {} entry with id \"{id}\"",

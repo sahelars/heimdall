@@ -28,11 +28,13 @@ const SIDECAR_NAME: &str = "heimdall";
 /// already generous. `link-graph` is the exception and gets its own budget.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long a whole-vault index may take.
+/// How long a whole-vault operation may take.
 ///
-/// `link-graph` reads every note in the vault (SPEC §8). On a cold disk a large
-/// vault can approach the ordinary ceiling, and killing a graph the user asked
-/// for is worse than waiting for it.
+/// `link-graph` reads every note in the vault (SPEC §8), and `relink` reads it
+/// and then writes the notes that linked at what moved. On a cold disk a large
+/// vault can approach the ordinary ceiling, and killing either one — a graph
+/// the user asked for, or a rename's follow-up half done — is worse than
+/// waiting for it.
 const GRAPH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How long the MCP health check waits for a handshake response.
@@ -67,7 +69,6 @@ const ALLOWED: &[(&str, &[&str])] = &[
         "read-documents",
         &["vault", "doc", "start-line", "max-lines", "max-total-bytes"],
     ),
-    ("read-agents", &["vault", "start-line", "max-lines"]),
     ("list-memories", &["vault", "limit"]),
     ("read-memory", &["vault", "extended", "start-line", "max-lines"]),
     ("write-memory", &["vault", "extended", "expected-revision", "create"]),
@@ -82,11 +83,15 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ),
     ("create-folder", &["vault", "path"]),
     ("move-path", &["vault", "from", "to"]),
+    ("relink", &["vault", "from", "to", "dry-run"]),
     ("delete-path", &["vault", "path", "expected-revision"]),
-    ("write-agents", &["vault", "expected-revision"]),
     ("write-entry", &["vault", "kind", "id", "expected-revision"]),
     ("link-graph", &["vault", "exclude-aios", "max-depth"]),
 ];
+
+/// The subcommands that read or write the whole vault, and so need the longer
+/// budget rather than the ordinary one.
+const WHOLE_VAULT: &[&str] = &["link-graph", "relink"];
 
 /// The subcommands that change the vault.
 ///
@@ -100,8 +105,8 @@ const MUTATES: &[&str] = &[
     "write-document",
     "create-folder",
     "move-path",
+    "relink",
     "delete-path",
-    "write-agents",
     "write-entry",
 ];
 
@@ -162,6 +167,8 @@ pub struct CliStatus {
     pub path: String,
     /// Whether that file is actually present and executable.
     pub available: bool,
+    /// Whether that path belongs to a build tree rather than a shipped app.
+    pub development_build: bool,
     pub cli_version: Option<String>,
     pub core_version: Option<String>,
     pub mcp_protocol_version: Option<String>,
@@ -196,6 +203,45 @@ fn vault_lock(vault: &str) -> &'static RwLock<()> {
 /// Whether a subcommand needs exclusive access to its vault.
 fn mutates(command: &str) -> bool {
     MUTATES.contains(&command)
+}
+
+/// Where the sidecar this application runs actually came from.
+///
+/// [`sidecar_path`] cannot answer this on its own. Under `tauri dev` the CLI is
+/// staged beside the development executable, so the "beside `current_exe`"
+/// branch matches there exactly as it does inside a shipped bundle, and the two
+/// are indistinguishable by path — short of matching on the string `target`,
+/// which is a directory name a user is free to choose.
+///
+/// It matters for one decision only: what may be written into a client's own
+/// configuration file (SPEC §15). Running the development sidecar is what
+/// development is for, so nothing else consults this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarOrigin {
+    /// Bundled inside an installed application; its path outlives this session.
+    Shipped,
+    /// A build artifact, which a rebuild, a rename, or `cargo clean` removes.
+    Development,
+}
+
+impl SidecarOrigin {
+    pub fn is_development(self) -> bool {
+        self == SidecarOrigin::Development
+    }
+}
+
+/// Which of the two this build is.
+///
+/// `tauri::is_dev()` is `!cfg!(feature = "custom-protocol")`, and `tauri build`
+/// compiles with `--features tauri/custom-protocol` while `tauri dev` does not.
+/// So this is the same answer the bundler had — a compile-time fact, not a
+/// guess made from the filesystem.
+pub fn sidecar_origin() -> SidecarOrigin {
+    if tauri::is_dev() {
+        SidecarOrigin::Development
+    } else {
+        SidecarOrigin::Shipped
+    }
 }
 
 /// Resolve the bundled sidecar. `PATH` is never consulted (SPEC §16).
@@ -359,7 +405,7 @@ pub fn run(command: &str, request: &Value, stdin: Option<&str>) -> CliResponse {
     // Hold the vault's lock for the whole call so two writes to one vault cannot
     // interleave into a conflict the user never caused. A read only needs the
     // shared side, so reads never queue behind each other.
-    let timeout = if command == "link-graph" {
+    let timeout = if WHOLE_VAULT.contains(&command) {
         GRAPH_TIMEOUT
     } else {
         CALL_TIMEOUT
@@ -543,6 +589,7 @@ pub fn status() -> CliStatus {
         return CliStatus {
             path: display,
             available: false,
+            development_build: sidecar_origin().is_development(),
             cli_version: None,
             core_version: None,
             mcp_protocol_version: None,
@@ -566,6 +613,7 @@ pub fn status() -> CliStatus {
     CliStatus {
         path: display,
         available: response.ok,
+        development_build: sidecar_origin().is_development(),
         cli_version: text("cli_version"),
         core_version: text("core_version"),
         mcp_protocol_version: text("mcp_protocol_version"),
@@ -805,8 +853,8 @@ mod tests {
         for command in [
             "create-folder",
             "move-path",
+            "relink",
             "delete-path",
-            "write-agents",
             "write-entry",
             "link-graph",
         ] {
@@ -846,12 +894,48 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_vault_command_gets_the_longer_budget() {
+        // `relink` reads every note and then writes the ones that linked at what
+        // moved. Killed at the ordinary 30 seconds it would leave a large vault
+        // half rewritten, which is the one outcome worse than not starting.
+        for command in ["link-graph", "relink"] {
+            assert!(WHOLE_VAULT.contains(&command), "{command} needs the graph budget");
+            assert!(
+                ALLOWED.iter().any(|(name, _)| *name == command),
+                "{command} cannot be run at all"
+            );
+        }
+        assert!(!WHOLE_VAULT.contains(&"write-document"));
+    }
+
+    #[test]
+    fn relink_takes_the_exclusive_guard() {
+        // It writes, so it must serialise against autosave rather than run
+        // beside it — unlike `link-graph`, which only reads.
+        assert!(mutates("relink"));
+        assert_eq!(
+            build_args(
+                "relink",
+                &json!({ "vault": "/v", "from": "a.md", "to": "b.md", "dry-run": true }),
+            )
+            .unwrap(),
+            ["relink", "--dry-run", "--from", "a.md", "--to", "b.md", "--vault", "/v"]
+        );
+        assert_eq!(
+            build_args("relink", &json!({ "vault": "/v", "path": "a.md" }))
+                .unwrap_err()
+                .code,
+            "INVALID_INPUT"
+        );
+    }
+
+    #[test]
     fn only_allowlisted_arguments_can_be_passed() {
-        let error = build_args("read-agents", &json!({ "exec": "/bin/sh" })).unwrap_err();
+        let error = build_args("read-memory", &json!({ "exec": "/bin/sh" })).unwrap_err();
         assert_eq!(error.code, "INVALID_INPUT");
 
         // An argument that belongs to a different subcommand is still refused.
-        let error = build_args("read-agents", &json!({ "kind": "conversation" })).unwrap_err();
+        let error = build_args("read-memory", &json!({ "kind": "conversation" })).unwrap_err();
         assert_eq!(error.code, "INVALID_INPUT");
     }
 
@@ -1005,6 +1089,16 @@ mod tests {
         let response = parse_envelope("not json at all", String::new(), 0);
         assert!(!response.ok);
         assert_eq!(response.error.unwrap().code, "INTERNAL_ERROR");
+    }
+
+    #[test]
+    fn a_test_build_is_a_development_one() {
+        // `cargo test` compiles without `tauri/custom-protocol`, exactly as
+        // `tauri dev` does. This is here so that hardcoding either variant —
+        // which would leave the client-configuration guard silently dead, in
+        // one direction or the other — fails rather than ships.
+        assert_eq!(sidecar_origin(), SidecarOrigin::Development);
+        assert!(sidecar_origin().is_development());
     }
 
     #[test]

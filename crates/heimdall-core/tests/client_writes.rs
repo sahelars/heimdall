@@ -17,7 +17,7 @@ use heimdall_core::{template, Revision, Vault};
 fn vault() -> (tempfile::TempDir, Vault) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-    let vault = Vault::open(&root).unwrap();
+    let vault = Vault::open_with_lock_dir(&root, &test_lock_dir()).unwrap();
     template::scaffold_full(&vault).unwrap();
     (dir, vault)
 }
@@ -171,10 +171,10 @@ fn document_writes_cannot_reach_protected_content_in_any_casing() {
 #[test]
 fn document_writes_cannot_reach_hidden_folders() {
     let (_dir, vault) = vault();
-    // `.obsidian/` holds the user's Obsidian settings and `.trash/` holds what
-    // they deleted. Neither is content, and neither is listable, so writing
-    // there would create files nothing could ever show again.
-    for path in [".obsidian/app.md", ".trash/ideas/note.md", ".git/config.md"] {
+    // A hidden folder belongs to whatever tool created it, and `.trash/` holds
+    // what the user deleted. Neither is content, and neither is listable, so
+    // writing there would create files nothing could ever show again.
+    for path in [".config/app.md", ".trash/ideas/note.md", ".git/config.md"] {
         let error = write_document(
             &vault,
             WriteDocumentRequest {
@@ -479,4 +479,17 @@ fn deleting_a_note_leaves_other_notes_wikilinks_exactly_as_written() {
     // the user did not open. The client warns using the link index and issues
     // ordinary revision-guarded writes if the user agrees.
     assert_eq!(read_back(&vault, "ideas/source.md"), "See [[target]].\n");
+}
+
+/// Where these tests keep their write locks.
+///
+/// Outside the vault, as production does, but under the system temp directory
+/// rather than the real application-data one: a test run must not leave files
+/// in a developer's home. Lock files are named by a hash of the vault's path
+/// and every vault here is a fresh temp directory, so sharing one directory
+/// cannot collide.
+fn test_lock_dir() -> camino::Utf8PathBuf {
+    camino::Utf8PathBuf::from_path_buf(std::env::temp_dir())
+        .expect("temp dir is UTF-8")
+        .join("heimdall-test-locks")
 }

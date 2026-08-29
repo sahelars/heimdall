@@ -61,7 +61,7 @@ async fn install_client_config(
                 "the bundled heimdall command line tool is missing, so there is nothing to point a client at",
             ));
         }
-        client_config::install(&client_id, &vault, &command)
+        client_config::install(&client_id, &vault, &command, cli_bridge::sidecar_origin())
     })
     .await
 }

@@ -1,6 +1,6 @@
 [package]
 name = "heimdall-desktop"
-description = "Setup and diagnostics for Heimdall. Obsidian remains the editing UI."
+description = "Edit a Heimdall vault and configure its local MCP server."
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"

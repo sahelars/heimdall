@@ -61,7 +61,7 @@ pub fn write_memory(vault: &Vault, request: WriteMemoryRequest) -> Result<WriteM
         .with_detail("parameter", "expected_revision"));
     };
 
-    let (new_revision, created) = vault.with_file_lock(&path, || {
+    let (new_revision, created) = vault.with_write_lock(&path, || {
         let exists = vault.is_file(&path);
 
         match (&expected_revision, exists) {
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn writes_cannot_escape_the_extended_directory() {
         let (_tmp, vault) = vault();
-        for name in ["../memory.md", "../../agents.md", "sub/topic.md"] {
+        for name in ["../memory.md", "../../note.md", "sub/topic.md"] {
             let err = write(&vault, "x\n", Some(name), Some(None)).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidInput, "accepted {name:?}");
         }

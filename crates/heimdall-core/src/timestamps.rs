@@ -37,7 +37,7 @@ pub fn entry_stem(at: OffsetDateTime) -> String {
 ///
 /// Accepts `YYYY-MM-DD_HH-mm-ss.md` and its collision variants
 /// (`..._01.md`). Returns `None` for any other name — entry folders may hold
-/// files a user created by hand in Obsidian, and those still have to list.
+/// files a user created by hand in any editor, and those still have to list.
 pub fn parse_entry_stem(file_name: &str) -> Option<OffsetDateTime> {
     let stem = file_name.strip_suffix(".md").unwrap_or(file_name);
     // A collision suffix is `_NN` after the fixed-width timestamp.

@@ -27,10 +27,18 @@ const { Diagnostics } = await import("./Diagnostics");
 const STATUS = {
   path: "/Applications/Heimdall.app/Contents/MacOS/heimdall",
   available: true,
+  developmentBuild: false,
   cliVersion: "0.1.0",
   coreVersion: "0.1.0",
   mcpProtocolVersion: "2025-11-25",
   outputSchemaVersion: 1,
+};
+
+/** The same application run from a build tree rather than an installed copy. */
+const DEV_STATUS = {
+  ...STATUS,
+  path: "/Users/n/heimdall/apps/desktop/src-tauri/target/debug/heimdall",
+  developmentBuild: true,
 };
 
 /** Captured so a test can fire the menu event the way Rust does. */
@@ -46,6 +54,8 @@ beforeEach(() => {
     return Promise.resolve(() => {});
   });
   window.localStorage.clear();
+  document.documentElement.removeAttribute("data-theme");
+  document.documentElement.removeAttribute("style");
 });
 
 describe("Setup", () => {
@@ -55,7 +65,7 @@ describe("Setup", () => {
       data: {
         path: "/Users/n/Documents/demo",
         mode: "scaffolded",
-        created: [".obsidian/", "aios/", "ideas/hello_world.md"],
+        created: ["aios/", "ideas/hello_world.md"],
       },
     });
     const onVaultChange = vi.fn();
@@ -82,7 +92,7 @@ describe("Setup", () => {
       data: {
         path: "/Users/n/Documents/Existing Vault",
         mode: "initialized",
-        created: ["aios/", "aios/agents.md"],
+        created: ["aios/", "aios/memories/memory.md"],
       },
     });
     render(<Setup vault="" onVaultChange={vi.fn()} />);
@@ -98,7 +108,7 @@ describe("Setup", () => {
       stdin: undefined,
     });
     // Nothing about example notes: initializing adds only what was missing.
-    expect(screen.getByText("aios/agents.md")).toBeInTheDocument();
+    expect(screen.getByText("aios/memories/memory.md")).toBeInTheDocument();
   });
 
   it("keeps a structured failure readable instead of crashing", async () => {
@@ -130,7 +140,7 @@ describe("Setup", () => {
         code: "NOT_INITIALIZED",
         message:
           'this vault has no complete aios/ structure; run "heimdall create" against it',
-        details: { missing: ["aios/", "aios/agents.md"] },
+        details: { missing: ["aios/", "aios/memories/memory.md"] },
       },
     });
     render(<Setup vault="/Users/n/plain-folder" onVaultChange={vi.fn()} />);
@@ -203,6 +213,54 @@ describe("Server", () => {
     expect(alert).toHaveTextContent("vault directory does not exist");
   });
 
+  it("refuses to put a development build's path into a client's configuration", async () => {
+    // The path would break on the next rebuild, and the client's only symptom
+    // would be a timeout — so the reason has to arrive before the click.
+    invoke.mockImplementation((command: string) => {
+      if (command === "list_client_configs") {
+        return Promise.resolve([
+          {
+            id: "claude-desktop",
+            name: "Claude Desktop",
+            path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
+            present: true,
+            installed: false,
+            stale: false,
+            serverKey: "heimdall",
+          },
+        ]);
+      }
+      return Promise.resolve(null);
+    });
+    render(<Server vault="/v" status={DEV_STATUS} />);
+
+    expect(await screen.findByText("Not available in a development build")).toBeInTheDocument();
+    expect(screen.getByText("Development build")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add entry" })).toBeDisabled();
+  });
+
+  it("says when the entry already there names a command that has gone", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "list_client_configs") {
+        return Promise.resolve([
+          {
+            id: "claude-desktop",
+            name: "Claude Desktop",
+            path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
+            present: true,
+            installed: true,
+            stale: true,
+            serverKey: "heimdall",
+          },
+        ]);
+      }
+      return Promise.resolve(null);
+    });
+    render(<Server vault="/v" status={STATUS} />);
+
+    expect(await screen.findByText(/its command is gone/)).toBeInTheDocument();
+  });
+
   it("writes a client entry only when asked, and says what it did", async () => {
     invoke.mockImplementation((command: string) => {
       if (command === "list_client_configs") {
@@ -213,6 +271,7 @@ describe("Server", () => {
             path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
             present: true,
             installed: false,
+            stale: false,
             serverKey: "heimdall",
           },
         ]);
@@ -268,6 +327,7 @@ describe("Diagnostics", () => {
         status={{
           path: "/Applications/Heimdall.app/Contents/MacOS/heimdall",
           available: false,
+          developmentBuild: false,
           error: {
             code: "IO_ERROR",
             message: "the bundled heimdall command line tool is missing from this application",
@@ -386,6 +446,59 @@ describe("Settings", () => {
 
     expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
     expect(window.localStorage.getItem("heimdall.theme")).toBe('"dark"');
+  });
+
+  async function appearance() {
+    invoke.mockResolvedValue(STATUS);
+    render(<App />);
+    await waitFor(() => expect(listenEvent).toHaveBeenCalled());
+    act(() => fireSettings?.());
+
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Appearance" }));
+    return dialog;
+  }
+
+  it("writes each theme's accent onto the root as its own property", async () => {
+    // The stylesheet is not attached here, so what is asserted is the overrides
+    // themselves: one inline custom property per theme. Which theme spends
+    // which is the stylesheet's decision, not this component's — which is why
+    // there is no theme to set up first.
+    const dialog = await appearance();
+    await userEvent.type(within(dialog).getByLabelText("Dark hex"), "#00ff00");
+
+    expect(document.documentElement.style.getPropertyValue("--accent-dark")).toBe("#00ff00");
+    expect(window.localStorage.getItem("heimdall.accent")).toBe(
+      JSON.stringify({ light: null, dark: "#00ff00" }),
+    );
+
+    await userEvent.click(within(dialog).getAllByRole("button", { name: "Default" })[1]!);
+
+    // Removed rather than written back: the default belongs to the stylesheet.
+    expect(document.documentElement.style.getPropertyValue("--accent-dark")).toBe("");
+  });
+
+  it("keeps the two accents apart, so one theme's choice is not the other's", async () => {
+    // The bug that made two accents necessary: a colour picked for dark mode
+    // used to apply to light mode as well, where #ffffff is invisible.
+    const dialog = await appearance();
+    await userEvent.type(within(dialog).getByLabelText("Dark hex"), "#ffffff");
+
+    expect(document.documentElement.style.getPropertyValue("--accent-dark")).toBe("#ffffff");
+    expect(document.documentElement.style.getPropertyValue("--accent-light")).toBe("");
+
+    await userEvent.type(within(dialog).getByLabelText("Light hex"), "#000000");
+
+    expect(document.documentElement.style.getPropertyValue("--accent-light")).toBe("#000000");
+    expect(document.documentElement.style.getPropertyValue("--accent-dark")).toBe("#ffffff");
+  });
+
+  it("does not offer to reset an accent that has not been set", async () => {
+    const dialog = await appearance();
+
+    for (const button of within(dialog).getAllByRole("button", { name: "Default" })) {
+      expect(button).toBeDisabled();
+    }
   });
 });
 

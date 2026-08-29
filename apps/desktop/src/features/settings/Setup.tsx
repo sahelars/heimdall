@@ -1,8 +1,8 @@
 /**
- * Setup — create a templated vault, or initialize an existing Obsidian one.
+ * Setup — create a templated vault, or initialize an existing folder as one.
  *
- * This screen sets a vault up; it never browses or edits its content. Obsidian
- * does that (SPEC §15).
+ * This screen sets a vault up; it never browses or edits its content. The
+ * workspace does that (SPEC §15).
  */
 
 import { useState } from "react";
@@ -52,7 +52,7 @@ export function Setup({
   /**
    * Initializing an existing vault is the same `create` call with the folder
    * split into its parent and name — the CLI adds only the missing `aios/`
-   * structure and leaves every note and `.obsidian/` untouched (SPEC §7).
+   * structure and leaves every existing file untouched (SPEC §7).
    */
   async function initializeExisting() {
     const chosen = await open({ directory: true, multiple: false });
@@ -100,7 +100,7 @@ export function Setup({
     <>
       <Panel
         title="Create a vault"
-        description="Scaffolds a complete Obsidian-compatible vault: settings, the managed aios/ structure, and example notes."
+        description="Scaffolds a complete vault: the managed aios/ structure and example notes."
       >
         {/*
           * The hint sits under the row rather than inside the first field.
@@ -136,8 +136,8 @@ export function Setup({
       </Panel>
 
       <Panel
-        title="Use an existing Obsidian vault"
-        description="Adds only the missing aios/ structure. Existing notes and .obsidian/ settings are never touched, and no example notes are added."
+        title="Use an existing folder"
+        description="Adds only the missing aios/ structure. Existing files are never touched, and no example notes are added."
       >
         <div className="row">
           <Button onClick={initializeExisting} disabled={busy}>

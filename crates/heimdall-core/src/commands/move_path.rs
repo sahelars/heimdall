@@ -2,14 +2,12 @@
 //!
 //! A client operation; no `JsonSchema` derive, so it cannot become an MCP tool.
 //!
-//! Inbound `[[wikilinks]]` are deliberately **not** rewritten. Doing it here
-//! would make one command an unbounded whole-vault read (SPEC §8) followed by an
-//! unbounded multi-file write with no `expected_revision` on any of the files it
-//! touched — silently editing notes the user never opened, which is exactly what
-//! the revision contract exists to prevent. The client already has what it
-//! needs: `link_graph` gives it the reverse edges, so it can warn about the
-//! links a rename will break and then rewrite them with ordinary
-//! `write_document` calls, each guarded by that file's own revision.
+//! Inbound `[[wikilinks]]` are deliberately **not** rewritten here. `relink` is
+//! that work, and it is a separate operation on purpose: a move is one rename,
+//! and folding an unbounded whole-vault read (SPEC §8) and a multi-file write
+//! into it would leave a command that half succeeded with no way to say which
+//! half. Keeping them apart means a move either happened or did not, and what
+//! the rewrite did afterwards is reported on its own terms.
 
 use serde::{Deserialize, Serialize};
 
@@ -93,13 +91,9 @@ pub fn move_path(vault: &Vault, request: MovePathRequest) -> Result<MovePathResp
         .with_detail("path", parent.as_str()));
     }
 
-    // The destination's lock is what makes "does not already exist" and "rename
-    // onto it" one decision rather than two.
-    vault.with_file_lock(&to, || vault.rename_no_replace(&from, &to))?;
-
-    if !is_dir {
-        vault.discard_lock_sidecar(&from);
-    }
+    // The write lock is what makes "does not already exist" and "rename onto it"
+    // one decision rather than two.
+    vault.with_write_lock(&to, || vault.rename_no_replace(&from, &to))?;
 
     Ok(MovePathResponse {
         from: from.to_string(),

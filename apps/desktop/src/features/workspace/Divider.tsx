@@ -35,7 +35,7 @@ export function Divider({ side, width, opposite, label, onResize }: DividerProps
 
   return (
     <div
-      className="divider"
+      className={`divider divider--${side}`}
       role="separator"
       aria-orientation="vertical"
       aria-label={label}

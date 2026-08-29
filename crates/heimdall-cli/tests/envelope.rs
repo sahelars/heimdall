@@ -43,7 +43,7 @@ fn a_usage_error_is_distinct_from_a_domain_failure() {
 #[test]
 fn stdout_carries_only_the_envelope() {
     let (_tmp, vault) = new_vault();
-    let output = run(&["read-agents", "--vault", &vault]);
+    let output = run(&["read-memory", "--vault", &vault]);
 
     // Parsing the whole of stdout as one JSON value proves nothing else leaked
     // into it — the discipline the MCP transport will depend on in Phase 2.
@@ -154,6 +154,34 @@ fn no_command_can_name_a_vault_path_in_its_payload() {
     let output = run(&["read-documents", "--vault", &vault, "--doc", "/etc/hosts.md"]);
     let code = error_code(&output);
     assert!(code == "NOT_FOUND" || code == "INVALID_INPUT", "{code}");
+}
+
+#[test]
+fn relink_follows_a_move_through_the_real_binary() {
+    // The desktop's actual sequence, over two processes and a real vault: the
+    // move renames the file, and the follow-up call carries the links.
+    let (_tmp, vault) = new_vault();
+    std::fs::write(format!("{vault}/roadmap.md"), "# Roadmap\n").unwrap();
+    std::fs::write(
+        format!("{vault}/source.md"),
+        "See [[roadmap]] and [[roadmap|it]].\n",
+    )
+    .unwrap();
+
+    let moved = run(&["move-path", "--vault", &vault, "--from", "roadmap.md", "--to", "plan.md"]);
+    assert_eq!(moved.status.code(), Some(0));
+
+    let output = run(&["relink", "--vault", &vault, "--from", "roadmap.md", "--to", "plan.md"]);
+    let envelope = envelope(&output);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["meta"]["schema_version"], 1);
+    assert_eq!(envelope["data"]["updated"][0]["path"], "source.md");
+    assert_eq!(envelope["data"]["updated"][0]["links"], 2);
+    assert!(envelope["data"]["skipped"].as_array().unwrap().is_empty());
+    assert_eq!(output.status.code(), Some(0));
+
+    let source = std::fs::read_to_string(format!("{vault}/source.md")).unwrap();
+    assert_eq!(source, "See [[plan]] and [[plan|it]].\n");
 }
 
 #[test]

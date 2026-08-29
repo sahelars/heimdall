@@ -19,7 +19,7 @@ const THREADS: usize = 16;
 fn scaffolded_vault() -> (tempfile::TempDir, Vault) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-    let vault = Vault::open(&root).unwrap();
+    let vault = Vault::open_with_lock_dir(&root, &test_lock_dir()).unwrap();
     template::scaffold_full(&vault).unwrap();
     (dir, vault)
 }
@@ -40,7 +40,7 @@ fn many_writers_can_acquire_one_lock_that_does_not_exist_yet() {
                 let (vault, target) = (&vault, &target);
                 scope.spawn(move || {
                     for iteration in 0..10 {
-                        vault.with_file_lock(target, || Ok(())).unwrap_or_else(|err| {
+                        vault.with_write_lock(target, || Ok(())).unwrap_or_else(|err| {
                             panic!("round {round} iteration {iteration}: {} {}", err.code, err.message)
                         });
                     }
@@ -63,7 +63,7 @@ fn the_lock_actually_excludes_concurrent_holders() {
             scope.spawn(move || {
                 for _ in 0..10 {
                     vault
-                        .with_file_lock(target, || {
+                        .with_write_lock(target, || {
                             {
                                 let mut count = inside.lock().unwrap();
                                 *count += 1;
@@ -97,7 +97,7 @@ fn locked_read_modify_write_never_loses_or_corrupts_a_write() {
                     for iteration in 0..3 {
                         let body = format!("thread {index} iteration {iteration}\n");
                         vault
-                            .with_file_lock(target, || {
+                            .with_write_lock(target, || {
                                 vault.read(target)?;
                                 vault.atomic_write(target, body.as_bytes())
                             })
@@ -143,4 +143,17 @@ fn concurrent_entry_creation_gives_every_writer_its_own_file() {
         let unique: HashSet<_> = ids.iter().collect();
         assert_eq!(unique.len(), THREADS, "round {round} ids collided: {ids:?}");
     }
+}
+
+/// Where these tests keep their write locks.
+///
+/// Outside the vault, as production does, but under the system temp directory
+/// rather than the real application-data one: a test run must not leave files
+/// in a developer's home. Lock files are named by a hash of the vault's path
+/// and every vault here is a fresh temp directory, so sharing one directory
+/// cannot collide.
+fn test_lock_dir() -> camino::Utf8PathBuf {
+    camino::Utf8PathBuf::from_path_buf(std::env::temp_dir())
+        .expect("temp dir is UTF-8")
+        .join("heimdall-test-locks")
 }

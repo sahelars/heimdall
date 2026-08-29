@@ -273,7 +273,6 @@ describe("reaching the protected tree", () => {
   }
 
   const cases: [string, string, string, Record<string, unknown>][] = [
-    ["the agent instructions", "aios/AGENTS.md", "read-agents", {}],
     ["the main memory", "aios/memories/memory.md", "read-memory", {}],
     [
       "an extended memory",
@@ -342,11 +341,8 @@ describe("reaching the protected tree", () => {
   });
 
   it("refuses to invent a create form for content that always exists", async () => {
-    // Both are present in any initialized vault, so a null revision there is a
-    // caller mistake rather than a shorthand for "create it".
-    await expect(saveDocument("/v", "aios/AGENTS.md", "x", null)).rejects.toThrow(
-      /already exist/,
-    );
+    // An entry exists by the time the editor can open it, so a null revision
+    // there is a caller mistake rather than a shorthand for "create it".
     await expect(
       saveDocument("/v", "aios/notifications/2026-08-16_10-30-00.md", "x", null),
     ).rejects.toThrow(/created by an agent/);

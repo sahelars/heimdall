@@ -6,7 +6,7 @@
 //!
 //! Deliberately no `JsonSchema` derive, following `create_vault`. `rmcp` builds
 //! a tool's schemas from its request and response types, so a type without one
-//! cannot be given a tool without a compile error — the nine-tool surface stops
+//! cannot be given a tool without a compile error — the eight-tool surface stops
 //! being a promise and becomes a property the type system checks.
 
 use serde::{Deserialize, Serialize};
@@ -70,7 +70,7 @@ pub fn write_document(
         .with_detail("parameter", "expected_revision"));
     };
 
-    let (new_revision, created) = vault.with_file_lock(&path, || {
+    let (new_revision, created) = vault.with_write_lock(&path, || {
         let exists = vault.is_file(&path);
 
         match (&expected_revision, exists) {

@@ -26,9 +26,17 @@ interface MermaidProps {
   code: string;
   /** Re-render when the theme changes: text metrics are baked into the SVG. */
   theme: string;
+  /**
+   * And when the accent changes, for the same reason.
+   *
+   * The value is not read here — the colours still come from the stylesheet
+   * below — it is only the signal that the SVG mermaid already produced is out
+   * of date.
+   */
+  accent: string | null;
 }
 
-export function Mermaid({ code, theme }: MermaidProps) {
+export function Mermaid({ code, theme, accent }: MermaidProps) {
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -102,7 +110,7 @@ export function Mermaid({ code, theme }: MermaidProps) {
     return () => {
       cancelled = true;
     };
-  }, [code, theme]);
+  }, [code, theme, accent]);
 
   if (error !== null) {
     // A diagram that will not parse still has source worth reading, and saying

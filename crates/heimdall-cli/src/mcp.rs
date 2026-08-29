@@ -24,7 +24,7 @@ use serde_json::json;
 use heimdall_core::commands::{
     self, CreateEntryRequest, CreateEntryResponse, ListDocumentsRequest, ListDocumentsResponse,
     ListEntriesRequest, ListEntriesResponse, ListMemoriesRequest, ListMemoriesResponse,
-    ReadAgentsRequest, ReadDocumentsRequest, ReadDocumentsResponse, ReadEntryRequest,
+    ReadDocumentsRequest, ReadDocumentsResponse, ReadEntryRequest,
     ReadMemoryRequest, ReadResult, WriteMemoryRequest, WriteMemoryResponse,
 };
 // `Result` is deliberately not imported: the rmcp macros expand bare `Result`
@@ -41,14 +41,20 @@ type CoreResult<T> = heimdall_core::Result<T>;
 pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2025_11_25;
 
 /// Server-level guidance, published at initialization (SPEC §12).
+///
+/// This is how the protocol itself tells a client how to behave in this vault —
+/// there is no instructions file for a client to go and find. What varies per
+/// vault is the user's own standing preferences, and those live in the main
+/// memory, which `read_memory` returns.
 const INSTRUCTIONS: &str = "\
-Heimdall manages one Obsidian-compatible Markdown vault. Ordinary notes live \
-outside `aios/`; protected agent instructions, memories, and entries \
-(conversation summaries and notifications) live inside it. List content before \
-reading it, request only the ranges needed, and follow continuation metadata. \
-Use `write_memory` only for durable memory and always pass the revision \
-returned by the latest read. Use `create_entry` for conversation summaries and \
-notifications; it never replaces existing files.";
+Heimdall manages one Markdown vault. Ordinary notes live outside `aios/`; \
+protected memories and entries (conversation summaries and notifications) live \
+inside it. Read the main memory with `read_memory` at the start of a session: \
+it holds the user's durable context and how they want you to work in this \
+vault. List content before reading it, request only the ranges needed, and \
+follow continuation metadata. Use `write_memory` only for durable memory and \
+always pass the revision returned by the latest read. Use `create_entry` for \
+conversation summaries and notifications; it never replaces existing files.";
 
 /// One vault, one server process. The handle is shared across concurrent tool
 /// calls; the vault it points at is fixed for the process lifetime.
@@ -152,8 +158,8 @@ impl HeimdallServer {
                        needs `recursive: true` and defaults to depth 4 (maximum 16). Page size \
                        defaults to 50 and caps at 200; when more remains, pass the returned \
                        `next_cursor` back as `cursor`. Lists directories and .md files only. \
-                       Cannot see the protected `aios/` tree at any depth — use list_memories, \
-                       list_entries, or read_agents for that. Read-only."
+                       Cannot see the protected `aios/` tree at any depth — use list_memories \
+                       or list_entries for that. Read-only."
     )]
     async fn list_documents(
         &self,
@@ -179,21 +185,6 @@ impl HeimdallServer {
         Parameters(request): Parameters<ReadDocumentsRequest>,
     ) -> Result<Json<ReadDocumentsResponse>, CallToolResult> {
         self.run(move |vault| commands::read_documents(vault, request))
-            .await
-    }
-
-    #[tool(
-        name = "read_agents",
-        description = "Read the vault's agent instructions from `aios/agents.md`. Use this to \
-                       learn how the user wants you to behave in this vault. Bounded like every \
-                       other read: 200 lines by default, maximum 1000, with continuation \
-                       metadata when more remains. Reads only that one file. Read-only."
-    )]
-    async fn read_agents(
-        &self,
-        Parameters(request): Parameters<ReadAgentsRequest>,
-    ) -> Result<Json<ReadResult>, CallToolResult> {
-        self.run(move |vault| commands::read_agents(vault, request))
             .await
     }
 
@@ -380,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn the_surface_is_exactly_the_nine_v1_tools() {
+    fn the_surface_is_exactly_the_eight_v1_tools() {
         let mut names: Vec<_> = tools().iter().map(|t| t.name.to_string()).collect();
         names.sort();
         assert_eq!(
@@ -390,7 +381,6 @@ mod tests {
                 "list_documents",
                 "list_entries",
                 "list_memories",
-                "read_agents",
                 "read_documents",
                 "read_entry",
                 "read_memory",
@@ -404,7 +394,7 @@ mod tests {
         // Editing a note, deleting one, and indexing a whole vault are things a
         // human does at the keyboard — the same category as `heimdall create`
         // (SPEC §7, §9). They are shell commands the desktop calls; the tool
-        // surface above stays at nine.
+        // surface above stays at eight.
         //
         // This test is a second line of defence, not the first. None of those
         // commands derive `JsonSchema`, so giving one a `#[tool]` would not
@@ -415,13 +405,14 @@ mod tests {
             "write_document",
             "create_folder",
             "move_path",
+            "relink",
             "delete_path",
-            "write_agents",
             "write_entry",
             "link_graph",
             "write-document",
             "delete-path",
             "link-graph",
+            "relink",
         ] {
             assert!(!names.contains(&forbidden.to_string()), "{forbidden} exposed");
         }

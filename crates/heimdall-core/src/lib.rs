@@ -1,5 +1,5 @@
 //! Heimdall core: the single implementation of domain rules and filesystem
-//! behavior for Obsidian-compatible Markdown vaults (SPEC §4).
+//! behavior for Markdown vaults (SPEC §4).
 //!
 //! Every adapter — the shell CLI today, the MCP server and desktop bridge
 //! later — translates into the operations exposed here. Nothing above this

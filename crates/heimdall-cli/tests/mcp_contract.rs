@@ -20,7 +20,11 @@ use serde_json::{json, Map, Value};
 async fn connect(vault: &str) -> RunningService<RoleClient, ()> {
     let transport = TokioChildProcess::new(tokio::process::Command::new(binary()).configure(
         |command| {
-            command.arg("mcp").arg("--vault").arg(vault);
+            command
+                .arg("mcp")
+                .arg("--vault")
+                .arg(vault)
+                .env("HEIMDALL_LOCK_DIR", common::lock_dir());
         },
     ))
     .expect("spawn heimdall mcp");
@@ -76,7 +80,6 @@ async fn both_adapters_produce_the_same_domain_outcome_for_reads() {
     // structuredContent. Below those two wrappers the domain result is one
     // value produced by one core operation, and it must stay identical.
     let cases: Vec<(&str, Vec<&str>, Value)> = vec![
-        ("read_agents", vec!["read-agents"], json!({})),
         ("list_memories", vec!["list-memories"], json!({})),
         ("read_memory", vec!["read-memory"], json!({})),
         (
@@ -249,7 +252,7 @@ async fn every_tool_result_validates_against_its_published_output_schema() {
     // drift between the declared and returned types.
     for (tool, args) in [
         ("list_memories", json!({})),
-        ("read_agents", json!({})),
+        ("read_memory", json!({})),
         ("list_entries", json!({ "kind": "notification" })),
         ("list_documents", json!({})),
     ] {
@@ -281,7 +284,7 @@ async fn a_domain_refusal_and_an_unknown_tool_are_different_kinds_of_failure() {
 
     // A refusal the server understood: a tool result flagged isError, carrying
     // a domain code the client can branch on.
-    let refused = failure(&client, "read_agents", json!({ "start_line": 0 })).await;
+    let refused = failure(&client, "read_memory", json!({ "start_line": 0 })).await;
     assert_eq!(refused["code"], "INVALID_INPUT");
 
     // A call the server cannot execute at all: a protocol error, not a result.
@@ -421,7 +424,7 @@ async fn an_uninitialized_vault_connects_and_explains_itself() {
 
     for (tool, args) in [
         ("list_documents", json!({})),
-        ("read_agents", json!({})),
+        ("read_memory", json!({})),
         ("list_memories", json!({})),
         ("list_entries", json!({ "kind": "conversation" })),
     ] {
@@ -464,11 +467,15 @@ async fn diagnostics_go_to_stderr_without_disturbing_the_protocol() {
     assert_eq!(info.server_info.as_ref().unwrap().name, "heimdall");
     assert_eq!(info.protocol_version.to_string(), "2025-11-25");
     assert!(info.capabilities.tools.is_some());
+    // The instructions field is the protocol's own way of telling a client how
+    // to work in this vault, and the only one Heimdall has — there is no
+    // instructions file for a client to go and find (SPEC §12).
     let instructions = info.instructions.as_deref().expect("server instructions");
     assert!(instructions.contains("aios/"));
     assert!(instructions.contains("List content before reading it"));
+    assert!(instructions.contains("read_memory"), "{instructions}");
 
-    assert_eq!(client.list_all_tools().await.unwrap().len(), 9);
+    assert_eq!(client.list_all_tools().await.unwrap().len(), 8);
 
     client.cancel().await.unwrap();
 }

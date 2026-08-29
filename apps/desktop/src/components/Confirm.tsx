@@ -15,6 +15,13 @@ interface ConfirmProps {
   confirmLabel: string;
   onConfirm: () => void;
   onCancel: () => void;
+  /**
+   * A third way out, between cancelling and confirming.
+   *
+   * A rename with inbound links has one: going ahead without rewriting them is
+   * a real answer, and neither of the other two buttons means it.
+   */
+  secondary?: { label: string; onSelect: () => void };
   children: ReactNode;
 }
 
@@ -24,6 +31,7 @@ export function Confirm({
   confirmLabel,
   onConfirm,
   onCancel,
+  secondary,
   children,
 }: ConfirmProps) {
   const dialog = useRef<HTMLDialogElement | null>(null);
@@ -35,6 +43,13 @@ export function Confirm({
     if (open && !element.open) {
       if (typeof element.showModal === "function") element.showModal();
       else element.setAttribute("open", "");
+
+      // `showModal` focuses the first control it finds, which here is Cancel —
+      // so the dialog opened with a focus ring around the one button nobody is
+      // being asked to press, as if the answer had already been chosen. Focus
+      // belongs on the dialog, as it does in `Modal`: Escape and Tab both still
+      // work from there, and Tab reaches Cancel first as before.
+      element.focus();
     }
     if (!open && element.open) element.close();
   }, [open]);
@@ -44,6 +59,9 @@ export function Confirm({
       ref={dialog}
       className="modal prompt"
       aria-label={title}
+      // Focusable, but not in the tab order: the dialog is only ever focused by
+      // the effect above, never by tabbing into it.
+      tabIndex={-1}
       onCancel={(event) => {
         event.preventDefault();
         onCancel();
@@ -54,6 +72,7 @@ export function Confirm({
         {children}
         <div className="row confirm__actions">
           <Button onClick={onCancel}>Cancel</Button>
+          {secondary ? <Button onClick={secondary.onSelect}>{secondary.label}</Button> : null}
           <Button primary onClick={onConfirm}>
             {confirmLabel}
           </Button>

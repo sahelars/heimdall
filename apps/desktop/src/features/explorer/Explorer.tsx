@@ -81,7 +81,10 @@ export function Explorer({
 
   return (
     <div className="explorer">
-      <div className="explorer__toolbar">
+      {/* The title bar is an overlay, so this bar is the top of the window:
+          its empty space is what the window is dragged by. Only the element
+          carrying the attribute starts a drag, so the buttons still press. */}
+      <div className="explorer__toolbar" data-tauri-drag-region="deep">
         <button type="button" className="icon-button" title="New note" aria-label="New note" onClick={onNewNote}>
           <IconNewNote />
         </button>

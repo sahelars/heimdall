@@ -18,17 +18,14 @@ import {
   listAllDocuments,
   movePath,
   readWholeDocument,
+  relinkPaths,
   saveDocument,
 } from "./api/documents";
-import {
-  backlinksOf,
-  inboundLinkCount,
-  loadVaultIndex,
-  type VaultIndex,
-} from "./api/index-graph";
+import { backlinksOf, backlinksUnder, loadVaultIndex, type VaultIndex } from "./api/index-graph";
 import { baseName, isProtected, parentOf, sourceOf, titleOf } from "./api/source";
-import type { CliStatus, DomainError, LinkGraphData } from "./api/types";
+import type { CliStatus, DomainError, LinkGraphData, RelinkData } from "./api/types";
 import { Button, Failure } from "./components";
+import { withTitle } from "./markdown/frontmatter";
 import { Explorer } from "./features/explorer/Explorer";
 import type { TreeInput, TreeNode } from "./features/explorer/tree";
 import { GraphPane } from "./features/graph/GraphPane";
@@ -40,9 +37,11 @@ import { QuickSwitcher } from "./features/switcher/QuickSwitcher";
 import { Prompt } from "./components/Prompt";
 import { ContextMenu, type MenuItem } from "./components/ContextMenu";
 import { Confirm } from "./components/Confirm";
+import { Modal } from "./components/Modal";
 import { Workspace } from "./features/workspace/Workspace";
 import { defaultPanes, isPaneWidths, type PaneWidths } from "./features/workspace/panes";
 import { readPref, writePref } from "./state/prefs";
+import { applyAccents, isAccentsPreference, NO_ACCENTS, toAccents } from "./state/accent";
 import {
   applyTheme,
   isThemePreference,
@@ -77,6 +76,81 @@ function destinationFolder(openPath: string | null): string {
 }
 
 /** The event the Rust menu emits for Heimdall → Settings…. */
+/** `n thing` or `n things`, which is most of what a report has to say. */
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+/**
+ * What a move failed to carry, or null when it carried everything.
+ *
+ * Only shortfalls are reported. The user agreed to the rewrite before it ran
+ * and can see the result in front of them, so telling them it worked is a
+ * dialog to dismiss for no information. A link left pointing at a name that is
+ * gone is the opposite: invisible until they follow it, and the one thing they
+ * cannot be left to discover on their own.
+ */
+export function describeShortfall(result: RelinkData): string | null {
+  const said: string[] = [];
+
+  if (result.skipped.length > 0) {
+    const where = [...new Set(result.skipped.map((skip) => skip.path))];
+    said.push(
+      `${plural(result.skipped.length, "link")} could not be rewritten and ${
+        result.skipped.length === 1 ? "was" : "were"
+      } left pointing at the old name, in ${where.slice(0, 3).join(", ")}${
+        where.length > 3 ? ` and ${where.length - 3} more` : ""
+      }.`,
+    );
+  }
+  if (result.truncated.file_cap_hit || result.truncated.total_bytes_cap_hit) {
+    said.push(
+      `${plural(result.truncated.files_unscanned, "note")} were too large or too many to check.`,
+    );
+  }
+
+  return said.length > 0 ? said.join(" ") : null;
+}
+
+/** What a move did to the rest of the vault, once its follow-up has run. */
+interface MoveOutcome {
+  /** The notes whose links were rewritten; one of them may be on screen. */
+  rewritten: string[];
+  /** What it could not carry, or null when it carried everything. */
+  shortfall: string | null;
+  /** Set when the rewrite failed outright. The move itself still landed. */
+  error?: DomainError;
+}
+
+/** One path change, however it was asked for. */
+interface MoveRequest {
+  from: string;
+  to: string;
+  kind: "document" | "directory";
+  /**
+   * Open the note afterwards.
+   *
+   * A rename reveals its result — you named it, so you are looking at it. A
+   * drag does not: dropping a note into a folder is filing, and having the
+   * pane jump to whatever was filed is not what was asked for.
+   */
+  reveal: boolean;
+  /** A name typed into the note's heading, to write before the move. */
+  heading?: string;
+}
+
+/**
+ * A move waiting to be agreed to.
+ *
+ * Every move that would break inbound links stops here first. The dialog is the
+ * only thing that starts one, so a rewrite of notes the user never opened is
+ * always something they asked for by name.
+ */
+interface PendingMove extends MoveRequest {
+  /** The notes that link in, which the dialog lists. */
+  linking: string[];
+}
+
 const SETTINGS_EVENT = "menu:settings";
 
 /** How long after the last keystroke an autosave runs. */
@@ -108,9 +182,30 @@ export function App() {
   const [renaming, setRenaming] = useState<TreeNode | null>(null);
   const [deleting, setDeleting] = useState<TreeNode | null>(null);
   const [actionError, setActionError] = useState<DomainError | null>(null);
+  /**
+   * Whether the banner is showing a failure `reload` itself put there.
+   *
+   * `reload` clears the banner when the vault comes back, which is right for
+   * its own "this folder is not a vault" and wrong for everything else: a
+   * background refresh — autosave triggers one 1.5 seconds after any edit —
+   * would wipe the report of a write the user had just made, before they had
+   * read it.
+   */
+  const bannerFromReload = useRef(false);
+
+  /** A move that will break inbound links, waiting to be agreed to. */
+  const [pendingMove, setPendingMove] = useState<PendingMove | null>(null);
+  /** What the last move could not carry. Only shortfalls are reported. */
+  const [shortfall, setShortfall] = useState<string | null>(null);
 
   const [theme, setTheme] = useState<ThemePreference>(() =>
     readPref("theme", "system" as ThemePreference, isThemePreference),
+  );
+  // One accent per theme; null in either is the stylesheet's own, which is
+  // where that theme's default lives. Normalized on the way in, so a value
+  // stored before the accent was split still reads back as dark mode's.
+  const [accents, setAccents] = useState(() =>
+    toAccents(readPref("accent", NO_ACCENTS, isAccentsPreference)),
   );
   // Resolved against the real window, which the workspace spans: the window
   // opens maximized, so a pixel default written for one screen is wrong on the
@@ -199,6 +294,11 @@ export function App() {
     writePref("theme", theme);
   }, [theme]);
 
+  useEffect(() => {
+    applyAccents(document.documentElement, accents);
+    writePref("accent", accents);
+  }, [accents]);
+
   useEffect(() => writePref("panes", panes), [panes]);
 
   // The stylesheet follows the platform on its own, but a mermaid diagram is
@@ -243,6 +343,12 @@ export function App() {
 
   /* The vault ------------------------------------------------------------- */
 
+  /** Put a failure on the banner and keep it there until it is dismissed. */
+  const showError = useCallback((error: DomainError) => {
+    bannerFromReload.current = false;
+    setActionError(error);
+  }, []);
+
   const reload = useCallback(
     async (target: string) => {
       if (!target) return;
@@ -262,10 +368,15 @@ export function App() {
             .filter((node) => isProtected(node.path))
             .map((node) => ({ path: node.path, kind: "document" as const })),
         ]);
-        setActionError(null);
+        if (bannerFromReload.current) {
+          bannerFromReload.current = false;
+          setActionError(null);
+        }
       } catch (thrown) {
         if (thrown instanceof CliFailure) {
           record("link-graph", thrown.error);
+          // Its own, so its own success may clear it again.
+          bannerFromReload.current = true;
           // A vault that has moved, or was never initialised, otherwise leaves
           // the workspace showing an empty tree and "Building the graph…"
           // forever with the reason buried in Diagnostics.
@@ -296,7 +407,7 @@ export function App() {
   /**
    * Catch up on edits made elsewhere.
    *
-   * Nothing watches the filesystem, so a note changed in Obsidian or by an
+   * Nothing watches the filesystem, so a note changed in another editor or by an
    * agent while this window was in the background would otherwise show stale
    * links until something else happened to trigger a reload.
    */
@@ -350,7 +461,10 @@ export function App() {
         if (!current()) return;
 
         disk.current = { path, text: document.content, revision: document.revision };
-        setNote({
+        // Assigned here as well as on render: a caller that awaits `open` and
+        // then reads the note back would otherwise be reading the note that
+        // was on screen before it.
+        noteNow.current = {
           path,
           buffer: document.content,
           dirty: false,
@@ -358,7 +472,8 @@ export function App() {
           saving: false,
           conflict: null,
           error: null,
-        });
+        };
+        setNote(noteNow.current);
       } catch (thrown) {
         const error =
           thrown instanceof CliFailure
@@ -581,11 +696,11 @@ export function App() {
           record(`create ${path}`, thrown.error);
           // Recording it in Diagnostics is not enough: from the workspace, a
           // refused create looks exactly like nothing happening.
-          setActionError(thrown.error);
+          showError(thrown.error);
         }
       }
     },
-    [vault, openPath, reload, open, record],
+    [vault, openPath, reload, open, record, showError],
   );
 
   const createFolderAt = useCallback(
@@ -602,11 +717,11 @@ export function App() {
       } catch (thrown) {
         if (thrown instanceof CliFailure) {
           record(`create folder ${path}`, thrown.error);
-          setActionError(thrown.error);
+          showError(thrown.error);
         }
       }
     },
-    [vault, openPath, reload, record],
+    [vault, openPath, reload, record, showError],
   );
 
   /**
@@ -624,34 +739,189 @@ export function App() {
   /* Renaming and deleting ------------------------------------------------ */
 
   /** Rename by path, which is what the title field and the tree both do. */
-  const renamePath = useCallback(
-    async (path: string, kind: "document" | "directory", name: string) => {
-      setRenaming(null);
-      setActionError(null);
-      if (!vault) return;
+  /**
+   * Bring the open note's heading into line with its filename, or with a name
+   * being committed. Reports whether anything changed.
+   *
+   * Nothing is written here: leaving the buffer dirty hands the write to
+   * autosave and to `save`, which are the only two things in the application
+   * that write a note.
+   */
+  const retitleOpen = useCallback((path: string, name?: string): boolean => {
+    const current = noteNow.current;
+    if (!current || current.path !== path || !current.editable) return false;
 
-      const folder = parentOf(path);
-      const suffix = kind === "document" ? ".md" : "";
-      const to = `${folder ? `${folder}/` : ""}${name.replace(/\.md$/i, "")}${suffix}`;
-      if (to === path) return;
+    const retitled = withTitle(current.buffer, name ?? titleOf(path));
+    if (retitled === current.buffer) return false;
+
+    noteNow.current = { ...current, buffer: retitled, dirty: retitled !== disk.current?.text };
+    setNote(noteNow.current);
+    return true;
+  }, []);
+
+  /**
+   * Carry the links that pointed at a moved path over to its new one.
+   *
+   * Runs after the move, never instead of it. A failure does not undo the
+   * rename: the move landed and the rewrite did not, and both of those are
+   * true — so it is reported rather than hidden behind a rollback that would
+   * itself be an unchecked write.
+   *
+   * What it found is returned rather than announced, because the caller has a
+   * `reload` still to do and `reload` clears the banner on success. Saying it
+   * here would put the one message the user must not miss on screen a moment
+   * before something else wiped it.
+   */
+  const followMove = useCallback(
+    async (target: string, from: string, to: string): Promise<MoveOutcome> => {
+      try {
+        const result = await relinkPaths(target, from, to);
+        return {
+          rewritten: result.updated.map((update) => update.path),
+          shortfall: describeShortfall(result),
+        };
+      } catch (thrown) {
+        if (thrown instanceof CliFailure) {
+          record(`relink ${from}`, thrown.error);
+          return { rewritten: [], shortfall: null, error: thrown.error };
+        }
+        throw thrown;
+      }
+    },
+    [record],
+  );
+
+  /**
+   * Say what a move could not carry. Called after the reload, never before:
+   * `reload` clears the error banner on success, so anything put on screen
+   * ahead of it is wiped by a refresh the user did not ask for.
+   */
+  const announceMove = useCallback(
+    (outcome: MoveOutcome) => {
+      setShortfall(outcome.shortfall);
+      if (outcome.error) showError(outcome.error);
+    },
+    [showError],
+  );
+
+  /**
+   * Do the move, and carry its inbound links if asked to.
+   *
+   * The single place any path in this application changes. `carryLinks` is the
+   * answer to the dialog, and is false whenever there was nothing to ask about.
+   */
+  const performMove = useCallback(
+    async ({ from, to, kind, reveal, heading }: MoveRequest, carryLinks: boolean) => {
+      if (!vault) return;
+      setPendingMove(null);
 
       try {
-        await movePath(vault, path, to);
+        // A name typed into the note's own heading moves both halves of the one
+        // fact, and in this order: the write has to land on the old path,
+        // before the move. Nothing was written while the dialog was up, so
+        // cancelling it leaves the note exactly as it was.
+        if (heading && retitleOpen(from, heading)) {
+          if (!(await save())) return;
+        }
+        await movePath(vault, from, to);
+        const outcome = carryLinks
+          ? await followMove(vault, from, to)
+          : { rewritten: [], shortfall: null };
         setHistory((previous) => {
-          const next = forget(previous, path);
+          const next = forget(previous, from);
           historyNow.current = next;
           return next;
         });
         await reload(vault);
-        if (kind === "document") await open(to);
+        if (kind === "document" && (reveal || openPath === from)) {
+          await open(to);
+          // The heading and the filename are one fact. A rename from the tree
+          // moves only one of them, so the other follows here; left dirty
+          // rather than written, because autosave is what writes.
+          retitleOpen(to);
+        } else if (openPath && outcome.rewritten.includes(openPath) && !noteNow.current?.dirty) {
+          // A folder rename leaves the note on screen where it was but may have
+          // rewritten links inside it. Only re-read a clean buffer: unsaved
+          // edits are kept, and their next save meets `expected_revision` and
+          // raises the conflict bar rather than losing anything.
+          await open(openPath);
+        }
+        announceMove(outcome);
       } catch (thrown) {
         if (thrown instanceof CliFailure) {
-          record(`rename ${path}`, thrown.error);
-          setActionError(thrown.error);
+          record(`move ${from}`, thrown.error);
+          showError(thrown.error);
         }
       }
     },
-    [vault, reload, open, record],
+    [vault, openPath, reload, open, record, retitleOpen, save, followMove, announceMove, showError],
+  );
+
+  /**
+   * Begin a move: ask first when it would break links, otherwise just do it.
+   *
+   * Nothing is written before the answer. A rename that touches only the file
+   * itself is not worth a dialog, and one that rewrites notes the user never
+   * opened is not something to do without being asked.
+   */
+  const beginMove = useCallback(
+    (request: MoveRequest) => {
+      setActionError(null);
+      setShortfall(null);
+      if (!vault || request.to === request.from) return;
+
+      const linking = backlinksUnder(index, request.from);
+      if (linking.length === 0) {
+        void performMove(request, false);
+        return;
+      }
+      setPendingMove({ ...request, linking });
+    },
+    [vault, index, performMove],
+  );
+
+  const renamePath = useCallback(
+    (path: string, kind: "document" | "directory", name: string) => {
+      setRenaming(null);
+      const folder = parentOf(path);
+      const suffix = kind === "document" ? ".md" : "";
+      const to = `${folder ? `${folder}/` : ""}${name.replace(/\.md$/i, "")}${suffix}`;
+      beginMove({ from: path, to, kind, reveal: true });
+    },
+    [beginMove],
+  );
+
+  /**
+   * Commit a new name typed into the note's heading.
+   *
+   * Both halves of the one fact move, and in this order: `renamePath` ends by
+   * reopening the note from disk, so a heading written into the buffer after it
+   * would be written into a buffer that is about to be replaced. The save is
+   * awaited for the same reason `open` flushes one — the write has to land on
+   * the old path, before the move.
+   */
+  const retitle = useCallback(
+    async (name: string) => {
+      const current = noteNow.current;
+      if (!current) return;
+
+      // Only the heading differs, so there is no move to ask about.
+      if (titleOf(current.path) === name) {
+        if (current.editable && retitleOpen(current.path, name)) await save();
+        return;
+      }
+
+      const folder = parentOf(current.path);
+      const to = `${folder ? `${folder}/` : ""}${name.replace(/\.md$/i, "")}.md`;
+      beginMove({
+        from: current.path,
+        to,
+        kind: "document",
+        reveal: true,
+        heading: current.editable ? name : undefined,
+      });
+    },
+    [retitleOpen, save, beginMove],
   );
 
   const rename = useCallback(
@@ -661,10 +931,7 @@ export function App() {
 
   /** Drop a note or folder into another folder. */
   const moveInto = useCallback(
-    async (path: string, folder: string) => {
-      setActionError(null);
-      if (!vault) return;
-
+    (path: string, folder: string) => {
       const name = baseName(path);
       const to = folder ? `${folder}/${name}` : name;
       // Already there, or dropped onto itself.
@@ -674,23 +941,12 @@ export function App() {
       // already seen is impossible.
       if (folder === path || folder.startsWith(`${path}/`)) return;
 
-      try {
-        await movePath(vault, path, to);
-        setHistory((previous) => {
-          const next = forget(previous, path);
-          historyNow.current = next;
-          return next;
-        });
-        await reload(vault);
-        if (openPath === path) await open(to);
-      } catch (thrown) {
-        if (thrown instanceof CliFailure) {
-          record(`move ${path}`, thrown.error);
-          setActionError(thrown.error);
-        }
-      }
+      // A drag changes a path just as a rename does, and a path-shaped link
+      // breaks either way, so it asks the same question. Only `.md` files are
+      // notes, which is the same rule the tree sorts by.
+      beginMove({ from: path, to, kind: path.endsWith(".md") ? "document" : "directory", reveal: false });
     },
-    [vault, openPath, reload, open, record],
+    [beginMove],
   );
 
   const remove = useCallback(
@@ -716,11 +972,11 @@ export function App() {
       } catch (thrown) {
         if (thrown instanceof CliFailure) {
           record(`delete ${node.path}`, thrown.error);
-          setActionError(thrown.error);
+          showError(thrown.error);
         }
       }
     },
-    [vault, openPath, reload, record],
+    [vault, openPath, reload, record, showError],
   );
 
   /**
@@ -762,15 +1018,19 @@ export function App() {
   const resolvedTheme = resolveTheme(theme, prefersDark);
 
   return (
-    <div className="app">
+    // Draggable so the window still moves when there is no vault and neither
+    // toolbar is mounted; the overlaid title bar left nothing else to grab.
+    <div className="app" data-tauri-drag-region>
       {/* No role here: `Failure` is already the alert, and nesting two makes a
           screen reader announce it twice. */}
       {actionError ? (
-        <div className="app__banner">
+        <div className="app__banner" data-tauri-drag-region="deep">
           <Failure error={actionError} />
           <Button onClick={() => setActionError(null)}>Dismiss</Button>
         </div>
       ) : null}
+
+
 
       {vault ? (
         <Workspace
@@ -804,7 +1064,9 @@ export function App() {
               mentions={mentions}
               canBack={canGoBack(history)}
               canForward={canGoForward(history)}
-              renderMermaid={(code) => <Mermaid code={code} theme={resolvedTheme} />}
+              renderMermaid={(code) => (
+                <Mermaid code={code} theme={resolvedTheme} accent={accents[resolvedTheme]} />
+              )}
               onModeChange={setMode}
               onBack={() => step(goBack)}
               onForward={() => step(goForward)}
@@ -820,13 +1082,10 @@ export function App() {
               onOpenLink={openLink}
               resolves={resolves}
               onResolveConflict={(choice) => void resolveConflict(choice)}
-              // The title is the filename, so editing one renames the other.
-              // Protected content is Heimdall's to name, so it is not offered.
-              onRename={
-                note && !isProtected(note.path)
-                  ? (name) => void renamePath(note.path, "document", name)
-                  : null
-              }
+              // The heading and the filename are the same fact, so editing one
+              // moves both. Protected content is Heimdall's to name, so it is
+              // not offered.
+              onRename={note && !isProtected(note.path) ? (name) => void retitle(name) : null}
             />
           }
           right={
@@ -836,7 +1095,7 @@ export function App() {
       ) : (
         <p className="empty">
           No vault yet. Open <strong>Heimdall → Settings…</strong> to create one or choose an
-          existing Obsidian vault.
+          existing folder.
         </p>
       )}
 
@@ -861,11 +1120,7 @@ export function App() {
               : "Note name"
         }
         initial={renaming ? titleOf(baseName(renaming.path)) : prompt === "folder" ? "notes" : "untitled"}
-        note={
-          renaming && inboundLinkCount(index, renaming.path) > 0
-            ? `${inboundLinkCount(index, renaming.path)} note(s) link here. Renaming does not rewrite those links.`
-            : undefined
-        }
+        note={undefined}
         open={prompt !== null || renaming !== null}
         onSubmit={(name) => {
           if (renaming) rename(renaming, name);
@@ -876,6 +1131,60 @@ export function App() {
           setRenaming(null);
         }}
       />
+
+      {/*
+        Every move that would break inbound links stops here, whether it came
+        from the tree, the note's own heading, or a drag. Nothing is written
+        until one of these buttons is pressed, so cancelling leaves the vault
+        untouched — and the rewrite is never something that merely happened.
+      */}
+      <Confirm
+        title="Rename"
+        open={pendingMove !== null}
+        confirmLabel="Update links"
+        secondary={{
+          label: "Rename only",
+          onSelect: () => pendingMove && void performMove(pendingMove, false),
+        }}
+        onConfirm={() => pendingMove && void performMove(pendingMove, true)}
+        onCancel={() => setPendingMove(null)}
+      >
+        <p>
+          Rename <strong>{pendingMove ? baseName(pendingMove.from) : ""}</strong> to{" "}
+          <strong>{pendingMove ? baseName(pendingMove.to) : ""}</strong>?
+        </p>
+        <p className="muted">
+          {pendingMove ? plural(pendingMove.linking.length, "note") : ""} link here.{" "}
+          <strong>Update links</strong> rewrites them to the new name.{" "}
+          <strong>Rename only</strong> leaves them pointing at the old one.
+        </p>
+        {pendingMove ? (
+          <ul className="confirm__list">
+            {pendingMove.linking.slice(0, 8).map((path) => (
+              <li key={path}>{path}</li>
+            ))}
+            {pendingMove.linking.length > 8 ? (
+              <li className="muted">and {pendingMove.linking.length - 8} more</li>
+            ) : null}
+          </ul>
+        ) : null}
+      </Confirm>
+
+      {/*
+        Only shortfalls are reported, and they are reported in a dialog rather
+        than a banner: a refresh clears the banner, and this is the one message
+        that must survive until it has been read.
+      */}
+      <Modal title="Some links were left behind" open={shortfall !== null} onClose={() => setShortfall(null)}>
+        <div className="confirm__frame">
+          <p>{shortfall}</p>
+          <div className="row confirm__actions">
+            <Button primary onClick={() => setShortfall(null)}>
+              OK
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       <Confirm
         title="Delete"
@@ -888,10 +1197,10 @@ export function App() {
           Move <strong>{deleting ? baseName(deleting.path) : ""}</strong> to the vault&rsquo;s
           trash? It stays on disk in <code>.trash/</code> and can be put back from there.
         </p>
-        {deleting && inboundLinkCount(index, deleting.path) > 0 ? (
+        {deleting && backlinksUnder(index, deleting.path).length > 0 ? (
           <p className="muted">
-            {inboundLinkCount(index, deleting.path)} note(s) link to it; those links will stop
-            resolving.
+            {plural(backlinksUnder(index, deleting.path).length, "note")} link to it; those links
+            will stop resolving. Deletion has no new name to point them at.
           </p>
         ) : null}
       </Confirm>
@@ -910,6 +1219,8 @@ export function App() {
         failures={failures}
         theme={theme}
         onThemeChange={setTheme}
+        accents={accents}
+        onAccentsChange={setAccents}
         onVaultChange={chooseVault}
         onRefresh={refreshStatus}
         onClose={() => setSettingsOpen(false)}

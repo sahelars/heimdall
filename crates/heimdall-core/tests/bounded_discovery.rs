@@ -13,7 +13,7 @@ use heimdall_core::{template, Vault};
 fn oversized_vault() -> (tempfile::TempDir, Vault) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-    let vault = Vault::open(&root).unwrap();
+    let vault = Vault::open_with_lock_dir(&root, &test_lock_dir()).unwrap();
     template::scaffold_aios_only(&vault).unwrap();
 
     let notes = dir.path().join("notes");
@@ -100,7 +100,7 @@ mod graph_bounds {
     fn vault_with(count: usize) -> (tempfile::TempDir, Vault) {
         let dir = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-        let vault = Vault::open(&root).unwrap();
+        let vault = Vault::open_with_lock_dir(&root, &test_lock_dir()).unwrap();
         template::scaffold_aios_only(&vault).unwrap();
 
         let notes = dir.path().join("notes");
@@ -120,10 +120,10 @@ mod graph_bounds {
 
         assert_eq!(response.nodes.len(), GRAPH_MAX_NODES);
         assert!(response.truncated.node_cap_hit);
-        // The aios/ files are notes too, so the overflow is the excess plus them.
+        // The main memory is a note too, so the overflow is the excess plus it.
         assert_eq!(
             response.nodes.len() + response.truncated.nodes_omitted,
-            GRAPH_MAX_NODES + over + 2
+            GRAPH_MAX_NODES + over + 1
         );
     }
 
@@ -197,4 +197,17 @@ mod graph_bounds {
         // And the deepest one is reachable by its own name.
         assert!(RelPath::parse("level_0/level_1/level_2/level_3/level_4/level_5/note.md").is_ok());
     }
+}
+
+/// Where these tests keep their write locks.
+///
+/// Outside the vault, as production does, but under the system temp directory
+/// rather than the real application-data one: a test run must not leave files
+/// in a developer's home. Lock files are named by a hash of the vault's path
+/// and every vault here is a fresh temp directory, so sharing one directory
+/// cannot collide.
+fn test_lock_dir() -> camino::Utf8PathBuf {
+    camino::Utf8PathBuf::from_path_buf(std::env::temp_dir())
+        .expect("temp dir is UTF-8")
+        .join("heimdall-test-locks")
 }

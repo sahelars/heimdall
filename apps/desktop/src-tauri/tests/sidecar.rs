@@ -12,12 +12,28 @@ use serde_json::json;
 use heimdall_desktop_lib::cli_bridge::{self, sidecar_path};
 
 fn staged() -> PathBuf {
+    isolate_lock_dir();
     let path = sidecar_path();
     assert!(
         path.is_file(),
         "the sidecar is not staged at {path:?}; run `npm run sidecar` first"
     );
     path
+}
+
+/// Keep the forked sidecars out of the real application-data directory.
+///
+/// The bridge spawns the CLI without a shell and without touching the
+/// environment, so the child inherits this process's. Setting it once, behind a
+/// `OnceLock`, is what makes that safe to do from tests running in parallel.
+fn isolate_lock_dir() {
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        std::env::set_var(
+            "HEIMDALL_LOCK_DIR",
+            std::env::temp_dir().join("heimdall-test-locks"),
+        );
+    });
 }
 
 fn temp_root() -> tempfile::TempDir {
@@ -47,7 +63,6 @@ fn the_bundled_sidecar_creates_a_templated_vault() {
     // The vault is real, not just a reported success.
     let vault = dir.path().join("demo");
     assert!(vault.join("aios/memories/memory.md").is_file());
-    assert!(vault.join(".obsidian/app.json").is_file());
     assert!(vault.join("ideas/hello_world.md").is_file());
 }
 
@@ -56,8 +71,8 @@ fn initializing_an_existing_vault_leaves_its_notes_alone() {
     staged();
     let dir = temp_root();
     let vault = dir.path().join("existing");
-    std::fs::create_dir_all(vault.join(".obsidian")).unwrap();
-    std::fs::write(vault.join(".obsidian/app.json"), b"{\"mine\":true}").unwrap();
+    std::fs::create_dir_all(vault.join(".config")).unwrap();
+    std::fs::write(vault.join(".config/app.json"), b"{\"mine\":true}").unwrap();
     std::fs::write(vault.join("note.md"), b"my content").unwrap();
 
     let response = cli_bridge::run(
@@ -70,7 +85,7 @@ fn initializing_an_existing_vault_leaves_its_notes_alone() {
     assert_eq!(response.data.unwrap()["mode"], "initialized");
     assert_eq!(std::fs::read(vault.join("note.md")).unwrap(), b"my content");
     assert_eq!(
-        std::fs::read(vault.join(".obsidian/app.json")).unwrap(),
+        std::fs::read(vault.join(".config/app.json")).unwrap(),
         b"{\"mine\":true}"
     );
     // No example notes were added to a vault that already had content.
@@ -438,7 +453,6 @@ fn the_client_operations_are_reachable_but_the_server_is_still_not() {
         "create-folder",
         "move-path",
         "delete-path",
-        "write-agents",
         "write-entry",
         "link-graph",
     ] {

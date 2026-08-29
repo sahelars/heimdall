@@ -2,14 +2,14 @@
  * The middle pane: one note, in source or preview.
  */
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { titleOf } from "../../api/source";
 import type { DomainError } from "../../api/types";
 import { IconBack, IconEdit, IconForward, IconMore, IconRead } from "../../components/icons";
 import { Failure } from "../../components";
 import { ContextMenu } from "../../components/ContextMenu";
-import { joinNote, splitNote } from "../../markdown/frontmatter";
+import { joinTitle, splitNote, withFrontmatter, withoutTitle } from "../../markdown/frontmatter";
 import { parseMarkdown, renderTokens, type RenderContext } from "../../markdown/render";
 import { Backlinks } from "./Backlinks";
 import { NoteTitle } from "./NoteTitle";
@@ -59,10 +59,18 @@ export function NoteView(props: NoteViewProps) {
   const [addingProperty, setAddingProperty] = useState(false);
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
 
+  const toBody = useRef<(() => void) | null>(null);
+
   const split = useMemo(() => (note ? splitNote(note.buffer) : null), [note?.buffer, note?.path]);
   const tokens = useMemo(
     () => (split && mode === "preview" ? parseMarkdown(split.body) : null),
     [split?.body, mode],
+  );
+  // The heading is drawn above the editor rather than inside it, so the editor
+  // is given the note without it.
+  const source = useMemo(
+    () => (note && mode === "source" ? withoutTitle(note.buffer) : ""),
+    [note?.buffer, mode],
   );
 
   if (!note) {
@@ -72,6 +80,11 @@ export function NoteView(props: NoteViewProps) {
       </p>
     );
   }
+
+  // The heading the note opens with, falling back to the filename for one
+  // written without a heading at all. The two are the same fact, so the
+  // fallback is a name and not a placeholder.
+  const title = split?.title ?? titleOf(note.path);
 
   const context: RenderContext = {
     from: note.path,
@@ -88,7 +101,9 @@ export function NoteView(props: NoteViewProps) {
         </div>
       ) : null}
 
-      <header className="note__header">
+      {/* Draggable for the same reason the file toolbar is: with the title
+          bar overlaid, this bar is the top of the window. */}
+      <header className="note__header" data-tauri-drag-region="deep">
         <div className="note__nav">
           <button
             type="button"
@@ -147,30 +162,51 @@ export function NoteView(props: NoteViewProps) {
         </div>
       ) : null}
 
+      {/* Outside the scrolling body: the note's name is not something to
+          scroll away from, and in source it is the one line of the document
+          that cannot be deleted. */}
+      {mode === "source" ? (
+        <div className="note__title-bar">
+          <NoteTitle
+            title={title}
+            editable
+            marker
+            className="note__title"
+            onRename={props.onRename}
+            onLeave={() => toBody.current?.()}
+          />
+        </div>
+      ) : null}
+
       <div className="note__body">
         {mode === "source" ? (
           <SourceEditor
             path={note.path}
-            value={note.buffer}
+            value={source}
             editable={note.editable}
-            onChange={props.onChange}
+            onChange={(text) => props.onChange(joinTitle(title, text))}
             onSave={props.onSave}
+            focusHandle={toBody}
           />
         ) : (
           <article className="preview">
-            <NoteTitle title={titleOf(note.path)} onRename={props.onRename} />
+            <NoteTitle
+              title={title}
+              editable={false}
+              className="preview__title"
+              onRename={props.onRename}
+            />
             <Properties
               frontmatter={split?.frontmatter ?? null}
               onChange={
                 note.editable
-                  ? (frontmatter) => props.onChange(joinNote(frontmatter, split?.body ?? ""))
+                  ? (frontmatter) => props.onChange(withFrontmatter(note.buffer, frontmatter))
                   : null
               }
               onOpenLink={(target) => props.onOpenLink(target, note.path)}
               adding={addingProperty}
               onAddingChange={setAddingProperty}
             />
-            <hr className="preview__rule" />
             <div className="preview__content">{tokens ? renderTokens(tokens, context) : null}</div>
             <Backlinks mentions={props.mentions} onOpen={props.onOpen} />
           </article>

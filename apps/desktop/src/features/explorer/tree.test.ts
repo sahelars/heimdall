@@ -43,7 +43,7 @@ describe("building the tree", () => {
     // `list-documents` never returns anything under `aios/`, so those folders
     // exist only because the note paths imply them.
     const tree = buildTree([
-      doc("aios/AGENTS.md"),
+      doc("aios/notes.md"),
       doc("aios/memories/memory.md"),
       doc("aios/memories/extended/memory_1.md"),
       doc("aios/conversations/2026-08-16_10-30-00.md"),
@@ -56,10 +56,10 @@ describe("building the tree", () => {
       "  memories/",
       "    extended/",
       "      memory_1",
-      // `memory.md` sits inside `memories/`; `AGENTS.md` sits beside it, one
-      // level up — exactly the nesting the reference screenshots show.
+      // `memory.md` sits inside `memories/`; a note a user dropped straight
+      // into `aios/` sits beside that folder, one level up.
       "    memory",
-      "  AGENTS",
+      "  notes",
     ]);
   });
 

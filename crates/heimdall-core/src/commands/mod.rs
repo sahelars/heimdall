@@ -11,13 +11,13 @@ mod list_documents;
 mod list_entries;
 mod list_memories;
 mod move_path;
-mod read_agents;
 mod read_documents;
 mod read_entry;
 mod read_memory;
 mod read_range;
+mod relink;
+mod resolve;
 mod types;
-mod write_agents;
 mod write_document;
 mod write_entry;
 mod write_memory;
@@ -34,15 +34,16 @@ pub use list_documents::{list_documents, DocumentEntry, ListDocumentsRequest, Li
 pub use list_entries::{list_entries, EntryMeta, ListEntriesRequest, ListEntriesResponse};
 pub use list_memories::{list_memories, ListMemoriesRequest, ListMemoriesResponse, MemoryEntry};
 pub use move_path::{move_path, MovePathRequest, MovePathResponse};
-pub use read_agents::{read_agents, ReadAgentsRequest};
 pub use read_documents::{
     read_documents, DocumentRead, DocumentSelection, ReadDocumentsRequest, ReadDocumentsResponse,
     SkipReason,
 };
 pub use read_entry::{read_entry, ReadEntryRequest};
+pub use relink::{
+    relink, RelinkRequest, RelinkResponse, RelinkSkip, RelinkTruncation, RelinkUpdate, RelinkSkipReason,
+};
 pub use read_memory::{read_memory, ReadMemoryRequest};
 pub use types::{DocumentKind, EntryKind, MemoryKind, ReadResult};
-pub use write_agents::{write_agents, WriteAgentsRequest, WriteAgentsResponse};
 pub use write_document::{write_document, WriteDocumentRequest, WriteDocumentResponse};
 pub use write_entry::{write_entry, WriteEntryRequest, WriteEntryResponse};
 pub use write_memory::{write_memory, WriteMemoryRequest, WriteMemoryResponse};
