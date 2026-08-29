@@ -528,6 +528,20 @@ describe("renaming and deleting", () => {
     expect(commandsCalled()).not.toContain("relink");
   });
 
+  it("asks about links without a ring drawn around Cancel", async () => {
+    // `showModal` focuses the first control it finds, which in this dialog is
+    // Cancel — so the question arrived looking as though it had been answered.
+    bridge();
+    render(<App />);
+    await renameFromTree("how_lens_works", "how_lens_work");
+
+    const dialog = await screen.findByRole("dialog", { name: "Rename" });
+    expect(document.activeElement).toBe(dialog);
+    expect(document.activeElement).not.toBe(
+      within(dialog).getByRole("button", { name: "Cancel" }),
+    );
+  });
+
   it("renames and carries the links when told to update them", async () => {
     bridge();
     render(<App />);

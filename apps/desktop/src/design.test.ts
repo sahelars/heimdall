@@ -286,6 +286,39 @@ describe("pane dividers", () => {
   });
 });
 
+describe("keyboard focus", () => {
+  it("draws a button's focus ring in ink rather than in the system's blue", () => {
+    // WebKit's default ring is the one colour in the application that is not
+    // the application's: a hue, on a surface the palette says is greyscale.
+    for (const control of [".button:focus-visible", ".icon-button:focus-visible"]) {
+      const rule = rules(declarations).find((candidate) =>
+        candidate.selector.split(",").some((part) => part.trim() === control),
+      );
+      expect(rule, `${control} has no rule, so the system ring shows through`).toBeDefined();
+      expect(rule!.body).toMatch(/outline:\s*1px solid var\(--fg\);/);
+    }
+  });
+
+  it("never hides a focus ring without putting something in its place", () => {
+    // `outline: none` is allowed only where the element is a container nobody
+    // is being pointed at, or where a rule of its own is drawn instead.
+    const REPLACED = [
+      ".divider:focus-visible",
+      ".modal:focus",
+      ".note__title-field:focus",
+      ".switcher__input:focus",
+      ".preview__title-field:focus",
+    ];
+    for (const rule of rules(declarations)) {
+      if (!/outline:\s*none/.test(rule.body)) continue;
+      expect(
+        REPLACED.some((surface) => rule.selector.includes(surface)),
+        `"${rule.selector}" hides a focus ring with nothing in its place`,
+      ).toBe(true);
+    }
+  });
+});
+
 describe("the settings sheet", () => {
   it("draws no rule under its title", () => {
     // The tab strip below draws its own, and two hairlines a row apart boxed

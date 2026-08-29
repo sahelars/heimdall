@@ -677,6 +677,20 @@ pre {
   color: var(--fg);
 }
 
+/*
+ * A button reached with the keyboard, drawn in ink rather than in the system's
+ * blue. Same hairline as `.input:focus`, and inset for the same reason: an
+ * outline outside the border would nudge the row it sits in.
+ *
+ * `:focus-visible` and not `:focus`, so a button that was merely clicked does
+ * not keep a ring after the press.
+ */
+.button:focus-visible,
+.icon-button:focus-visible {
+  outline: 1px solid var(--fg);
+  outline-offset: -2px;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -1124,7 +1138,17 @@ pre {
   gap: 4px;
 }
 
+/*
+ * The rule a `---` draws, in the same hairline as the divider above Linked
+ * mentions.
+ *
+ * The width is stated rather than left to the default: the preview is a flex
+ * column, and WebKit's own `margin-inline: auto` on an `hr` stops a flex item
+ * stretching to the line, which left the rule a pixel tall and no pixels wide.
+ */
 .md-rule {
+  width: 100%;
+  margin: 0;
   border: none;
   border-top: 1px solid var(--line-soft);
 }
