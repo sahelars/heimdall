@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
-use crate::cli_bridge::DomainError;
+use crate::cli_bridge::{DomainError, SidecarOrigin};
 
 /// The configuration files this application knows how to edit.
 ///
@@ -40,6 +40,11 @@ pub struct KnownClient {
     pub present: bool,
     /// Whether it already has a Heimdall server entry for this vault.
     pub installed: bool,
+    /// Whether that entry names a command that is no longer there.
+    ///
+    /// A client whose configured command cannot be spawned reports a timeout,
+    /// never a missing file, so this is the only place the user can find out.
+    pub stale: bool,
     /// The entry name that would be written.
     pub server_key: String,
 }
@@ -100,6 +105,18 @@ fn entry_points_at(entry: &Value, vault: &str) -> bool {
         .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some(vault)))
 }
 
+/// Whether the command an existing entry names is still on disk.
+///
+/// Only an absolute path can be checked. A bare name is left alone: it is
+/// resolved through the client's own `PATH`, which is not this process's.
+fn entry_command_exists(entry: &Value) -> bool {
+    let Some(command) = entry.get("command").and_then(Value::as_str) else {
+        return true;
+    };
+    let path = Path::new(command);
+    !path.is_absolute() || path.is_file()
+}
+
 /// Reduce a folder name to something safe to use as a JSON key.
 fn sanitize(name: &str) -> String {
     let cleaned: String = name
@@ -130,11 +147,13 @@ pub fn known_clients(vault: &str) -> Vec<KnownClient> {
             let path = config_path(segments)?;
             let existing = read_json(&path).unwrap_or_else(|| json!({}));
             let key = server_key(&existing, vault);
-            let installed = existing
+            let entry = existing
                 .get("mcpServers")
                 .and_then(Value::as_object)
                 .and_then(|servers| servers.get(&key))
-                .is_some_and(|entry| entry_points_at(entry, vault));
+                .filter(|entry| entry_points_at(entry, vault));
+            let installed = entry.is_some();
+            let stale = entry.is_some_and(|entry| !entry_command_exists(entry));
 
             Some(KnownClient {
                 id: id.to_string(),
@@ -142,6 +161,7 @@ pub fn known_clients(vault: &str) -> Vec<KnownClient> {
                 path: path.to_string_lossy().to_string(),
                 present: path.is_file(),
                 installed,
+                stale,
                 server_key: key,
             })
         })
@@ -157,7 +177,27 @@ fn read_json(path: &Path) -> Option<Value> {
 }
 
 /// Merge the server entry into one known client's configuration.
-pub fn install(client_id: &str, vault: &str, command: &Path) -> Result<InstallOutcome, DomainError> {
+pub fn install(
+    client_id: &str,
+    vault: &str,
+    command: &Path,
+    origin: SidecarOrigin,
+) -> Result<InstallOutcome, DomainError> {
+    // Before anything is read, copied, or written. A client configuration is a
+    // file the user keeps; a development build's CLI lives in a build directory
+    // that a rebuild or `cargo clean` removes, and the failure that leaves
+    // behind is invisible — a client whose command has gone reports a timeout,
+    // never a missing file (SPEC §15).
+    if origin.is_development() {
+        return Err(DomainError::new(
+            "INVALID_INPUT",
+            "this is a development build, and its command line tool lives in a build directory \
+             that a rebuild or \"cargo clean\" removes; a client whose configured command has \
+             gone reports only a timeout, never a missing file. Install the built application \
+             and register from there, or paste the snippet above into the client yourself",
+        ));
+    }
+
     let Some((_, _, segments)) = KNOWN_CLIENTS.iter().find(|(id, _, _)| *id == client_id) else {
         return Err(DomainError::new(
             "INVALID_INPUT",
@@ -310,11 +350,55 @@ mod tests {
 
     #[test]
     fn only_known_clients_can_be_written_to() {
-        let error = install("/etc/passwd", "/v", Path::new("/x/heimdall")).unwrap_err();
+        let shipped = SidecarOrigin::Shipped;
+        let error = install("/etc/passwd", "/v", Path::new("/x/heimdall"), shipped).unwrap_err();
         assert_eq!(error.code, "INVALID_INPUT");
 
-        let error = install("../../evil", "/v", Path::new("/x/heimdall")).unwrap_err();
+        let error = install("../../evil", "/v", Path::new("/x/heimdall"), shipped).unwrap_err();
         assert_eq!(error.code, "INVALID_INPUT");
+    }
+
+    #[test]
+    fn a_development_build_is_refused_before_anything_is_touched() {
+        // The path a development build would write disappears on a rebuild, and
+        // the client it was written for then reports a timeout rather than a
+        // missing file — so the refusal has to explain itself (SPEC §15).
+        let backup = config_path(KNOWN_CLIENTS[0].2)
+            .expect("a home directory")
+            .with_extension("heimdall-backup.json");
+        let before = backup.is_file();
+
+        let error = install(
+            KNOWN_CLIENTS[0].0,
+            "/v",
+            Path::new("/x/target/debug/heimdall"),
+            SidecarOrigin::Development,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "INVALID_INPUT");
+        assert!(error.message.contains("development build"), "{}", error.message);
+        assert!(error.message.contains("build directory"), "{}", error.message);
+        // The guard runs before the back-up, which is `install`'s first write.
+        assert_eq!(backup.is_file(), before, "a refused install still wrote something");
+    }
+
+    #[test]
+    fn a_registration_is_stale_only_when_its_absolute_command_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("heimdall");
+        std::fs::write(&present, b"#!/bin/sh\n").unwrap();
+
+        let entry = |command: &str| json!({ "command": command, "args": ["mcp", "--vault", "/v"] });
+
+        assert!(entry_command_exists(&entry(&present.to_string_lossy())));
+        assert!(!entry_command_exists(&entry(
+            &dir.path().join("gone").to_string_lossy()
+        )));
+        // A bare name is resolved through the client's `PATH`, not this
+        // process's, so it is never called stale.
+        assert!(entry_command_exists(&entry("heimdall")));
+        assert!(entry_command_exists(&json!({ "args": [] })));
     }
 
     #[test]

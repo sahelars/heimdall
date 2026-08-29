@@ -27,6 +27,11 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
 
   const cliPath = status?.path ?? "";
   const serverKey = clients.find((client) => client.present)?.serverKey ?? "heimdall";
+  // A build directory's path is not one to leave in a file the user keeps: a
+  // rebuild removes it, and the client then reports a timeout rather than a
+  // missing file. The write is refused in Rust; this is so the reason arrives
+  // before the click, and covers copying the snippet by hand too (SPEC §15).
+  const developmentBuild = status?.developmentBuild ?? false;
 
   useEffect(() => {
     if (!vault) return;
@@ -77,12 +82,30 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
         description="Paste this into your AI client's MCP configuration. It points at the copy of the command line tool bundled with this application."
       >
         <pre className="snippet">{clientConfigSnippet(cliPath, vault, serverKey)}</pre>
+        {developmentBuild ? (
+          <Notice title="Development build">
+            <p className="muted">
+              This command is a build artifact. A rebuild or <code>cargo clean</code> removes it,
+              and a client whose command has gone reports only a timeout. Use a built copy of the
+              application for anything you intend to keep.
+            </p>
+          </Notice>
+        ) : null}
       </Panel>
 
       <Panel
         title="Install automatically"
         description="Writes the entry above into a detected client's configuration. Existing servers and settings are kept, and the previous file is backed up first."
       >
+        {developmentBuild ? (
+          <Notice title="Not available in a development build">
+            <p className="muted">
+              Writing this build's command into a client's configuration would leave an entry that
+              breaks on the next rebuild. Install the built application and add the entry from
+              there.
+            </p>
+          </Notice>
+        ) : null}
         {clients.length === 0 ? (
           <p className="muted">No known MCP clients were found on this machine.</p>
         ) : (
@@ -92,11 +115,17 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
                 <div className="field field--grow">
                   <span className="field__label">
                     {client.name}
-                    {client.installed ? " — already configured" : client.present ? "" : " — not installed"}
+                    {client.stale
+                      ? " — configured, but its command is gone"
+                      : client.installed
+                        ? " — already configured"
+                        : client.present
+                          ? ""
+                          : " — not installed"}
                   </span>
                   <span className="field__hint">{client.path}</span>
                 </div>
-                <Button onClick={() => install(client.id)} disabled={busy}>
+                <Button onClick={() => install(client.id)} disabled={busy || developmentBuild}>
                   {client.installed ? "Update entry" : "Add entry"}
                 </Button>
               </div>

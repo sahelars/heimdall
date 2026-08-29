@@ -159,6 +159,8 @@ pub struct CliStatus {
     pub path: String,
     /// Whether that file is actually present and executable.
     pub available: bool,
+    /// Whether that path belongs to a build tree rather than a shipped app.
+    pub development_build: bool,
     pub cli_version: Option<String>,
     pub core_version: Option<String>,
     pub mcp_protocol_version: Option<String>,
@@ -193,6 +195,45 @@ fn vault_lock(vault: &str) -> &'static RwLock<()> {
 /// Whether a subcommand needs exclusive access to its vault.
 fn mutates(command: &str) -> bool {
     MUTATES.contains(&command)
+}
+
+/// Where the sidecar this application runs actually came from.
+///
+/// [`sidecar_path`] cannot answer this on its own. Under `tauri dev` the CLI is
+/// staged beside the development executable, so the "beside `current_exe`"
+/// branch matches there exactly as it does inside a shipped bundle, and the two
+/// are indistinguishable by path — short of matching on the string `target`,
+/// which is a directory name a user is free to choose.
+///
+/// It matters for one decision only: what may be written into a client's own
+/// configuration file (SPEC §15). Running the development sidecar is what
+/// development is for, so nothing else consults this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarOrigin {
+    /// Bundled inside an installed application; its path outlives this session.
+    Shipped,
+    /// A build artifact, which a rebuild, a rename, or `cargo clean` removes.
+    Development,
+}
+
+impl SidecarOrigin {
+    pub fn is_development(self) -> bool {
+        self == SidecarOrigin::Development
+    }
+}
+
+/// Which of the two this build is.
+///
+/// `tauri::is_dev()` is `!cfg!(feature = "custom-protocol")`, and `tauri build`
+/// compiles with `--features tauri/custom-protocol` while `tauri dev` does not.
+/// So this is the same answer the bundler had — a compile-time fact, not a
+/// guess made from the filesystem.
+pub fn sidecar_origin() -> SidecarOrigin {
+    if tauri::is_dev() {
+        SidecarOrigin::Development
+    } else {
+        SidecarOrigin::Shipped
+    }
 }
 
 /// Resolve the bundled sidecar. `PATH` is never consulted (SPEC §16).
@@ -540,6 +581,7 @@ pub fn status() -> CliStatus {
         return CliStatus {
             path: display,
             available: false,
+            development_build: sidecar_origin().is_development(),
             cli_version: None,
             core_version: None,
             mcp_protocol_version: None,
@@ -563,6 +605,7 @@ pub fn status() -> CliStatus {
     CliStatus {
         path: display,
         available: response.ok,
+        development_build: sidecar_origin().is_development(),
         cli_version: text("cli_version"),
         core_version: text("core_version"),
         mcp_protocol_version: text("mcp_protocol_version"),
@@ -1001,6 +1044,16 @@ mod tests {
         let response = parse_envelope("not json at all", String::new(), 0);
         assert!(!response.ok);
         assert_eq!(response.error.unwrap().code, "INTERNAL_ERROR");
+    }
+
+    #[test]
+    fn a_test_build_is_a_development_one() {
+        // `cargo test` compiles without `tauri/custom-protocol`, exactly as
+        // `tauri dev` does. This is here so that hardcoding either variant —
+        // which would leave the client-configuration guard silently dead, in
+        // one direction or the other — fails rather than ships.
+        assert_eq!(sidecar_origin(), SidecarOrigin::Development);
+        assert!(sidecar_origin().is_development());
     }
 
     #[test]

@@ -27,10 +27,18 @@ const { Diagnostics } = await import("./Diagnostics");
 const STATUS = {
   path: "/Applications/Heimdall.app/Contents/MacOS/heimdall",
   available: true,
+  developmentBuild: false,
   cliVersion: "0.1.0",
   coreVersion: "0.1.0",
   mcpProtocolVersion: "2025-11-25",
   outputSchemaVersion: 1,
+};
+
+/** The same application run from a build tree rather than an installed copy. */
+const DEV_STATUS = {
+  ...STATUS,
+  path: "/Users/n/heimdall/apps/desktop/src-tauri/target/debug/heimdall",
+  developmentBuild: true,
 };
 
 /** Captured so a test can fire the menu event the way Rust does. */
@@ -205,6 +213,54 @@ describe("Server", () => {
     expect(alert).toHaveTextContent("vault directory does not exist");
   });
 
+  it("refuses to put a development build's path into a client's configuration", async () => {
+    // The path would break on the next rebuild, and the client's only symptom
+    // would be a timeout — so the reason has to arrive before the click.
+    invoke.mockImplementation((command: string) => {
+      if (command === "list_client_configs") {
+        return Promise.resolve([
+          {
+            id: "claude-desktop",
+            name: "Claude Desktop",
+            path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
+            present: true,
+            installed: false,
+            stale: false,
+            serverKey: "heimdall",
+          },
+        ]);
+      }
+      return Promise.resolve(null);
+    });
+    render(<Server vault="/v" status={DEV_STATUS} />);
+
+    expect(await screen.findByText("Not available in a development build")).toBeInTheDocument();
+    expect(screen.getByText("Development build")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add entry" })).toBeDisabled();
+  });
+
+  it("says when the entry already there names a command that has gone", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "list_client_configs") {
+        return Promise.resolve([
+          {
+            id: "claude-desktop",
+            name: "Claude Desktop",
+            path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
+            present: true,
+            installed: true,
+            stale: true,
+            serverKey: "heimdall",
+          },
+        ]);
+      }
+      return Promise.resolve(null);
+    });
+    render(<Server vault="/v" status={STATUS} />);
+
+    expect(await screen.findByText(/its command is gone/)).toBeInTheDocument();
+  });
+
   it("writes a client entry only when asked, and says what it did", async () => {
     invoke.mockImplementation((command: string) => {
       if (command === "list_client_configs") {
@@ -215,6 +271,7 @@ describe("Server", () => {
             path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
             present: true,
             installed: false,
+            stale: false,
             serverKey: "heimdall",
           },
         ]);
@@ -270,6 +327,7 @@ describe("Diagnostics", () => {
         status={{
           path: "/Applications/Heimdall.app/Contents/MacOS/heimdall",
           available: false,
+          developmentBuild: false,
           error: {
             code: "IO_ERROR",
             message: "the bundled heimdall command line tool is missing from this application",

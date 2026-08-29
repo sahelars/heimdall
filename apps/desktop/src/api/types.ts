@@ -36,6 +36,8 @@ export interface CliStatus {
   /** Absolute path of the bundled sidecar this app runs. */
   path: string;
   available: boolean;
+  /** Whether that path is a build artifact rather than a shipped app's. */
+  developmentBuild: boolean;
   cliVersion?: string;
   coreVersion?: string;
   mcpProtocolVersion?: string;
@@ -60,6 +62,8 @@ export interface KnownClient {
   path: string;
   present: boolean;
   installed: boolean;
+  /** Whether the entry already there names a command that has gone. */
+  stale: boolean;
   serverKey: string;
 }
 
