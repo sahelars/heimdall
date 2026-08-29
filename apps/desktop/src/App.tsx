@@ -43,7 +43,7 @@ import { Confirm } from "./components/Confirm";
 import { Workspace } from "./features/workspace/Workspace";
 import { defaultPanes, isPaneWidths, type PaneWidths } from "./features/workspace/panes";
 import { readPref, writePref } from "./state/prefs";
-import { applyAccent, isAccentPreference } from "./state/accent";
+import { applyAccents, isAccentsPreference, NO_ACCENTS, toAccents } from "./state/accent";
 import {
   applyTheme,
   isThemePreference,
@@ -113,9 +113,11 @@ export function App() {
   const [theme, setTheme] = useState<ThemePreference>(() =>
     readPref("theme", "system" as ThemePreference, isThemePreference),
   );
-  // Null is the stylesheet's own accent, which is where the default lives.
-  const [accent, setAccent] = useState<string | null>(() =>
-    readPref("accent", null, isAccentPreference),
+  // One accent per theme; null in either is the stylesheet's own, which is
+  // where that theme's default lives. Normalized on the way in, so a value
+  // stored before the accent was split still reads back as dark mode's.
+  const [accents, setAccents] = useState(() =>
+    toAccents(readPref("accent", NO_ACCENTS, isAccentsPreference)),
   );
   // Resolved against the real window, which the workspace spans: the window
   // opens maximized, so a pixel default written for one screen is wrong on the
@@ -205,9 +207,9 @@ export function App() {
   }, [theme]);
 
   useEffect(() => {
-    applyAccent(document.documentElement, accent);
-    writePref("accent", accent);
-  }, [accent]);
+    applyAccents(document.documentElement, accents);
+    writePref("accent", accents);
+  }, [accents]);
 
   useEffect(() => writePref("panes", panes), [panes]);
 
@@ -816,7 +818,9 @@ export function App() {
               mentions={mentions}
               canBack={canGoBack(history)}
               canForward={canGoForward(history)}
-              renderMermaid={(code) => <Mermaid code={code} theme={resolvedTheme} accent={accent} />}
+              renderMermaid={(code) => (
+                <Mermaid code={code} theme={resolvedTheme} accent={accents[resolvedTheme]} />
+              )}
               onModeChange={setMode}
               onBack={() => step(goBack)}
               onForward={() => step(goForward)}
@@ -922,8 +926,8 @@ export function App() {
         failures={failures}
         theme={theme}
         onThemeChange={setTheme}
-        accent={accent}
-        onAccentChange={setAccent}
+        accents={accents}
+        onAccentsChange={setAccents}
         onVaultChange={chooseVault}
         onRefresh={refreshStatus}
         onClose={() => setSettingsOpen(false)}

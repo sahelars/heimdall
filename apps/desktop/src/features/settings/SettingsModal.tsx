@@ -10,6 +10,7 @@ import { useState } from "react";
 
 import type { CliStatus } from "../../api/types";
 import { Modal } from "../../components/Modal";
+import type { Accents } from "../../state/accent";
 import type { ThemePreference } from "../../state/theme";
 import { Appearance } from "./Appearance";
 import { Diagnostics, type RecordedFailure } from "./Diagnostics";
@@ -26,9 +27,9 @@ interface SettingsModalProps {
   failures: RecordedFailure[];
   theme: ThemePreference;
   onThemeChange: (preference: ThemePreference) => void;
-  /** Null is the stylesheet's own accent — see `state/accent.ts`. */
-  accent: string | null;
-  onAccentChange: (accent: string | null) => void;
+  /** One per theme; null in either is that theme's stylesheet default. */
+  accents: Accents;
+  onAccentsChange: (accents: Accents) => void;
   onVaultChange: (vault: string) => void;
   onRefresh: () => void;
   onClose: () => void;
@@ -62,8 +63,8 @@ export function SettingsModal(props: SettingsModalProps) {
           <Appearance
             preference={props.theme}
             onChange={props.onThemeChange}
-            accent={props.accent}
-            onAccentChange={props.onAccentChange}
+            accents={props.accents}
+            onAccentsChange={props.onAccentsChange}
           />
         ) : null}
         {section === "Diagnostics" ? (

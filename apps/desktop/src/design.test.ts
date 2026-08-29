@@ -334,44 +334,73 @@ describe("palette", () => {
     }
   });
 
-  it("reaches the accent through one property per theme, never a literal beside it", () => {
-    // Light mode has no hue at all: its links are black (SPEC §15).
+  it("gives each theme its own accent, resolved from its own property", () => {
+    // One accent per theme (SPEC §15): a single shared one is invisible against
+    // one of the two backgrounds. Each theme reads only its own property, and
+    // the fallback beside it is that theme's monochrome default.
     const root = declarations.match(/:root\s*\{[^}]*\}/)?.[0] ?? "";
-    expect(root).toMatch(/--accent:\s*#000000;/);
+    expect(root).toMatch(/--accent:\s*var\(--accent-light,\s*var\(--accent-light-base\)\);/);
 
-    // Dark mode's is whatever the user chose, so both dark blocks name the
-    // property Settings writes rather than a colour of their own.
     const media = declarations.match(/@media \(prefers-color-scheme: dark\)\s*\{[\s\S]*?\n\}/)?.[0] ?? "";
     const override = declarations.match(/:root\[data-theme="dark"\]\s*\{[^}]*\}/)?.[0] ?? "";
     for (const block of [media, override]) {
-      expect(block).toMatch(/--accent:\s*var\(--accent-dark\);/);
+      expect(block).toMatch(/--accent:\s*var\(--accent-dark,\s*var\(--accent-dark-base\)\);/);
     }
   });
 
-  it("states the dark accent's default once, and only dark mode reads it", () => {
-    // The default lives here rather than in TypeScript, which is what lets the
-    // picker show it without naming a colour (see colour.test.ts).
-    const defaults = declarations.match(/--accent-dark:\s*[^;]+;/g) ?? [];
-    expect(defaults).toEqual(["--accent-dark: #ffffff;"]);
-
+  it("states both defaults on :root, as opposite ends of the palette", () => {
+    // On `:root` rather than inside their own theme blocks, so the picker can
+    // read the default for the theme that is not currently showing — it shows a
+    // well for each. Opposite ends is the point: black on white, white on black.
     const root = declarations.match(/:root\s*\{[^}]*\}/)?.[0] ?? "";
-    expect(root).toContain("--accent-dark: #ffffff;");
+    expect(root).toMatch(/--accent-light-base:\s*#000000;/);
+    expect(root).toMatch(/--accent-dark-base:\s*#ffffff;/);
+  });
 
-    // Light mode never reads it, which is the whole reason the setting can be
-    // dark-mode-only without a line of theme logic in React.
+  it("spends an accent in light mode too, not only in dark", () => {
+    // The regression this guards: the accent used to be read only by the dark
+    // blocks, so a colour chosen in Settings did nothing at all in light mode.
+    const root = declarations.match(/:root\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(root).toContain("var(--accent-light");
+  });
+
+  it("never declares the chosen accents, so each theme's fallback is its default", () => {
+    // The whole mechanism. An unset custom property falls through to its var()
+    // fallback, which is how the property Settings writes can be absent and
+    // still leave a working colour behind. Declaring either here would make a
+    // choice impossible to clear.
+    for (const property of ["--accent-light", "--accent-dark"]) {
+      expect(declarations, `${property} must not be declared`).not.toMatch(
+        new RegExp(`${property}:\\s*[^;]+;`),
+      );
+    }
+
+    // And every read carries a fallback, or the unset state resolves to nothing
+    // at all rather than to a colour.
+    const reads = declarations.match(/var\(--accent-(?:light|dark)[^;]*\)/g) ?? [];
+    expect(reads.length).toBeGreaterThan(0);
+    for (const read of reads) {
+      expect(read, `${read} has no fallback`).toMatch(
+        /var\(--accent-(light|dark),\s*var\(--accent-\1-base\)/,
+      );
+    }
+
+    // Only the theme blocks read them. Everything else goes through `--accent`,
+    // so there is exactly one place per theme that decides what the accent is
+    // and no rule can reach past it for the raw choice.
     for (const rule of rules(declarations)) {
-      if (!rule.body.includes("var(--accent-dark)")) continue;
+      if (!/var\(--accent-(?:light|dark),/.test(rule.body)) continue;
       expect(
-        /\[data-theme="dark"\]|:not\(\[data-theme="light"\]\)/.test(rule.selector),
-        `"${rule.selector}" reads the dark accent outside dark mode`,
+        rule.selector.startsWith(":root"),
+        `"${rule.selector}" reads a chosen accent instead of --accent`,
       ).toBe(true);
     }
   });
 
   it("spends the accent only on links, the open note, the active graph node, and mermaid", () => {
     for (const rule of rules(declarations)) {
-      // `--accent-dark` as well as `--accent`: a new surface must not be able
-      // to spend the accent by reaching past it for the token behind it.
+      // The theme properties as well as `--accent`: a new surface must not be
+      // able to spend the accent by reaching past it for a token behind it.
       if (!/var\(--accent[a-z-]*\)|var\(--link\)/.test(rule.body)) continue;
       if (rule.selector.startsWith(":root")) continue;
       const allowed = ACCENT_SURFACES.some((surface) => rule.selector.includes(`.${surface}`));

@@ -390,11 +390,7 @@ describe("Settings", () => {
     expect(window.localStorage.getItem("heimdall.theme")).toBe('"dark"');
   });
 
-  it("writes a chosen accent onto the root, and gives it back on request", async () => {
-    // The stylesheet is not attached here, so what is asserted is the override
-    // itself: an inline custom property the dark blocks read, and nothing else.
-    // Only dark mode spends it, and that is the stylesheet's decision, not this
-    // component's — which is why there is no theme to set up first.
+  async function appearance() {
     invoke.mockResolvedValue(STATUS);
     render(<App />);
     await waitFor(() => expect(listenEvent).toHaveBeenCalled());
@@ -402,28 +398,49 @@ describe("Settings", () => {
 
     const dialog = await screen.findByRole("dialog");
     await userEvent.click(within(dialog).getByRole("button", { name: "Appearance" }));
-    await userEvent.type(within(dialog).getByLabelText("Hex"), "#ff8800");
+    return dialog;
+  }
 
-    expect(document.documentElement.style.getPropertyValue("--accent-dark")).toBe("#ff8800");
-    expect(window.localStorage.getItem("heimdall.accent")).toBe('"#ff8800"');
+  it("writes each theme's accent onto the root as its own property", async () => {
+    // The stylesheet is not attached here, so what is asserted is the overrides
+    // themselves: one inline custom property per theme. Which theme spends
+    // which is the stylesheet's decision, not this component's — which is why
+    // there is no theme to set up first.
+    const dialog = await appearance();
+    await userEvent.type(within(dialog).getByLabelText("Dark hex"), "#00ff00");
 
-    await userEvent.click(within(dialog).getByRole("button", { name: "Default" }));
+    expect(document.documentElement.style.getPropertyValue("--accent-dark")).toBe("#00ff00");
+    expect(window.localStorage.getItem("heimdall.accent")).toBe(
+      JSON.stringify({ light: null, dark: "#00ff00" }),
+    );
+
+    await userEvent.click(within(dialog).getAllByRole("button", { name: "Default" })[1]!);
 
     // Removed rather than written back: the default belongs to the stylesheet.
     expect(document.documentElement.style.getPropertyValue("--accent-dark")).toBe("");
-    expect(window.localStorage.getItem("heimdall.accent")).toBe("null");
+  });
+
+  it("keeps the two accents apart, so one theme's choice is not the other's", async () => {
+    // The bug that made two accents necessary: a colour picked for dark mode
+    // used to apply to light mode as well, where #ffffff is invisible.
+    const dialog = await appearance();
+    await userEvent.type(within(dialog).getByLabelText("Dark hex"), "#ffffff");
+
+    expect(document.documentElement.style.getPropertyValue("--accent-dark")).toBe("#ffffff");
+    expect(document.documentElement.style.getPropertyValue("--accent-light")).toBe("");
+
+    await userEvent.type(within(dialog).getByLabelText("Light hex"), "#000000");
+
+    expect(document.documentElement.style.getPropertyValue("--accent-light")).toBe("#000000");
+    expect(document.documentElement.style.getPropertyValue("--accent-dark")).toBe("#ffffff");
   });
 
   it("does not offer to reset an accent that has not been set", async () => {
-    invoke.mockResolvedValue(STATUS);
-    render(<App />);
-    await waitFor(() => expect(listenEvent).toHaveBeenCalled());
-    act(() => fireSettings?.());
+    const dialog = await appearance();
 
-    const dialog = await screen.findByRole("dialog");
-    await userEvent.click(within(dialog).getByRole("button", { name: "Appearance" }));
-
-    expect(within(dialog).getByRole("button", { name: "Default" })).toBeDisabled();
+    for (const button of within(dialog).getAllByRole("button", { name: "Default" })) {
+      expect(button).toBeDisabled();
+    }
   });
 });
 

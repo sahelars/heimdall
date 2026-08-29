@@ -1,17 +1,17 @@
 /*
  * The visual system (SPEC §15).
  *
- * Monochrome with exactly one accent. Dark mode is pure black behind white;
+ * Monochrome with one accent per theme. Dark mode is pure black behind white;
  * light mode is the exact inverse; the system preference decides unless the
  * user overrides it in Settings. Every border in the application — inputs and
  * buttons included — is 1px solid and squared.
  *
  * The accent is spent only on links, the note open in the file tree, the active
- * graph node, and mermaid diagrams. Light mode's is black; dark mode's is the
- * user's to set in Settings and defaults to white, so nothing in this file is
- * a hue at all — every rule reaches the accent through var(--accent) or
- * var(--link), which is what lets design.test.ts check the whole palette by
- * reading this file.
+ * graph node, and mermaid diagrams. There is one per theme, both the user's to
+ * set in Settings; until they are set, light mode's is black and dark mode's is
+ * white. So nothing in this file is a hue at all — every rule reaches the
+ * accent through var(--accent) or var(--link), which is what lets
+ * design.test.ts check the whole palette by reading this file.
  *
  * Colour lives here and nowhere else. The CodeMirror theme and the graph
  * renderer are JavaScript, so a literal in either would be a colour no test
@@ -45,16 +45,33 @@
   --line-soft: #d4d4d4;
   --line-strong: #000000;
 
-  /* The one accent. Light mode has no hue at all: its links are black. */
-  --accent: #000000;
   /*
-   * The dark-mode accent, which is the user's to set (Settings → Appearance).
+   * The accent, and the only way a hue reaches the application at all.
    *
-   * Declared here rather than inside the dark blocks so there is one default
-   * and one property React writes to; only the dark blocks read it, which is
-   * what makes the setting dark-mode-only with no theme logic in TypeScript.
+   * There is one per theme, because there is no single colour that works on
+   * both grounds: white is the right accent on black and invisible on white,
+   * and black is the reverse. A shared accent would make every choice a
+   * compromise between the two, and the obvious ones unusable in one theme.
+   *
+   * `--accent-light` and `--accent-dark` are what Settings → Appearance writes,
+   * and neither is ever declared here. An unset custom property falls through
+   * to its `var()` fallback, so the base below is the default until something is
+   * chosen, and the choice overrides it with no theme logic in TypeScript —
+   * each theme reads only its own property, so writing either is safe whatever
+   * is currently showing.
+   *
+   * Both bases are declared on `:root`, not inside their own theme blocks, for
+   * two reasons: the picker shows a well per theme and has to read the default
+   * for the theme that is *not* showing, and reading a declared property does
+   * not depend on how a browser computes a `var()` chain.
+   *
+   * They are the two ends of the monochrome palette rather than colours, which
+   * is what keeps this file greyscale: until an accent is picked the
+   * application has no hue at all.
    */
-  --accent-dark: #ffffff;
+  --accent-light-base: #000000;
+  --accent-dark-base: #ffffff;
+  --accent: var(--accent-light, var(--accent-light-base));
   --link: var(--accent);
 
   --font: "Helvetica Neue", Helvetica, Arial, sans-serif;
@@ -118,7 +135,7 @@
     --line: #333333;
     --line-soft: #333333;
     --line-strong: #ffffff;
-    --accent: var(--accent-dark);
+    --accent: var(--accent-dark, var(--accent-dark-base));
     color-scheme: dark;
   }
 }
@@ -135,7 +152,7 @@
   --line: #333333;
   --line-soft: #333333;
   --line-strong: #ffffff;
-  --accent: var(--accent-dark);
+  --accent: var(--accent-dark, var(--accent-dark-base));
   color-scheme: dark;
 }
 
@@ -1319,8 +1336,9 @@ pre {
 /* Mermaid ----------------------------------------------------------------- */
 
 /*
- * Ported from the vault template's mermaid_green.css, with the literals swapped
- * for tokens so light mode inherits black and dark mode follows the accent.
+ * The literals are swapped for tokens throughout, so a diagram follows the
+ * accent in whichever theme is showing rather than carrying a palette of its
+ * own.
  */
 .mermaid {
   background: var(--bg);
