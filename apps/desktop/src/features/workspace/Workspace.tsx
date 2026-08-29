@@ -42,6 +42,10 @@ export function Workspace({ widths, onResize, left, centre, right }: WorkspacePr
     <div
       className="workspace"
       ref={grid}
+      // With the file pane shut, the window controls overlay the top-left of
+      // the workspace itself rather than the pane's toolbar; the stylesheet
+      // answers by shortening the first divider and insetting the note's bar.
+      data-left-collapsed={widths.left <= 0 ? "" : undefined}
       style={{
         // Inline because these are dragged values, not design decisions.
         ["--pane-left" as string]: paneTrack(widths.left),

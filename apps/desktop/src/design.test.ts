@@ -5,10 +5,11 @@
  * look like, and a rendered snapshot would not notice a stray colour on a
  * screen this test never mounts.
  *
- * The palette rule is no longer "no colour". It is "one accent, defined once,
- * spent only on links, the active graph node, and mermaid" — which is still
- * something a machine can check, so it is still checked here rather than
- * trusted to review.
+ * The palette rule is "no hue in this file at all": light mode's accent is
+ * black, dark mode's is the user's and arrives at runtime, and both are spent
+ * only on links, the open note, the active graph node, and mermaid. All of
+ * that is still something a machine can check, so it is still checked here
+ * rather than trusted to review.
  */
 
 import { readFileSync } from "node:fs";
@@ -84,9 +85,6 @@ describe("borders", () => {
     }
   });
 });
-
-/** The single permitted hue, from the vault template's own green_accent.css. */
-const ACCENT = "#00ff00";
 
 /**
  * The only classes allowed to spend the accent.
@@ -327,34 +325,54 @@ describe("palette", () => {
     expect(declarations).toMatch(/:root:not\(\[data-theme="light"\]\)/);
   });
 
-  it("carries one accent and no other hue: every remaining value is a true grey", () => {
+  it("carries no hue at all: the accent is the user's, and is never written here", () => {
     const hexes = declarations.match(/#[0-9a-fA-F]{3,8}\b/g) ?? [];
     expect(hexes.length).toBeGreaterThan(0);
 
     for (const hex of hexes) {
-      if (hex.toLowerCase() === ACCENT) continue;
-      expect(isGrey(hex), `${hex} is neither a grey nor the one accent`).toBe(true);
+      expect(isGrey(hex), `${hex} is not a grey`).toBe(true);
     }
   });
 
-  it("writes the accent only as --accent, so there is one place to change it", () => {
-    const literals = declarations.match(new RegExp(ACCENT, "gi")) ?? [];
-    const definitions = (declarations.match(/--accent:\s*#[0-9a-fA-F]{3,8};/g) ?? []).filter(
-      (line) => line.toLowerCase().includes(ACCENT),
-    );
-    expect(definitions.length).toBeGreaterThan(0);
-    expect(literals.length, "the accent is written somewhere other than --accent").toBe(
-      definitions.length,
-    );
-
+  it("reaches the accent through one property per theme, never a literal beside it", () => {
     // Light mode has no hue at all: its links are black (SPEC §15).
     const root = declarations.match(/:root\s*\{[^}]*\}/)?.[0] ?? "";
     expect(root).toMatch(/--accent:\s*#000000;/);
+
+    // Dark mode's is whatever the user chose, so both dark blocks name the
+    // property Settings writes rather than a colour of their own.
+    const media = declarations.match(/@media \(prefers-color-scheme: dark\)\s*\{[\s\S]*?\n\}/)?.[0] ?? "";
+    const override = declarations.match(/:root\[data-theme="dark"\]\s*\{[^}]*\}/)?.[0] ?? "";
+    for (const block of [media, override]) {
+      expect(block).toMatch(/--accent:\s*var\(--accent-dark\);/);
+    }
+  });
+
+  it("states the dark accent's default once, and only dark mode reads it", () => {
+    // The default lives here rather than in TypeScript, which is what lets the
+    // picker show it without naming a colour (see colour.test.ts).
+    const defaults = declarations.match(/--accent-dark:\s*[^;]+;/g) ?? [];
+    expect(defaults).toEqual(["--accent-dark: #ffffff;"]);
+
+    const root = declarations.match(/:root\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(root).toContain("--accent-dark: #ffffff;");
+
+    // Light mode never reads it, which is the whole reason the setting can be
+    // dark-mode-only without a line of theme logic in React.
+    for (const rule of rules(declarations)) {
+      if (!rule.body.includes("var(--accent-dark)")) continue;
+      expect(
+        /\[data-theme="dark"\]|:not\(\[data-theme="light"\]\)/.test(rule.selector),
+        `"${rule.selector}" reads the dark accent outside dark mode`,
+      ).toBe(true);
+    }
   });
 
   it("spends the accent only on links, the open note, the active graph node, and mermaid", () => {
     for (const rule of rules(declarations)) {
-      if (!/var\(--accent\)|var\(--link\)/.test(rule.body)) continue;
+      // `--accent-dark` as well as `--accent`: a new surface must not be able
+      // to spend the accent by reaching past it for the token behind it.
+      if (!/var\(--accent[a-z-]*\)|var\(--link\)/.test(rule.body)) continue;
       if (rule.selector.startsWith(":root")) continue;
       const allowed = ACCENT_SURFACES.some((surface) => rule.selector.includes(`.${surface}`));
       expect(allowed, `"${rule.selector}" is not a surface the accent may be spent on`).toBe(true);

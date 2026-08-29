@@ -120,8 +120,9 @@ neighbourhood and dim the rest. `⌘O` finds a note by name.
 
 The note's heading is its filename — editing one renames the other.
 
-Dark mode is pure black with `#00ff00` links; light mode is the exact inverse
-with black links. The system preference decides unless overridden.
+Dark mode is pure black with accented links; light mode is the exact inverse
+with black links. The system preference decides unless overridden, and dark
+mode's accent colour is set in Settings (white by default).
 
 **Heimdall → Settings…** (`⌘,`) opens a modal with four sections: **Vault**
 creates a templated vault or initializes a folder you already have; **Server**

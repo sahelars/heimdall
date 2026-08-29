@@ -88,7 +88,9 @@ export function NoteView(props: NoteViewProps) {
         </div>
       ) : null}
 
-      <header className="note__header">
+      {/* Draggable for the same reason the file toolbar is: with the title
+          bar overlaid, this bar is the top of the window. */}
+      <header className="note__header" data-tauri-drag-region="deep">
         <div className="note__nav">
           <button
             type="button"

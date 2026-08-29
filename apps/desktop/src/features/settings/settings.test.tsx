@@ -46,6 +46,8 @@ beforeEach(() => {
     return Promise.resolve(() => {});
   });
   window.localStorage.clear();
+  document.documentElement.removeAttribute("data-theme");
+  document.documentElement.removeAttribute("style");
 });
 
 describe("Setup", () => {
@@ -386,6 +388,42 @@ describe("Settings", () => {
 
     expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
     expect(window.localStorage.getItem("heimdall.theme")).toBe('"dark"');
+  });
+
+  it("writes a chosen accent onto the root, and gives it back on request", async () => {
+    // The stylesheet is not attached here, so what is asserted is the override
+    // itself: an inline custom property the dark blocks read, and nothing else.
+    // Only dark mode spends it, and that is the stylesheet's decision, not this
+    // component's — which is why there is no theme to set up first.
+    invoke.mockResolvedValue(STATUS);
+    render(<App />);
+    await waitFor(() => expect(listenEvent).toHaveBeenCalled());
+    act(() => fireSettings?.());
+
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Appearance" }));
+    await userEvent.type(within(dialog).getByLabelText("Hex"), "#ff8800");
+
+    expect(document.documentElement.style.getPropertyValue("--accent-dark")).toBe("#ff8800");
+    expect(window.localStorage.getItem("heimdall.accent")).toBe('"#ff8800"');
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Default" }));
+
+    // Removed rather than written back: the default belongs to the stylesheet.
+    expect(document.documentElement.style.getPropertyValue("--accent-dark")).toBe("");
+    expect(window.localStorage.getItem("heimdall.accent")).toBe("null");
+  });
+
+  it("does not offer to reset an accent that has not been set", async () => {
+    invoke.mockResolvedValue(STATUS);
+    render(<App />);
+    await waitFor(() => expect(listenEvent).toHaveBeenCalled());
+    act(() => fireSettings?.());
+
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Appearance" }));
+
+    expect(within(dialog).getByRole("button", { name: "Default" })).toBeDisabled();
   });
 });
 

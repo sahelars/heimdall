@@ -26,6 +26,9 @@ interface SettingsModalProps {
   failures: RecordedFailure[];
   theme: ThemePreference;
   onThemeChange: (preference: ThemePreference) => void;
+  /** Null is the stylesheet's own accent — see `state/accent.ts`. */
+  accent: string | null;
+  onAccentChange: (accent: string | null) => void;
   onVaultChange: (vault: string) => void;
   onRefresh: () => void;
   onClose: () => void;
@@ -56,7 +59,12 @@ export function SettingsModal(props: SettingsModalProps) {
         ) : null}
         {section === "Server" ? <Server vault={props.vault} status={props.status} /> : null}
         {section === "Appearance" ? (
-          <Appearance preference={props.theme} onChange={props.onThemeChange} />
+          <Appearance
+            preference={props.theme}
+            onChange={props.onThemeChange}
+            accent={props.accent}
+            onAccentChange={props.onAccentChange}
+          />
         ) : null}
         {section === "Diagnostics" ? (
           <Diagnostics

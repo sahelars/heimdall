@@ -159,11 +159,14 @@ export function GraphPane({ data, activePath, settings = GRAPH_DEFAULTS, onOpen 
     const onSystemChange = () => readPalette();
     media?.addEventListener?.("change", onSystemChange);
 
-    // The Settings override writes `data-theme` on the root element.
+    // The Settings overrides both land on the root element: the theme as
+    // `data-theme`, the accent as an inline custom property — which shows up
+    // as a change to `style` and would otherwise leave the graph its old
+    // colour until something else made it read the palette again.
     const observer = new MutationObserver(() => readPalette());
     observer.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ["data-theme"],
+      attributeFilter: ["data-theme", "style"],
     });
 
     return () => {

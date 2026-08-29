@@ -7,10 +7,11 @@
  * buttons included — is 1px solid and squared.
  *
  * The accent is spent only on links, the note open in the file tree, the active
- * graph node, and mermaid diagrams, and it is written literally in exactly one
- * place per theme. Every
- * other rule reaches it through var(--accent) or var(--link), which is what
- * lets design.test.ts check the whole palette by reading this file.
+ * graph node, and mermaid diagrams. Light mode's is black; dark mode's is the
+ * user's to set in Settings and defaults to white, so nothing in this file is
+ * a hue at all — every rule reaches the accent through var(--accent) or
+ * var(--link), which is what lets design.test.ts check the whole palette by
+ * reading this file.
  *
  * Colour lives here and nowhere else. The CodeMirror theme and the graph
  * renderer are JavaScript, so a literal in either would be a colour no test
@@ -46,6 +47,14 @@
 
   /* The one accent. Light mode has no hue at all: its links are black. */
   --accent: #000000;
+  /*
+   * The dark-mode accent, which is the user's to set (Settings → Appearance).
+   *
+   * Declared here rather than inside the dark blocks so there is one default
+   * and one property React writes to; only the dark blocks read it, which is
+   * what makes the setting dark-mode-only with no theme logic in TypeScript.
+   */
+  --accent-dark: #ffffff;
   --link: var(--accent);
 
   --font: "Helvetica Neue", Helvetica, Arial, sans-serif;
@@ -53,6 +62,17 @@
 
   --gap: 12px;
   --pad: 16px;
+
+  /*
+   * The corner the macOS window controls take out of the window, and the band
+   * they sit in.
+   *
+   * The title bar is an overlay (tauri.conf.json), so the workspace runs to the
+   * top of the window and the two toolbars in that band have to leave the
+   * traffic lights their room rather than draw underneath them.
+   */
+  --traffic-lights: 76px;
+  --chrome: 38px;
 
   /*
    * The narrowest the note's content will draw itself.
@@ -82,7 +102,7 @@
     --line: #333333;
     --line-soft: #333333;
     --line-strong: #ffffff;
-    --accent: #00ff00;
+    --accent: var(--accent-dark);
     color-scheme: dark;
   }
 }
@@ -99,7 +119,7 @@
   --line: #333333;
   --line-soft: #333333;
   --line-strong: #ffffff;
-  --accent: #00ff00;
+  --accent: var(--accent-dark);
   color-scheme: dark;
 }
 
@@ -182,7 +202,8 @@ button,
 a[href],
 label[for],
 input[type="checkbox"],
-input[type="radio"] {
+input[type="radio"],
+input[type="color"] {
   cursor: pointer;
 }
 
@@ -383,6 +404,23 @@ pre {
   outline: none;
 }
 
+/*
+ * With the file pane shut, the window controls sit over the top-left of the
+ * workspace itself.
+ *
+ * The first divider stops below them rather than running under them — a
+ * hairline nobody can grab, drawn through the close button, is worse than a
+ * slightly shorter one — and the note's own bar takes the inset the file
+ * toolbar was carrying.
+ */
+.workspace[data-left-collapsed] .divider--left {
+  margin-top: var(--chrome);
+}
+
+.workspace[data-left-collapsed] .note__header {
+  padding-left: var(--traffic-lights);
+}
+
 .empty {
   margin: auto;
   padding: var(--pad);
@@ -400,11 +438,16 @@ pre {
   height: 100%;
 }
 
+/*
+ * The file pane's toolbar shares the top band with the window controls, so it
+ * starts to the right of them rather than beneath them.
+ */
 .explorer__toolbar {
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 8px 6px;
+  padding: 8px 6px 8px var(--traffic-lights);
+  min-height: var(--chrome);
 }
 
 .explorer__scroll {
@@ -493,10 +536,10 @@ pre {
 }
 
 /*
- * The note you have open is named in the accent — green in dark mode, black in
- * light, the same ink every link in the application is written in. A row of
- * grey behind it said "selected" the way a list box does; the colour says it
- * the way the rest of this application does.
+ * The note you have open is named in the accent — the chosen colour in dark
+ * mode, black in light, the same ink every link in the application is written
+ * in. A row of grey behind it said "selected" the way a list box does; the
+ * colour says it the way the rest of this application does.
  *
  * `aria-current` still marks the row for anything that is listening; it is the
  * class that carries the colour, so `design.test.ts` can name the one surface
@@ -644,6 +687,37 @@ pre {
 
 .input::placeholder {
   color: var(--muted);
+}
+
+/*
+ * The accent well.
+ *
+ * A colour input arrives with a rounded, inset swatch of its own, so the
+ * appearance is dropped and the block redrawn with the same hairline border
+ * every other control in the application has.
+ */
+.swatch {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: 1px solid var(--line);
+  /*
+   * As tall as the field beside it: 14px of text at 1.5, the input's 7px of
+   * padding top and bottom, and its hairline. A row lines its controls up
+   * along the bottom, so a shorter well would sit there looking like it had
+   * slipped.
+   */
+  width: 44px;
+  height: 37px;
+  padding: 0;
+}
+
+.swatch::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.swatch::-webkit-color-swatch {
+  border: none;
 }
 
 .choice {
@@ -840,6 +914,8 @@ pre {
   align-items: center;
   gap: var(--gap);
   padding: 8px 12px;
+  /* Level with the file pane's toolbar, and with the window controls. */
+  min-height: var(--chrome);
 }
 
 .note__nav,
@@ -891,6 +967,12 @@ pre {
 
 .breadcrumb__separator {
   color: var(--faint);
+  /*
+   * The spaces around the slash are the spacing. Without this the last one,
+   * sitting at the end of the folders box, collapses away and the note's own
+   * name runs into its slash: "lens /how_lens_works".
+   */
+  white-space: pre;
 }
 
 .breadcrumb__current {
@@ -1222,7 +1304,7 @@ pre {
 
 /*
  * Ported from the vault template's mermaid_green.css, with the literals swapped
- * for tokens so light mode inherits black and the accent stays defined once.
+ * for tokens so light mode inherits black and dark mode follows the accent.
  */
 .mermaid {
   background: var(--bg);
@@ -1363,12 +1445,17 @@ pre {
   justify-content: flex-end;
 }
 
+/*
+ * A banner is the top of the window while it is up, so it clears the window
+ * controls the same way the two toolbars beneath it do.
+ */
 .app__banner {
   display: flex;
   align-items: flex-start;
   gap: var(--gap);
-  padding: 12px var(--pad);
+  padding: 12px var(--pad) 12px var(--traffic-lights);
   border-bottom: 1px solid var(--line);
+  min-height: var(--chrome);
 }
 
 .app__banner .notice {

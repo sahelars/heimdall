@@ -43,6 +43,7 @@ import { Confirm } from "./components/Confirm";
 import { Workspace } from "./features/workspace/Workspace";
 import { defaultPanes, isPaneWidths, type PaneWidths } from "./features/workspace/panes";
 import { readPref, writePref } from "./state/prefs";
+import { applyAccent, isAccentPreference } from "./state/accent";
 import {
   applyTheme,
   isThemePreference,
@@ -111,6 +112,10 @@ export function App() {
 
   const [theme, setTheme] = useState<ThemePreference>(() =>
     readPref("theme", "system" as ThemePreference, isThemePreference),
+  );
+  // Null is the stylesheet's own accent, which is where the default lives.
+  const [accent, setAccent] = useState<string | null>(() =>
+    readPref("accent", null, isAccentPreference),
   );
   // Resolved against the real window, which the workspace spans: the window
   // opens maximized, so a pixel default written for one screen is wrong on the
@@ -198,6 +203,11 @@ export function App() {
     applyTheme(document.documentElement, theme);
     writePref("theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    applyAccent(document.documentElement, accent);
+    writePref("accent", accent);
+  }, [accent]);
 
   useEffect(() => writePref("panes", panes), [panes]);
 
@@ -762,11 +772,13 @@ export function App() {
   const resolvedTheme = resolveTheme(theme, prefersDark);
 
   return (
-    <div className="app">
+    // Draggable so the window still moves when there is no vault and neither
+    // toolbar is mounted; the overlaid title bar left nothing else to grab.
+    <div className="app" data-tauri-drag-region>
       {/* No role here: `Failure` is already the alert, and nesting two makes a
           screen reader announce it twice. */}
       {actionError ? (
-        <div className="app__banner">
+        <div className="app__banner" data-tauri-drag-region="deep">
           <Failure error={actionError} />
           <Button onClick={() => setActionError(null)}>Dismiss</Button>
         </div>
@@ -804,7 +816,7 @@ export function App() {
               mentions={mentions}
               canBack={canGoBack(history)}
               canForward={canGoForward(history)}
-              renderMermaid={(code) => <Mermaid code={code} theme={resolvedTheme} />}
+              renderMermaid={(code) => <Mermaid code={code} theme={resolvedTheme} accent={accent} />}
               onModeChange={setMode}
               onBack={() => step(goBack)}
               onForward={() => step(goForward)}
@@ -910,6 +922,8 @@ export function App() {
         failures={failures}
         theme={theme}
         onThemeChange={setTheme}
+        accent={accent}
+        onAccentChange={setAccent}
         onVaultChange={chooseVault}
         onRefresh={refreshStatus}
         onClose={() => setSettingsOpen(false)}
