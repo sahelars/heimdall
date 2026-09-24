@@ -1,158 +1,177 @@
-//! `read_documents` — bounded reads of selected ordinary notes (SPEC §10).
+//! `read` — the one way to look at a vault (SPEC §10).
+//!
+//! A folder comes back as a bounded listing and a note as a bounded range of
+//! its lines, so one verb covers both "what is here" and "what does it say".
+//! Omitting the path reads the vault root. Every result says whether the thing
+//! read is locked, so a caller learns before it writes that it cannot.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::commands::listing::{self, Listing, ListingOptions};
 use crate::commands::read_range::read_range;
-use crate::commands::types::ReadResult;
-use crate::errors::{Error, ErrorCode, Result};
+use crate::commands::types::{DocumentKind, ReadResult};
+use crate::errors::{Error, Result};
 use crate::limits;
+use crate::notelocks::LockRules;
 use crate::paths::RelPath;
 use crate::storage::Vault;
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct DocumentSelection {
-    pub path: String,
+pub struct ReadRequest {
+    /// A folder or a Markdown note, relative to the vault root. Omit it to read
+    /// the vault root.
+    pub path: Option<String>,
+
+    /// Note only: the 1-indexed first line to return (default 1).
     pub start_line: Option<u32>,
+    /// Note only: how many lines to return (default 200, maximum 1000).
     pub max_lines: Option<u32>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ReadDocumentsRequest {
-    pub documents: Vec<DocumentSelection>,
+    /// Note only: the most content to return, in bytes (default 65536, maximum
+    /// 262144).
     pub max_total_bytes: Option<u32>,
+
+    /// Folder only: list everything beneath the folder, not just its children.
+    #[serde(default)]
+    pub recursive: bool,
+    /// Folder only: how deep a recursive listing goes (default 4, maximum 16).
+    pub max_depth: Option<u32>,
+    /// Folder only: the `next_cursor` of a previous page; listing resumes
+    /// strictly after it.
+    pub cursor: Option<String>,
+    /// Folder only: page size (default 50, maximum 200).
+    pub limit: Option<u32>,
 }
 
-/// Why a requested selection came back without content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SkipReason {
-    /// Earlier selections consumed the request's byte budget. Request this
-    /// document again on its own to read it.
-    ByteBudgetExhausted,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct DocumentRead {
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReadResponse {
+    /// The vault-relative path that was read; empty for the vault root.
     pub path: String,
-    pub returned: bool,
+    /// `directory` for a folder, `document` for a note.
+    pub kind: DocumentKind,
+    /// Whether this folder or note is locked. A locked path can be read but
+    /// not written, moved, or deleted until it is unlocked.
+    pub locked: bool,
+    /// The folder or note whose lock applies, when `locked` is true.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(flatten)]
-    pub result: Option<ReadResult>,
+    pub locked_at: Option<String>,
+    /// Present for a folder: one page of what it contains.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<SkipReason>,
+    pub listing: Option<Listing>,
+    /// Present for a note: one bounded range of its content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document: Option<ReadResult>,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct ReadDocumentsResponse {
-    pub documents: Vec<DocumentRead>,
-    pub total_bytes: usize,
-    /// True when at least one selection was not returned.
-    pub truncated: bool,
-}
+pub fn read(vault: &Vault, request: ReadRequest) -> Result<ReadResponse> {
+    let path = match &request.path {
+        Some(raw) => RelPath::parse(raw)?,
+        None => RelPath::root(),
+    };
 
-pub fn read_documents(
-    vault: &Vault,
-    request: ReadDocumentsRequest,
-) -> Result<ReadDocumentsResponse> {
-    vault.ensure_initialized()?;
-
-    if request.documents.is_empty() {
-        return Err(Error::invalid_input(
-            "select at least one document; use list_documents to discover paths",
-        )
-        .with_detail("parameter", "documents"));
-    }
-    if request.documents.len() > limits::READ_MAX_DOCUMENTS {
-        return Err(Error::limit_exceeded(format!(
-            "{} documents requested, above the maximum of {} per call",
-            request.documents.len(),
-            limits::READ_MAX_DOCUMENTS
-        ))
-        .with_detail("requested", request.documents.len())
-        .with_detail("maximum", limits::READ_MAX_DOCUMENTS));
+    // A name that is not there at all is NOT_FOUND. A name that is there but
+    // resolves outside the vault falls through to the read, which reports
+    // PATH_OUTSIDE_VAULT — the caller learns which problem it has.
+    if !vault.entry_exists(&path) {
+        return Err(Error::not_found(format!("\"{path}\" does not exist"))
+            .with_detail("path", path.as_str()));
     }
 
-    let budget = limits::resolve_max_total_bytes(request.max_total_bytes)?;
+    // Hidden folders belong to other tools and `.trash/` to nobody; neither is
+    // vault content, and no listing ever shows them.
+    path.deny_hidden()?;
 
-    // Validate every selection before reading any of it, so a typo in the last
-    // path does not leave the caller holding a partial result set.
-    let mut selections = Vec::with_capacity(request.documents.len());
-    for selection in &request.documents {
-        let path = RelPath::parse_markdown(&selection.path)?;
-        path.deny_aios()?;
-        // A name that is not there at all is NOT_FOUND. A name that is there
-        // but resolves outside the vault falls through to the read, which
-        // reports PATH_OUTSIDE_VAULT — the caller learns which problem it has.
-        if !vault.entry_exists(&path) {
-            return Err(Error::not_found(format!("document \"{path}\" does not exist"))
-                .with_detail("path", path.as_str()));
-        }
-        if vault.is_dir(&path) {
+    let rules = LockRules::load(vault)?;
+    let locked_at = rules.locked_at(&path);
+
+    let (kind, listing, document) = if vault.is_dir(&path) {
+        reject_note_options(&request)?;
+        let listing = listing::list(
+            vault,
+            &path,
+            ListingOptions {
+                recursive: request.recursive,
+                max_depth: request.max_depth,
+                cursor: request.cursor.as_deref(),
+                limit: request.limit,
+            },
+            &rules,
+        )?;
+        (DocumentKind::Directory, Some(listing), None)
+    } else {
+        reject_folder_options(&request)?;
+        if !path.is_markdown() {
             return Err(Error::invalid_input(format!(
-                "\"{path}\" is a directory; use list_documents to find files inside it"
+                "\"{path}\" is not a Markdown note; only folders and \".md\" files can be read"
             ))
             .with_detail("path", path.as_str()));
         }
-        selections.push((
-            path,
-            limits::resolve_start_line(selection.start_line)?,
-            limits::resolve_max_lines(selection.max_lines)?,
-        ));
-    }
+        let document = read_range(
+            vault,
+            &path,
+            limits::resolve_start_line(request.start_line)?,
+            limits::resolve_max_lines(request.max_lines)?,
+            limits::resolve_max_total_bytes(request.max_total_bytes)?,
+        )?;
+        (DocumentKind::Document, None, Some(document))
+    };
 
-    let mut documents = Vec::with_capacity(selections.len());
-    let mut used = 0usize;
+    Ok(ReadResponse {
+        path: path.to_string(),
+        kind,
+        locked: locked_at.is_some(),
+        locked_at: locked_at.map(|at| at.to_string()),
+        listing,
+        document,
+    })
+}
 
-    for (path, start_line, max_lines) in selections {
-        let remaining = budget - used;
-        match read_range(vault, &path, start_line, max_lines, remaining) {
-            Ok(result) => {
-                used += result.content.len();
-                documents.push(DocumentRead {
-                    path: path.to_string(),
-                    returned: true,
-                    result: Some(result),
-                    reason: None,
-                });
-            }
-            // A line too large for the remaining budget is only a per-selection
-            // outcome once earlier documents have spent some of it. With the
-            // full budget still available the request can never be satisfied,
-            // so the caller needs the error rather than a silent skip.
-            Err(err) if err.code == ErrorCode::LimitExceeded && used > 0 => {
-                documents.push(DocumentRead {
-                    path: path.to_string(),
-                    returned: false,
-                    result: None,
-                    reason: Some(SkipReason::ByteBudgetExhausted),
-                });
-            }
-            Err(err) => return Err(err),
+/// A line range means nothing to a folder. Ignoring one would leave a caller
+/// believing it had asked a question it had not.
+fn reject_note_options(request: &ReadRequest) -> Result<()> {
+    for (name, set) in [
+        ("start_line", request.start_line.is_some()),
+        ("max_lines", request.max_lines.is_some()),
+        ("max_total_bytes", request.max_total_bytes.is_some()),
+    ] {
+        if set {
+            return Err(Error::invalid_input(format!(
+                "{name} applies to a note, and this path is a folder"
+            ))
+            .with_detail("parameter", name));
         }
     }
+    Ok(())
+}
 
-    let truncated = documents.iter().any(|doc| !doc.returned);
-    Ok(ReadDocumentsResponse {
-        documents,
-        total_bytes: used,
-        truncated,
-    })
+fn reject_folder_options(request: &ReadRequest) -> Result<()> {
+    for (name, set) in [
+        ("recursive", request.recursive),
+        ("max_depth", request.max_depth.is_some()),
+        ("cursor", request.cursor.is_some()),
+        ("limit", request.limit.is_some()),
+    ] {
+        if set {
+            return Err(Error::invalid_input(format!(
+                "{name} applies to a folder, and this path is a note"
+            ))
+            .with_detail("parameter", name));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::template;
+    use crate::errors::ErrorCode;
     use camino::Utf8PathBuf;
 
     fn vault() -> (tempfile::TempDir, Vault) {
         let dir = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
         let vault = Vault::open(&root).unwrap();
-        template::scaffold_aios_only(&vault).unwrap();
         (dir, vault)
     }
 
@@ -162,73 +181,68 @@ mod tests {
         vault.atomic_write(&path, content).unwrap();
     }
 
-    fn select(path: &str) -> DocumentSelection {
-        DocumentSelection {
-            path: path.to_string(),
-            start_line: None,
-            max_lines: None,
+    fn at(path: &str) -> ReadRequest {
+        ReadRequest {
+            path: Some(path.to_string()),
+            ..Default::default()
         }
     }
 
     #[test]
-    fn reads_several_documents_in_the_requested_order() {
+    fn a_note_comes_back_as_a_bounded_range() {
         let (_tmp, vault) = vault();
-        write(&vault, "a.md", b"alpha\n");
         write(&vault, "projects/b.md", b"beta\n");
 
-        let response = read_documents(
-            &vault,
-            ReadDocumentsRequest {
-                documents: vec![select("projects/b.md"), select("a.md")],
-                max_total_bytes: None,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(response.documents.len(), 2);
-        assert_eq!(response.documents[0].path, "projects/b.md");
-        assert_eq!(
-            response.documents[1].result.as_ref().unwrap().content,
-            "alpha\n"
-        );
-        assert_eq!(response.total_bytes, 11);
-        assert!(!response.truncated);
+        let response = read(&vault, at("projects/b.md")).unwrap();
+        assert_eq!(response.kind, DocumentKind::Document);
+        assert!(response.listing.is_none());
+        let document = response.document.unwrap();
+        assert_eq!(document.content, "beta\n");
+        assert!(document.complete);
     }
 
     #[test]
-    fn the_byte_budget_marks_later_selections_as_not_returned() {
+    fn no_path_reads_the_vault_root_as_a_folder() {
         let (_tmp, vault) = vault();
-        write(&vault, "a.md", b"aaaaaaaa\n");
-        write(&vault, "b.md", b"bbbbbbbb\n");
+        write(&vault, "a.md", b"x");
 
-        let response = read_documents(
-            &vault,
-            ReadDocumentsRequest {
-                documents: vec![select("a.md"), select("b.md")],
-                max_total_bytes: Some(9),
-            },
-        )
-        .unwrap();
-
-        assert!(response.documents[0].returned);
-        assert!(!response.documents[1].returned);
-        assert_eq!(
-            response.documents[1].reason,
-            Some(SkipReason::ByteBudgetExhausted)
-        );
-        assert!(response.truncated);
+        let response = read(&vault, ReadRequest::default()).unwrap();
+        assert_eq!(response.kind, DocumentKind::Directory);
+        assert_eq!(response.path, "");
+        assert!(!response.locked);
+        let listing = response.listing.unwrap();
+        assert_eq!(listing.entries[0].path, "a.md");
     }
 
     #[test]
-    fn a_document_that_can_never_fit_the_budget_is_an_error_not_a_skip() {
+    fn line_ranges_follow_continuation() {
+        let (_tmp, vault) = vault();
+        write(&vault, "a.md", b"1\n2\n3\n4\n");
+
+        let response = read(
+            &vault,
+            ReadRequest {
+                start_line: Some(3),
+                max_lines: Some(1),
+                ..at("a.md")
+            },
+        )
+        .unwrap();
+        let document = response.document.unwrap();
+        assert_eq!(document.content, "3\n");
+        assert_eq!(document.next_line, Some(4));
+    }
+
+    #[test]
+    fn a_note_that_can_never_fit_the_budget_is_an_error() {
         let (_tmp, vault) = vault();
         write(&vault, "a.md", b"aaaaaaaaaaaaaaaaaaaa\n");
 
-        let err = read_documents(
+        let err = read(
             &vault,
-            ReadDocumentsRequest {
-                documents: vec![select("a.md")],
+            ReadRequest {
                 max_total_bytes: Some(8),
+                ..at("a.md")
             },
         )
         .unwrap_err();
@@ -236,170 +250,87 @@ mod tests {
     }
 
     #[test]
-    fn selections_are_validated_before_anything_is_read() {
+    fn options_for_the_other_kind_are_refused_rather_than_ignored() {
         let (_tmp, vault) = vault();
-        write(&vault, "a.md", b"alpha\n");
+        write(&vault, "projects/a.md", b"x\n");
 
-        let err = read_documents(
+        let err = read(
             &vault,
-            ReadDocumentsRequest {
-                documents: vec![select("a.md"), select("missing.md")],
-                max_total_bytes: None,
+            ReadRequest {
+                max_lines: Some(5),
+                ..at("projects")
             },
         )
         .unwrap_err();
-        assert_eq!(err.code, ErrorCode::NotFound);
-    }
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+        assert_eq!(err.details["parameter"], "max_lines");
 
-    #[test]
-    fn protected_content_cannot_be_read_as_a_document() {
-        let (_tmp, vault) = vault();
-        for path in [
-            "aios/memories/memory.md",
-            "AIOS/memories/memory.md",
-            "aios/attachments/notes.md",
-        ] {
-            let err = read_documents(
-                &vault,
-                ReadDocumentsRequest {
-                    documents: vec![select(path)],
-                    max_total_bytes: None,
-                },
-            )
-            .unwrap_err();
-            assert_eq!(err.code, ErrorCode::NotFound, "{path}");
-        }
+        let err = read(
+            &vault,
+            ReadRequest {
+                recursive: true,
+                ..at("projects/a.md")
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.details["parameter"], "recursive");
     }
 
     #[test]
     fn traversal_out_of_the_vault_is_refused() {
         let (_tmp, vault) = vault();
-        for path in ["../escape.md", "projects/../../escape.md", "/etc/hosts.md"] {
-            let err = read_documents(
-                &vault,
-                ReadDocumentsRequest {
-                    documents: vec![select(path)],
-                    max_total_bytes: None,
-                },
-            )
-            .unwrap_err();
-            assert!(
-                matches!(err.code, ErrorCode::InvalidInput | ErrorCode::NotFound),
-                "{path} produced {:?}",
-                err.code
-            );
+        for path in ["../escape.md", "projects/../../escape.md"] {
+            let err = read(&vault, at(path)).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidInput, "{path}");
         }
     }
 
     #[test]
-    fn the_file_count_cap_is_enforced() {
+    fn hidden_folders_and_the_trash_are_not_readable() {
         let (_tmp, vault) = vault();
-        for index in 0..11 {
-            write(&vault, &format!("n{index}.md"), b"x\n");
+        write(&vault, ".trash/gone.md", b"x\n");
+        for path in [".trash", ".trash/gone.md"] {
+            assert_eq!(read(&vault, at(path)).unwrap_err().code, ErrorCode::InvalidInput);
         }
-
-        let err = read_documents(
-            &vault,
-            ReadDocumentsRequest {
-                documents: (0..11).map(|i| select(&format!("n{i}.md"))).collect(),
-                max_total_bytes: None,
-            },
-        )
-        .unwrap_err();
-        assert_eq!(err.code, ErrorCode::LimitExceeded);
-        assert_eq!(err.details["maximum"], 10);
-
-        assert_eq!(
-            read_documents(
-                &vault,
-                ReadDocumentsRequest {
-                    documents: vec![],
-                    max_total_bytes: None,
-                },
-            )
-            .unwrap_err()
-            .code,
-            ErrorCode::InvalidInput
-        );
     }
 
     #[test]
-    fn per_file_line_ranges_are_independent() {
+    fn non_markdown_files_are_rejected() {
         let (_tmp, vault) = vault();
-        write(&vault, "a.md", b"1\n2\n3\n4\n");
-        write(&vault, "b.md", b"x\ny\n");
+        write(&vault, "image.png", b"x");
+        assert_eq!(read(&vault, at("image.png")).unwrap_err().code, ErrorCode::InvalidInput);
+        assert_eq!(read(&vault, at("absent.md")).unwrap_err().code, ErrorCode::NotFound);
+    }
 
-        let response = read_documents(
-            &vault,
-            ReadDocumentsRequest {
-                documents: vec![
-                    DocumentSelection {
-                        path: "a.md".to_string(),
-                        start_line: Some(3),
-                        max_lines: Some(1),
-                    },
-                    select("b.md"),
-                ],
-                max_total_bytes: None,
-            },
-        )
-        .unwrap();
+    #[test]
+    fn a_read_reports_the_lock_and_where_it_comes_from() {
+        let (_tmp, vault) = vault();
+        write(&vault, "projects/a.md", b"x\n");
+        let mut rules = LockRules::default();
+        rules.set(&RelPath::parse("projects").unwrap(), true);
+        rules.save(&vault).unwrap();
 
-        let first = response.documents[0].result.as_ref().unwrap();
-        assert_eq!(first.content, "3\n");
-        assert_eq!(first.next_line, Some(4));
-        assert!(response.documents[1].result.as_ref().unwrap().complete);
+        let response = read(&vault, at("projects/a.md")).unwrap();
+        assert!(response.locked);
+        assert_eq!(response.locked_at.as_deref(), Some("projects"));
+
+        let root = read(&vault, ReadRequest::default()).unwrap();
+        assert!(!root.locked);
+        assert!(root.listing.unwrap().entries.iter().all(|e| e.locked));
     }
 
     #[cfg(unix)]
     #[test]
     fn a_symlink_out_of_the_vault_is_named_as_an_escape_not_a_missing_file() {
         let (tmp, vault) = vault();
-        let outside = tmp.path().parent().unwrap().join("heimdall-read-docs-secret.md");
+        let outside = tmp.path().parent().unwrap().join("heimdall-read-secret.md");
         std::fs::write(&outside, b"secret\n").unwrap();
         std::os::unix::fs::symlink(&outside, tmp.path().join("escape.md")).unwrap();
 
-        let err = read_documents(
-            &vault,
-            ReadDocumentsRequest {
-                documents: vec![select("escape.md")],
-                max_total_bytes: None,
-            },
-        )
-        .unwrap_err();
+        let err = read(&vault, at("escape.md")).unwrap_err();
         assert_eq!(err.code, ErrorCode::PathOutsideVault);
         assert!(!err.message.contains("secret"), "{}", err.message);
 
-        // A name that simply is not there stays NOT_FOUND.
-        let missing = read_documents(
-            &vault,
-            ReadDocumentsRequest {
-                documents: vec![select("absent.md")],
-                max_total_bytes: None,
-            },
-        )
-        .unwrap_err();
-        assert_eq!(missing.code, ErrorCode::NotFound);
-
         std::fs::remove_file(outside).unwrap();
-    }
-
-    #[test]
-    fn non_markdown_selections_are_rejected() {
-        let (_tmp, vault) = vault();
-        write(&vault, "image.png", b"x");
-
-        assert_eq!(
-            read_documents(
-                &vault,
-                ReadDocumentsRequest {
-                    documents: vec![select("image.png")],
-                    max_total_bytes: None,
-                },
-            )
-            .unwrap_err()
-            .code,
-            ErrorCode::InvalidInput
-        );
     }
 }

@@ -65,7 +65,7 @@ describe("Setup", () => {
       data: {
         path: "/Users/n/Documents/demo",
         mode: "scaffolded",
-        created: ["aios/", "ideas/hello_world.md"],
+        created: ["AGENTS.md", "ideas/hello_world.md"],
       },
     });
     const onVaultChange = vi.fn();
@@ -85,30 +85,29 @@ describe("Setup", () => {
     expect(screen.getByText("ideas/hello_world.md")).toBeInTheDocument();
   });
 
-  it("initializes an existing vault by its parent and folder, adding only aios/", async () => {
+  it("registers an existing folder by its parent and name, writing nothing into it", async () => {
     openDialog.mockResolvedValue("/Users/n/Documents/Existing Vault");
     invoke.mockResolvedValue({
       ok: true,
       data: {
         path: "/Users/n/Documents/Existing Vault",
-        mode: "initialized",
-        created: ["aios/", "aios/memories/memory.md"],
+        mode: "registered",
+        created: [],
       },
     });
-    render(<Setup vault="" onVaultChange={vi.fn()} />);
+    const onVaultChange = vi.fn();
+    render(<Setup vault="" onVaultChange={onVaultChange} />);
 
-    await userEvent.click(
-      screen.getByRole("button", { name: "Choose a folder and initialize…" }),
-    );
+    await userEvent.click(screen.getByRole("button", { name: "Choose a folder…" }));
 
-    await screen.findByText("Vault initialized");
+    await screen.findByText("Vault opened");
     expect(invoke).toHaveBeenCalledWith("invoke_cli", {
       command: "create",
       request: { name: "Existing Vault", root: "/Users/n/Documents" },
       stdin: undefined,
     });
-    // Nothing about example notes: initializing adds only what was missing.
-    expect(screen.getByText("aios/memories/memory.md")).toBeInTheDocument();
+    expect(onVaultChange).toHaveBeenCalledWith("/Users/n/Documents/Existing Vault");
+    expect(screen.getByText(/the folder is used as it is/)).toBeInTheDocument();
   });
 
   it("keeps a structured failure readable instead of crashing", async () => {
@@ -133,23 +132,51 @@ describe("Setup", () => {
     expect(alert).toHaveTextContent("demo");
   });
 
-  it("surfaces an uninitialized vault with the guidance the CLI gives", async () => {
+  it("verifies the active vault by reading its root", async () => {
+    invoke.mockResolvedValue({
+      ok: true,
+      data: {
+        path: "",
+        kind: "directory",
+        locked: false,
+        listing: {
+          entries: [
+            { path: "ideas", kind: "directory", modified_at: "", locked: false },
+            { path: "README.md", kind: "document", modified_at: "", locked: false },
+          ],
+          next_cursor: null,
+          scan_guard_hit: false,
+        },
+      },
+    });
+    render(<Setup vault="/Users/n/notes" onVaultChange={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Verify" }));
+
+    await screen.findByText("Readable: 2 items at the vault root");
+    expect(invoke).toHaveBeenCalledWith("invoke_cli", {
+      command: "read",
+      request: { vault: "/Users/n/notes" },
+      stdin: undefined,
+    });
+  });
+
+  it("surfaces a vault that cannot be read with the message the CLI gives", async () => {
     invoke.mockResolvedValue({
       ok: false,
       error: {
-        code: "NOT_INITIALIZED",
-        message:
-          'this vault has no complete aios/ structure; run "heimdall create" against it',
-        details: { missing: ["aios/", "aios/memories/memory.md"] },
+        code: "NOT_FOUND",
+        message: 'the vault "/Users/n/moved" does not exist',
+        details: { path: "/Users/n/moved" },
       },
     });
-    render(<Setup vault="/Users/n/plain-folder" onVaultChange={vi.fn()} />);
+    render(<Setup vault="/Users/n/moved" onVaultChange={vi.fn()} />);
 
     await userEvent.click(screen.getByRole("button", { name: "Verify" }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("NOT_INITIALIZED");
-    expect(alert).toHaveTextContent("heimdall create");
+    expect(alert).toHaveTextContent("NOT_FOUND");
+    expect(alert).toHaveTextContent("does not exist");
   });
 });
 
@@ -350,10 +377,10 @@ describe("Diagnostics", () => {
         failures={[
           {
             at: "2026-08-17T10:00:00Z",
-            context: "write-memory",
+            context: "write ideas/note.md",
             error: {
               code: "REVISION_CONFLICT",
-              message: "the memory changed since it was read",
+              message: "the note changed since it was read",
               details: { current_revision: "blake3:abc" },
             },
           },
@@ -365,7 +392,7 @@ describe("Diagnostics", () => {
     const alert = screen.getByRole("alert");
     expect(alert).toHaveTextContent("REVISION_CONFLICT");
     expect(alert).toHaveTextContent("blake3:abc");
-    expect(screen.getByText(/write-memory/)).toBeInTheDocument();
+    expect(screen.getByText(/write ideas\/note\.md/)).toBeInTheDocument();
   });
 });
 

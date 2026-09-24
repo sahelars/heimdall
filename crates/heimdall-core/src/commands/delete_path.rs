@@ -16,16 +16,20 @@
 //! Emptying the trash is deliberately not implemented. It is a destructive
 //! operation with no undo, the user can do it in Finder, and there is no reason
 //! for an application that refuses to unlink files to grow a command that does.
+//!
+//! Nothing locked is deleted — not the path, anything inside it, or anything
+//! directly inside a locked folder.
 
 use serde::{Deserialize, Serialize};
 
 use crate::commands::types::DocumentKind;
 use crate::errors::{Error, ErrorCode, Result};
+use crate::notelocks::LockRules;
 use crate::paths::{self, RelPath};
 use crate::revisions::Revision;
 use crate::storage::Vault;
 
-/// How many numeric suffixes to try before giving up, matching `create_entry`.
+/// How many numeric suffixes to try before giving up.
 const MAX_COLLISION_SUFFIX: u32 = 99;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -46,8 +50,6 @@ pub struct DeletePathResponse {
 }
 
 pub fn delete_path(vault: &Vault, request: DeletePathRequest) -> Result<DeletePathResponse> {
-    vault.ensure_initialized()?;
-
     let path = RelPath::parse_file(&request.path)?;
     // Refusing hidden paths also means `.trash/` content cannot be deleted a
     // second time: emptying the trash is not this command's job.
@@ -57,15 +59,6 @@ pub fn delete_path(vault: &Vault, request: DeletePathRequest) -> Result<DeletePa
     if !is_dir && !vault.is_file(&path) {
         return Err(Error::not_found(format!("\"{path}\" does not exist"))
             .with_detail("path", path.as_str()));
-    }
-
-    // Content inside the protected tree — entries, extended memories — is the
-    // user's to remove. The structure that `ensure_initialized` requires is not.
-    if paths::is_structural(&path) {
-        return Err(Error::invalid_input(format!(
-            "\"{path}\" is part of the managed vault structure and cannot be deleted"
-        ))
-        .with_detail("path", path.as_str()));
     }
 
     if let Some(expected) = &request.expected_revision {
@@ -105,7 +98,17 @@ pub fn delete_path(vault: &Vault, request: DeletePathRequest) -> Result<DeletePa
         // The write lock makes "not taken" and "take it" one decision, so two
         // deletes of same-named notes cannot pick the same trash slot.
         let outcome = vault.with_write_lock(&candidate, || {
-            vault.rename_no_replace(&path, &candidate)
+            let mut rules = LockRules::load(vault)?;
+            rules.deny_subtree(&path)?;
+            rules.deny_change_in(&path.parent(), &path)?;
+
+            vault.rename_no_replace(&path, &candidate)?;
+            let before = rules.clone();
+            rules.drop_within(&path);
+            if rules != before {
+                rules.save(vault)?;
+            }
+            Ok(())
         });
         match outcome {
             Ok(()) => {

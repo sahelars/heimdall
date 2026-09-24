@@ -61,33 +61,38 @@ const STDOUT_LIMIT: usize = 16 * 1024 * 1024;
 /// own dedicated path.
 const ALLOWED: &[(&str, &[&str])] = &[
     ("create", &["name", "root"]),
+    // The four verbs the MCP server also offers (SPEC §9).
     (
-        "list-documents",
-        &["vault", "path", "recursive", "max-depth", "cursor", "limit"],
+        "read",
+        &[
+            "vault",
+            "path",
+            "start-line",
+            "max-lines",
+            "max-total-bytes",
+            "recursive",
+            "max-depth",
+            "cursor",
+            "limit",
+        ],
     ),
-    (
-        "read-documents",
-        &["vault", "doc", "start-line", "max-lines", "max-total-bytes"],
-    ),
-    ("list-memories", &["vault", "limit"]),
-    ("read-memory", &["vault", "extended", "start-line", "max-lines"]),
-    ("write-memory", &["vault", "extended", "expected-revision", "create"]),
-    ("list-entries", &["vault", "kind", "limit"]),
-    ("read-entry", &["vault", "kind", "id", "start-line", "max-lines"]),
-    ("create-entry", &["vault", "kind"]),
+    ("write", &["vault", "path", "expected-revision", "create"]),
+    ("lock", &["vault", "path"]),
+    ("unlock", &["vault", "path"]),
     // Client operations: the desktop edits the vault, and none of these is an
     // MCP tool (SPEC §9, §15).
-    (
-        "write-document",
-        &["vault", "path", "expected-revision", "create"],
-    ),
     ("create-folder", &["vault", "path"]),
     ("move-path", &["vault", "from", "to"]),
     ("relink", &["vault", "from", "to", "dry-run"]),
     ("delete-path", &["vault", "path", "expected-revision"]),
-    ("write-entry", &["vault", "kind", "id", "expected-revision"]),
-    ("link-graph", &["vault", "exclude-aios", "max-depth"]),
+    ("link-graph", &["vault", "max-depth"]),
 ];
+
+/// The subcommands whose `path` is positional rather than a flag.
+///
+/// It is passed after `--`, so a note whose name begins with a dash is still a
+/// path and never an option.
+const POSITIONAL_PATH: &[&str] = &["read", "write", "lock", "unlock"];
 
 /// The subcommands that read or write the whole vault, and so need the longer
 /// budget rather than the ordinary one.
@@ -100,14 +105,13 @@ const WHOLE_VAULT: &[&str] = &["link-graph", "relink"];
 /// the editor's autosave behind it.
 const MUTATES: &[&str] = &[
     "create",
-    "write-memory",
-    "create-entry",
-    "write-document",
+    "write",
+    "lock",
+    "unlock",
     "create-folder",
     "move-path",
     "relink",
     "delete-path",
-    "write-entry",
 ];
 
 /// What the CLI returned, in the shape React consumes.
@@ -340,6 +344,9 @@ fn build_args(command: &str, request: &Value) -> Result<Vec<String>, DomainError
         ));
     };
 
+    let positional_path = POSITIONAL_PATH.contains(&command);
+    let mut path = None;
+
     // Sorted so one request always produces one argument vector, which keeps
     // failures reproducible from a diagnostics report.
     for (key, value) in fields.iter().collect::<BTreeMap<_, _>>() {
@@ -352,7 +359,24 @@ fn build_args(command: &str, request: &Value) -> Result<Vec<String>, DomainError
                 format!("\"{key}\" is not an argument of \"{command}\""),
             ));
         }
+        if positional_path && key.as_str() == "path" {
+            path = match value {
+                Value::Null => None,
+                Value::String(text) => Some(text.clone()),
+                _ => {
+                    return Err(DomainError::new(
+                        "INVALID_INPUT",
+                        format!("\"path\" of \"{command}\" must be a string"),
+                    ))
+                }
+            };
+            continue;
+        }
         push_argument(&mut args, key, value)?;
+    }
+    if let Some(path) = path {
+        args.push("--".to_string());
+        args.push(path);
     }
     Ok(args)
 }
@@ -372,23 +396,11 @@ fn push_argument(args: &mut Vec<String>, key: &str, value: &Value) -> Result<(),
             args.push(flag);
             args.push(number.to_string());
         }
-        // Repeatable flags such as `--doc`.
-        Value::Array(items) => {
-            for item in items {
-                let text = item.as_str().ok_or_else(|| {
-                    DomainError::new(
-                        "INVALID_INPUT",
-                        format!("every value of \"{key}\" must be a string"),
-                    )
-                })?;
-                args.push(flag.clone());
-                args.push(text.to_string());
-            }
-        }
-        Value::Object(_) => {
+        // No command takes a repeated or structured argument.
+        Value::Array(_) | Value::Object(_) => {
             return Err(DomainError::new(
                 "INVALID_INPUT",
-                format!("\"{key}\" cannot be an object"),
+                format!("\"{key}\" must be a single value"),
             ))
         }
     }
@@ -818,10 +830,20 @@ mod tests {
 
     #[test]
     fn only_allowlisted_commands_can_run() {
-        for command in ["create", "list-documents", "write-memory", "create-entry"] {
+        for command in ["create", "read", "write", "lock", "unlock"] {
             assert!(build_args(command, &json!({})).is_ok() || command == "create");
         }
-        for command in ["mcp", "rm", "sh", "bash", "", "list_documents", "../heimdall"] {
+        for command in [
+            "mcp",
+            "rm",
+            "sh",
+            "bash",
+            "",
+            "read_file",
+            "list-documents",
+            "write-document",
+            "../heimdall",
+        ] {
             let error = build_args(command, &json!({})).unwrap_err();
             assert_eq!(error.code, "INVALID_INPUT", "accepted {command:?}");
         }
@@ -832,30 +854,19 @@ mod tests {
         // The desktop edits the vault through these; none of them is an MCP
         // tool (SPEC §9, §15).
         let args = build_args(
-            "write-document",
-            &json!({ "vault": "/v", "path": "a.md", "create": true }),
+            "create-folder",
+            &json!({ "vault": "/v", "path": "a b" }),
         )
         .unwrap();
-        // Keys are sorted, `true` becomes a bare flag, and the path is one argv
-        // entry rather than something a shell could split.
-        assert_eq!(
-            args,
-            [
-                "write-document",
-                "--create",
-                "--path",
-                "a.md",
-                "--vault",
-                "/v"
-            ]
-        );
+        // Keys are sorted and the path is one argv entry rather than something
+        // a shell could split.
+        assert_eq!(args, ["create-folder", "--path", "a b", "--vault", "/v"]);
 
         for command in [
             "create-folder",
             "move-path",
             "relink",
             "delete-path",
-            "write-entry",
             "link-graph",
         ] {
             assert!(
@@ -867,7 +878,10 @@ mod tests {
 
     #[test]
     fn a_client_operation_cannot_borrow_another_commands_arguments() {
-        let error = build_args("link-graph", &json!({ "kind": "conversation" })).unwrap_err();
+        let error = build_args("link-graph", &json!({ "path": "a.md" })).unwrap_err();
+        assert_eq!(error.code, "INVALID_INPUT");
+
+        let error = build_args("lock", &json!({ "expected-revision": "x" })).unwrap_err();
         assert_eq!(error.code, "INVALID_INPUT");
 
         let error = build_args("delete-path", &json!({ "create": true })).unwrap_err();
@@ -888,7 +902,7 @@ mod tests {
         }
         // Reads take the shared side, which is what keeps a whole-vault graph
         // from blocking the editor.
-        for command in ["list-documents", "read-documents", "read-memory", "link-graph"] {
+        for command in ["read", "link-graph"] {
             assert!(!mutates(command), "{command} should not need exclusive access");
         }
     }
@@ -905,7 +919,7 @@ mod tests {
                 "{command} cannot be run at all"
             );
         }
-        assert!(!WHOLE_VAULT.contains(&"write-document"));
+        assert!(!WHOLE_VAULT.contains(&"write"));
     }
 
     #[test]
@@ -931,18 +945,18 @@ mod tests {
 
     #[test]
     fn only_allowlisted_arguments_can_be_passed() {
-        let error = build_args("read-memory", &json!({ "exec": "/bin/sh" })).unwrap_err();
+        let error = build_args("read", &json!({ "exec": "/bin/sh" })).unwrap_err();
         assert_eq!(error.code, "INVALID_INPUT");
 
         // An argument that belongs to a different subcommand is still refused.
-        let error = build_args("read-memory", &json!({ "kind": "conversation" })).unwrap_err();
+        let error = build_args("read", &json!({ "from": "a.md" })).unwrap_err();
         assert_eq!(error.code, "INVALID_INPUT");
     }
 
     #[test]
     fn values_become_separate_argv_entries_and_are_never_interpolated() {
         let args = build_args(
-            "list-documents",
+            "create-folder",
             &request(json!({ "vault": "/Users/n/My Vault; rm -rf ~", "path": "projects" })),
         )
         .unwrap();
@@ -950,7 +964,7 @@ mod tests {
         assert_eq!(
             args,
             vec![
-                "list-documents",
+                "create-folder",
                 "--path",
                 "projects",
                 "--vault",
@@ -969,44 +983,53 @@ mod tests {
     }
 
     #[test]
-    fn booleans_become_bare_flags_and_false_is_omitted() {
-        let args = build_args("list-documents", &json!({ "recursive": true })).unwrap();
-        assert_eq!(args, vec!["list-documents", "--recursive"]);
-
-        let args = build_args("list-documents", &json!({ "recursive": false })).unwrap();
-        assert_eq!(args, vec!["list-documents"]);
-    }
-
-    #[test]
-    fn arrays_become_repeated_flags() {
+    fn the_four_verbs_take_their_path_positionally_after_the_options() {
+        // After `--`, so a note named like a flag is still only a path.
         let args = build_args(
-            "read-documents",
-            &json!({ "doc": ["a.md", "b.md"], "vault": "/v" }),
+            "write",
+            &json!({ "vault": "/v", "path": "--vault.md", "expected-revision": "blake3:ab" }),
         )
         .unwrap();
         assert_eq!(
             args,
-            vec![
-                "read-documents",
-                "--doc",
-                "a.md",
-                "--doc",
-                "b.md",
-                "--vault",
-                "/v"
-            ]
+            ["write", "--expected-revision", "blake3:ab", "--vault", "/v", "--", "--vault.md"]
+        );
+
+        // No path means the vault root, and nothing follows the options.
+        assert_eq!(
+            build_args("lock", &json!({ "vault": "/v" })).unwrap(),
+            ["lock", "--vault", "/v"]
+        );
+        assert_eq!(
+            build_args("read", &json!({ "vault": "/v", "path": null })).unwrap(),
+            ["read", "--vault", "/v"]
+        );
+        assert_eq!(
+            build_args("unlock", &json!({ "path": 7 })).unwrap_err().code,
+            "INVALID_INPUT"
         );
     }
 
     #[test]
-    fn numbers_are_rendered_without_a_shell_seeing_them() {
-        let args = build_args("list-documents", &json!({ "limit": 50 })).unwrap();
-        assert_eq!(args, vec!["list-documents", "--limit", "50"]);
+    fn booleans_become_bare_flags_and_false_is_omitted() {
+        let args = build_args("read", &json!({ "recursive": true })).unwrap();
+        assert_eq!(args, vec!["read", "--recursive"]);
+
+        let args = build_args("read", &json!({ "recursive": false })).unwrap();
+        assert_eq!(args, vec!["read"]);
     }
 
     #[test]
-    fn nested_objects_are_refused() {
-        let error = build_args("list-documents", &json!({ "limit": { "$gt": 1 } })).unwrap_err();
+    fn numbers_are_rendered_without_a_shell_seeing_them() {
+        let args = build_args("read", &json!({ "limit": 50 })).unwrap();
+        assert_eq!(args, vec!["read", "--limit", "50"]);
+    }
+
+    #[test]
+    fn nested_and_repeated_values_are_refused() {
+        let error = build_args("read", &json!({ "limit": { "$gt": 1 } })).unwrap_err();
+        assert_eq!(error.code, "INVALID_INPUT");
+        let error = build_args("read", &json!({ "cursor": ["a", "b"] })).unwrap_err();
         assert_eq!(error.code, "INVALID_INPUT");
     }
 

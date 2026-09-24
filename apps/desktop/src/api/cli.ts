@@ -15,7 +15,7 @@ import type {
   HealthCheck,
   InstallOutcome,
   KnownClient,
-  ListMemoriesData,
+  ReadData,
 } from "./types";
 
 /** Which CLI is in use, and what it reports about itself. */
@@ -37,19 +37,22 @@ export function invokeCli<T>(
   return invoke<CliResponse<T>>("invoke_cli", { command, request, stdin });
 }
 
-/** Create a vault, or add the managed structure to an existing folder. */
+/**
+ * Create a vault: scaffold an empty or missing folder, or register an existing
+ * folder of notes as one without writing anything into it.
+ */
 export function createVault(name: string, root: string) {
   return invokeCli<CreateVaultData>("create", { name, root });
 }
 
 /**
- * Confirm a folder is a usable vault by reading its memories.
+ * Confirm a folder is a readable vault by listing its root.
  *
- * An uninitialized vault answers `NOT_INITIALIZED` with guidance, which is
- * exactly what the Setup screen needs to show.
+ * A folder that has moved or cannot be read answers with a domain error, which
+ * is exactly what the Setup screen needs to show.
  */
 export function inspectVault(vault: string) {
-  return invokeCli<ListMemoriesData>("list-memories", { vault });
+  return invokeCli<ReadData>("read", { vault });
 }
 
 /** Launch the MCP server and complete a real handshake against it. */

@@ -25,12 +25,9 @@ const LIMITS: [string, string][] = [
   ["Listing page", "50 default, 200 maximum"],
   ["Recursive depth", "4 default, 16 maximum"],
   ["Listing scan guard", "10,000 entries per call"],
-  ["Documents per read", "10"],
-  ["Lines per file", "200 default, 1,000 maximum"],
+  ["Lines per read", "200 default, 1,000 maximum"],
   ["Bytes per read", "64 KiB default, 256 KiB maximum"],
-  ["Main memory", "32 KiB limit, advisory from 24 KiB"],
-  ["Extended memory", "1 MiB"],
-  ["Entry content", "1 MiB"],
+  ["Note size", "1 MiB"],
 ];
 
 export function Diagnostics({
@@ -53,7 +50,11 @@ export function Diagnostics({
     try {
       const response = await inspectVault(vault);
       setVaultState(
-        response.ok ? "initialized" : (response.error?.code ?? "unknown failure"),
+        response.ok
+          ? response.data?.locked
+            ? "readable, locked"
+            : "readable"
+          : (response.error?.code ?? "unknown failure"),
       );
     } finally {
       setBusy(false);

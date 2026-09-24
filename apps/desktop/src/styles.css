@@ -609,6 +609,19 @@ pre {
   white-space: nowrap;
 }
 
+/*
+ * A locked row's padlock. Muted, and set here rather than inherited: the open
+ * note's row is written in the accent, and a lock is not one of the surfaces
+ * the accent is spent on.
+ */
+.tree__lock {
+  flex: none;
+  margin-left: auto;
+  line-height: 0;
+  color: var(--muted);
+  pointer-events: none;
+}
+
 .tree__note {
   padding: 6px 10px;
   color: var(--faint);

@@ -1,10 +1,10 @@
 /**
  * The workspace, driven by output the real CLI actually produced (SPEC §17).
  *
- * The fixtures in `src/test/fixtures/` were captured from `heimdall link-graph`,
- * `list-documents`, and `read-documents` run against a real vault, so this
- * exercises the whole render path against the real shape of the contract rather
- * than against a hand-written idea of it.
+ * The fixtures in `src/test/fixtures/` follow what `heimdall link-graph` and
+ * `heimdall read` (of the vault root, recursively, and of one note) return for a
+ * real vault, so this exercises the whole render path against the real shape of
+ * the contract rather than against a hand-written idea of it.
  */
 
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -12,8 +12,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import graphFixture from "./test/fixtures/link-graph.json";
-import listingFixture from "./test/fixtures/list-documents.json";
-import readFixture from "./test/fixtures/read-documents.json";
+import rootFixture from "./test/fixtures/read-root.json";
+import noteFixture from "./test/fixtures/read-note.json";
 import type { RelinkData } from "./api/types";
 
 const invoke = vi.fn();
@@ -55,6 +55,28 @@ const STATUS = {
 interface Extras {
   relink?: RelinkData;
   relinkFails?: { code: string; message: string };
+  /**
+   * Paths with a lock rule, `""` for the vault root. Shared with the test, so
+   * `lock` and `unlock` change what the next `read` reports.
+   */
+  locks?: Set<string>;
+}
+
+/** Whether a path is locked under a set of rules: by itself or by any folder above it. */
+function lockedUnder(locks: Set<string>, path: string): string | null {
+  if (locks.has(path)) return path;
+  const parts = path.split("/");
+  for (let depth = parts.length - 1; depth > 0; depth -= 1) {
+    const folder = parts.slice(0, depth).join("/");
+    if (locks.has(folder)) return folder;
+  }
+  return locks.has("") ? "" : null;
+}
+
+/** The lock fields a `read` response carries for one path. */
+function lockFields(locks: Set<string>, path: string) {
+  const at = lockedUnder(locks, path);
+  return at === null ? { locked: false } : { locked: true, locked_at: at };
 }
 
 const EMPTY_TRUNCATION = {
@@ -79,11 +101,35 @@ function bridge(content?: string, extra: Extras = {}) {
     if (command !== "invoke_cli") return Promise.resolve({ ok: true, data: {} });
 
     const request = args as { command: string; request: Record<string, unknown> };
+    const locks = extra.locks ?? new Set<string>();
     switch (request.command) {
       case "link-graph":
-        return Promise.resolve({ ok: true, data: graphFixture });
-      case "list-documents":
-        return Promise.resolve({ ok: true, data: listingFixture });
+        return Promise.resolve({
+          ok: true,
+          data: {
+            ...graphFixture,
+            nodes: graphFixture.nodes.map((node) => ({
+              ...node,
+              locked: lockedUnder(locks, node.path) !== null,
+            })),
+          },
+        });
+      case "lock":
+      case "unlock": {
+        const path = String(request.request.path ?? "");
+        const had = locks.has(path);
+        if (request.command === "lock") locks.add(path);
+        else locks.delete(path);
+        return Promise.resolve({
+          ok: true,
+          data: {
+            path,
+            kind: path.endsWith(".md") ? "document" : "directory",
+            locked: request.command === "lock",
+            changed: had !== (request.command === "lock"),
+          },
+        });
+      }
       case "relink":
         if (extra.relinkFails) {
           return Promise.resolve({ ok: false, error: { ...extra.relinkFails, details: {} } });
@@ -98,28 +144,46 @@ function bridge(content?: string, extra: Extras = {}) {
               dry_run: false,
               updated: [],
               skipped: [],
+              locked: [],
               truncated: EMPTY_TRUNCATION,
             } satisfies RelinkData),
         });
-      case "read-documents":
+      case "read": {
+        const path = request.request.path as string | undefined;
+        if (!path) {
+          return Promise.resolve({
+            ok: true,
+            data: {
+              ...rootFixture,
+              ...lockFields(locks, ""),
+              listing: {
+                ...rootFixture.listing,
+                entries: rootFixture.listing.entries.map((entry) => ({
+                  ...entry,
+                  locked: lockedUnder(locks, entry.path) !== null,
+                })),
+              },
+            },
+          });
+        }
+        const body = content ?? noteFixture.document.content;
         return Promise.resolve({
           ok: true,
-          data:
-            content === undefined
-              ? readFixture
-              : {
-                  ...readFixture,
-                  documents: [
-                    {
-                      ...readFixture.documents[0],
-                      content,
-                      // The reader checks what it assembled against this, so a
-                      // note supplied here has to report its own length.
-                      size_bytes: new TextEncoder().encode(content).length,
-                    },
-                  ],
-                },
+          data: {
+            ...noteFixture,
+            path,
+            ...lockFields(locks, path),
+            document: {
+              ...noteFixture.document,
+              path,
+              content: body,
+              // The reader checks what it assembled against this, so a note
+              // supplied here has to report its own length.
+              size_bytes: new TextEncoder().encode(body).length,
+            },
+          },
         });
+      }
       default:
         return Promise.resolve({ ok: true, data: {} });
     }
@@ -134,21 +198,22 @@ beforeEach(() => {
 });
 
 describe("the three panes", () => {
-  it("shows the ordinary tree and the protected tree side by side", async () => {
+  it("builds the tree from the recursive read of the vault root", async () => {
     bridge();
     render(<App />);
 
     const files = await screen.findByRole("region", { name: "Files" });
-    // `list-documents` never returns anything under aios/, so the protected
-    // tree can only be here because the link index supplied it.
-    expect(await within(files).findByText("aios")).toBeInTheDocument();
-    expect(within(files).getByText("memories")).toBeInTheDocument();
-    expect(within(files).getByText("extended")).toBeInTheDocument();
-    expect(within(files).getByText("memory_1")).toBeInTheDocument();
-    expect(within(files).getByText("notifications")).toBeInTheDocument();
-
-    expect(within(files).getByText("projects")).toBeInTheDocument();
+    expect(await within(files).findByText("projects")).toBeInTheDocument();
+    expect(within(files).getByText("lens")).toBeInTheDocument();
     expect(within(files).getByText("how_lens_works")).toBeInTheDocument();
+    expect(within(files).getByText("ideas")).toBeInTheDocument();
+
+    const listing = invoke.mock.calls.find(
+      (call) => (call[1] as { command?: string })?.command === "read",
+    );
+    expect(listing?.[1]).toMatchObject({
+      request: { vault: "/vault", recursive: true, "max-depth": 16, limit: 200 },
+    });
   });
 
   it("renders all three panes at once", async () => {
@@ -246,7 +311,7 @@ describe("the three panes", () => {
 
     await waitFor(() => {
       const write = invoke.mock.calls.find(
-        (call) => (call[1] as { command?: string })?.command === "write-document",
+        (call) => (call[1] as { command?: string })?.command === "write",
       );
       expect(write?.[1]).toMatchObject({
         request: { path: "a_new_note.md", create: true },
@@ -279,7 +344,7 @@ describe("the three panes", () => {
 
     await waitFor(() => {
       const write = invoke.mock.calls.find(
-        (call) => (call[1] as { command?: string })?.command === "write-document",
+        (call) => (call[1] as { command?: string })?.command === "write",
       );
       expect(write, "the edit was discarded instead of saved").toBeDefined();
       const request = write![1] as { request: { path: string }; stdin: string };
@@ -325,7 +390,7 @@ describe("saving", () => {
 
     await waitFor(() => {
       const writes = invoke.mock.calls.filter(
-        (call) => (call[1] as { command?: string })?.command === "write-document",
+        (call) => (call[1] as { command?: string })?.command === "write",
       );
       expect(writes.length).toBeLessThanOrEqual(1);
     });
@@ -360,34 +425,32 @@ describe("opening notes in quick succession", () => {
     let releaseSlow: (() => void) | undefined;
     invoke.mockImplementation((command: string, args: Record<string, unknown>) => {
       if (command === "cli_status") return Promise.resolve(STATUS);
-      const request = args as { command: string; request: Record<string, string[]> };
+      const request = args as { command: string; request: Record<string, string | undefined> };
       if (request.command === "link-graph") return Promise.resolve({ ok: true, data: graphFixture });
-      if (request.command === "list-documents")
-        return Promise.resolve({ ok: true, data: listingFixture });
+      if (request.command === "read" && !request.request.path)
+        return Promise.resolve({ ok: true, data: rootFixture });
 
-      if (request.command === "read-documents") {
-        const path = request.request.doc![0]!;
+      if (request.command === "read") {
+        const path = request.request.path!;
         // A note opens with its own name as its heading, which is what the
         // preview shows as the title.
         const body = `# ${path.split("/").pop()!.replace(/\.md$/, "")}\n`;
         const answer = {
           ok: true,
           data: {
-            documents: [
-              {
-                path,
-                returned: true,
-                content: body,
-                start_line: 1,
-                end_line: 1,
-                next_line: null,
-                complete: true,
-                size_bytes: new TextEncoder().encode(body).length,
-                revision: "blake3:aa",
-              },
-            ],
-            total_bytes: body.length,
-            truncated: false,
+            path,
+            kind: "document",
+            locked: false,
+            document: {
+              path,
+              content: body,
+              start_line: 1,
+              end_line: 1,
+              next_line: null,
+              complete: true,
+              size_bytes: new TextEncoder().encode(body).length,
+              revision: "blake3:aa",
+            },
           },
         };
         if (path.includes("how_lens_works")) {
@@ -474,15 +537,84 @@ describe("renaming and deleting", () => {
     expect(within(menu).getByRole("menuitem", { name: "Delete…" })).toBeInTheDocument();
   });
 
-  it("offers nothing for the protected tree, which Heimdall owns", async () => {
-    // `move-path` and `delete-path` both refuse `aios/`, so offering the option
-    // would only produce an error the user could do nothing about.
+  it("offers Lock on an unlocked note", async () => {
     bridge();
     render(<App />);
 
+    const menu = await rightClick("how_lens_works");
+    expect(within(menu).getByRole("menuitem", { name: "Lock" })).toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "Unlock" })).toBeNull();
+  });
+
+  it("offers only Unlock on a locked note, never Rename or Delete", async () => {
+    // `move-path` and `delete-path` both refuse a locked path, so offering them
+    // would only produce an error.
+    bridge(undefined, { locks: new Set(["ideas/test_note.md"]) });
+    render(<App />);
+
     const files = await screen.findByRole("region", { name: "Files" });
-    fireEvent.contextMenu(within(files).getByText("memory_1"));
-    expect(screen.queryByRole("menu")).toBeNull();
+    await waitFor(() =>
+      expect(
+        within(files).getByText("test_note").closest('[role="treeitem"]'),
+      ).toHaveAttribute("data-locked", "true"),
+    );
+    const menu = await rightClick("test_note");
+    expect(within(menu).getByRole("menuitem", { name: "Unlock" })).toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "Rename…" })).toBeNull();
+    expect(within(menu).queryByRole("menuitem", { name: "Delete…" })).toBeNull();
+  });
+
+  it("offers neither Rename nor Delete on a folder holding something locked", async () => {
+    bridge(undefined, { locks: new Set(["projects/lens/profile.md"]) });
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await waitFor(() =>
+      expect(within(files).getByText("profile").closest('[role="treeitem"]')).toHaveAttribute(
+        "data-locked",
+        "true",
+      ),
+    );
+    const menu = await rightClick("lens");
+    expect(within(menu).getByRole("menuitem", { name: "Lock" })).toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "Rename…" })).toBeNull();
+  });
+
+  it("locks a folder from its menu and shows the lock in the tree", async () => {
+    const locks = new Set<string>();
+    bridge(undefined, { locks });
+    render(<App />);
+
+    const menu = await rightClick("ideas");
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Lock" }));
+
+    await waitFor(() =>
+      expect(invoke.mock.calls.find((call) => (call[1] as { command?: string })?.command === "lock")?.[1])
+        .toMatchObject({ request: { vault: "/vault", path: "ideas" } }),
+    );
+    const files = screen.getByRole("region", { name: "Files" });
+    await waitFor(() =>
+      expect(within(files).getByText("hello_world").closest('[role="treeitem"]')).toHaveAttribute(
+        "data-locked",
+        "true",
+      ),
+    );
+    expect(within(files).getAllByTitle("Locked").length).toBeGreaterThan(0);
+  });
+
+  it("locks the whole vault from the Explorer toolbar", async () => {
+    const locks = new Set<string>();
+    bridge(undefined, { locks });
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await within(files).findByText("projects");
+    await userEvent.click(within(files).getByRole("button", { name: "Lock vault" }));
+
+    await waitFor(() => expect(locks.has("")).toBe(true));
+    const lock = invoke.mock.calls.find((call) => (call[1] as { command?: string })?.command === "lock");
+    expect((lock![1] as { request: Record<string, unknown> }).request).toEqual({ vault: "/vault" });
+    expect(await within(files).findByRole("button", { name: "Unlock vault" })).toBeInTheDocument();
   });
 
   it("renames through move-path, keeping the extension", async () => {
@@ -615,6 +747,7 @@ describe("renaming and deleting", () => {
         skipped: [
           { path: "projects/lens/profile.md", target: "how_lens_works", reason: "unresolvable" },
         ],
+        locked: [],
         truncated: EMPTY_TRUNCATION,
       },
     });
@@ -635,6 +768,38 @@ describe("renaming and deleting", () => {
     expect(screen.getByRole("dialog", { name: /left behind/ })).toBeInTheDocument();
   });
 
+  it("names linking notes that are locked, before and after the rename", async () => {
+    bridge(undefined, {
+      locks: new Set(["projects/lens/profile.md"]),
+      relink: {
+        from: "projects/lens/how_lens_works.md",
+        to: "projects/lens/how_lens_work.md",
+        dry_run: false,
+        updated: [{ path: "projects/lens/articles.md", links: 1, new_revision: "blake3:aa" }],
+        skipped: [],
+        locked: ["projects/lens/profile.md"],
+        truncated: EMPTY_TRUNCATION,
+      },
+    });
+    render(<App />);
+    const files = await screen.findByRole("region", { name: "Files" });
+    await waitFor(() =>
+      expect(within(files).getByText("profile").closest('[role="treeitem"]')).toHaveAttribute(
+        "data-locked",
+        "true",
+      ),
+    );
+    await renameFromTree("how_lens_works", "how_lens_work");
+
+    const dialog = await screen.findByRole("dialog", { name: "Rename" });
+    expect(within(dialog).getByText(/1 of these is locked and will be left/)).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Update links" }));
+
+    const report = await screen.findByRole("dialog", { name: /left behind/ });
+    expect(within(report).getByText(/left unchanged because it is locked/)).toBeInTheDocument();
+    expect(within(report).getByText(/profile\.md/)).toBeInTheDocument();
+  });
+
   it("says nothing when every link was carried", async () => {
     bridge(undefined, {
       relink: {
@@ -643,6 +808,7 @@ describe("renaming and deleting", () => {
         dry_run: false,
         updated: [{ path: "projects/lens/profile.md", links: 1, new_revision: "blake3:aa" }],
         skipped: [],
+        locked: [],
         truncated: EMPTY_TRUNCATION,
       },
     });
@@ -723,14 +889,14 @@ describe("a vault that cannot be read", () => {
       if (command === "cli_status") return Promise.resolve(STATUS);
       return Promise.resolve({
         ok: false,
-        error: { code: "NOT_INITIALIZED", message: "this folder is not a Heimdall vault" },
+        error: { code: "NOT_FOUND", message: "the vault folder does not exist" },
       });
     });
 
     render(<App />);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("NOT_INITIALIZED");
-    expect(screen.getByRole("alert")).toHaveTextContent("not a Heimdall vault");
+    expect(await screen.findByRole("alert")).toHaveTextContent("NOT_FOUND");
+    expect(screen.getByRole("alert")).toHaveTextContent("does not exist");
   });
 
   it("clears the warning once the vault loads", async () => {
@@ -750,7 +916,7 @@ describe("things that should not silently lose work", () => {
     const original = invoke.getMockImplementation()!;
     invoke.mockImplementation((command: string, args: Record<string, unknown>) => {
       const request = args as { command: string };
-      if (command === "invoke_cli" && request.command === "write-document") {
+      if (command === "invoke_cli" && request.command === "write") {
         return Promise.resolve({
           ok: false,
           error: { code: "IO_ERROR", message: "the vault is read-only" },
@@ -781,7 +947,7 @@ describe("things that should not silently lose work", () => {
     const original = invoke.getMockImplementation()!;
     invoke.mockImplementation((command: string, args: Record<string, unknown>) => {
       const request = args as { command: string };
-      if (command === "invoke_cli" && request.command === "write-document") {
+      if (command === "invoke_cli" && request.command === "write") {
         return Promise.resolve({ ok: false, error: { code: "IO_ERROR", message: "no" } });
       }
       return original(command, args);
@@ -797,7 +963,7 @@ describe("things that should not silently lose work", () => {
 
     const writes = () =>
       invoke.mock.calls.filter(
-        (call) => (call[1] as { command?: string })?.command === "write-document",
+        (call) => (call[1] as { command?: string })?.command === "write",
       ).length;
 
     // Let autosave make its one attempt.
@@ -813,23 +979,114 @@ describe("things that should not silently lose work", () => {
   });
 });
 
-describe("a note that cannot be written", () => {
-  it("gives an entry a read-only editor rather than a caret that goes nowhere", async () => {
-    // Entries are created by an agent and their frontmatter is Heimdall's, so
-    // the editor reads them but does not offer to save them. A normal caret
-    // would let someone type a paragraph that is silently discarded.
-    bridge();
+describe("a locked note", () => {
+  it("opens with a read-only editor rather than a caret that goes nowhere", async () => {
+    // `write` refuses a locked note, so a normal caret would let someone type
+    // a paragraph that can never be saved.
+    bridge(undefined, { locks: new Set(["projects/lens"]) });
     render(<App />);
 
     const files = await screen.findByRole("region", { name: "Files" });
-    await userEvent.click(within(files).getByText("2026-08-21_23-54-22"));
+    await userEvent.click(await within(files).findByText("how_lens_works"));
 
     const note = screen.getByRole("region", { name: "Note" });
-    await waitFor(() => expect(within(note).getByRole("heading", { level: 1 })).toBeInTheDocument());
+    await waitFor(() => expect(titleOf(note)).toBe("how_lens_works"));
     await userEvent.click(within(note).getByRole("button", { name: "Edit" }));
 
     const editor = within(note).getByTestId("source-editor");
     expect(editor.querySelector(".cm-content")).toHaveAttribute("contenteditable", "false");
+  });
+
+  it("flips editability when locked from its toolbar, without remounting the editor", async () => {
+    const locks = new Set<string>();
+    bridge(undefined, { locks });
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await userEvent.click(within(files).getByText("test_note"));
+    const note = screen.getByRole("region", { name: "Note" });
+    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
+
+    const content = () => within(note).getByTestId("source-editor").querySelector(".cm-content");
+    const before = content();
+    expect(before).toHaveAttribute("contenteditable", "true");
+
+    await userEvent.click(within(note).getByRole("button", { name: "Lock note" }));
+    await waitFor(() => expect(content()).toHaveAttribute("contenteditable", "false"));
+    // The same element: reconfigured, not rebuilt, so undo and the caret stay.
+    expect(content()).toBe(before);
+    expect(locks.has("ideas/test_note.md")).toBe(true);
+    // The title is part of the note's name, and a locked note cannot move.
+    expect(within(note).queryByLabelText("Note name")).toBeNull();
+
+    await userEvent.click(within(note).getByRole("button", { name: "Unlock note" }));
+    await waitFor(() => expect(content()).toHaveAttribute("contenteditable", "true"));
+    expect(content()).toBe(before);
+  });
+
+  it("reports a write refused as LOCKED in a dialog that names the rule", async () => {
+    // Locked underneath the editor, by an agent or another window. A banner
+    // would be wiped by the reload that follows; the dialog stays.
+    bridge();
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command: string, args: Record<string, unknown>) => {
+      const request = args as { command: string };
+      if (command === "invoke_cli" && request.command === "write") {
+        return Promise.resolve({
+          ok: false,
+          error: {
+            code: "LOCKED",
+            message: '"projects/lens/how_lens_works.md" is locked',
+            details: { path: "projects/lens/how_lens_works.md", locked_at: "projects" },
+          },
+        });
+      }
+      return original(command, args);
+    });
+
+    render(<App />);
+    const files = await screen.findByRole("region", { name: "Files" });
+    await userEvent.click(within(files).getByText("how_lens_works"));
+
+    const note = screen.getByRole("region", { name: "Note" });
+    const properties = await within(note).findByRole("region", { name: "Properties" });
+    await userEvent.click(within(properties).getByRole("button", { name: "Remove articles" }));
+    await userEvent.keyboard("{Meta>}s{/Meta}");
+
+    const dialog = await screen.findByRole("dialog", { name: "Locked" });
+    expect(dialog).toHaveTextContent('"projects" is locked');
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(screen.getByRole("dialog", { name: "Locked" })).toBeInTheDocument();
+  });
+
+  it("reports a create refused as LOCKED in a dialog, not the banner", async () => {
+    bridge();
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command: string, args: Record<string, unknown>) => {
+      const request = args as { command: string };
+      if (command === "invoke_cli" && request.command === "create-folder") {
+        return Promise.resolve({
+          ok: false,
+          error: {
+            code: "LOCKED",
+            message: "the vault is locked",
+            details: { path: "notes", locked_at: "" },
+          },
+        });
+      }
+      return original(command, args);
+    });
+
+    render(<App />);
+    const files = await screen.findByRole("region", { name: "Files" });
+    await userEvent.click(within(files).getByRole("button", { name: "New folder" }));
+    const prompt = await screen.findByRole("dialog", { name: "Create folder" });
+    await userEvent.click(within(prompt).getByRole("button", { name: "Create folder" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Locked" });
+    expect(dialog).toHaveTextContent("the whole vault is locked");
   });
 });
 
@@ -877,12 +1134,12 @@ describe("the note's title", () => {
     expect(await within(note).findByLabelText("Note name")).toHaveValue("test_note");
   });
 
-  it("is not editable for protected content, which Heimdall names", async () => {
-    bridge();
+  it("is not editable for a locked note, which cannot be renamed", async () => {
+    bridge(undefined, { locks: new Set(["ideas/test_note.md"]) });
     render(<App />);
 
     const files = await screen.findByRole("region", { name: "Files" });
-    await userEvent.click(within(files).getByText("memory_1"));
+    await userEvent.click(await within(files).findByText("test_note"));
 
     const note = screen.getByRole("region", { name: "Note" });
     await waitFor(() => expect(within(note).getByRole("heading", { level: 1 })).toBeInTheDocument());
@@ -1063,17 +1320,33 @@ describe("dragging a note between folders", () => {
     });
   });
 
-  it("refuses to drop into the protected tree, which move-path would reject", async () => {
-    bridge();
+  it("refuses to drop into a locked folder, which move-path would reject", async () => {
+    bridge(undefined, { locks: new Set(["projects"]) });
     render(<App />);
 
     const files = await screen.findByRole("region", { name: "Files" });
-    await drag(row(files, "test_note"), row(files, "memories"));
+    await waitFor(() => expect(row(files, "projects")).toHaveAttribute("data-locked", "true"));
+    await drag(row(files, "test_note"), row(files, "projects"));
+    // Nor onto a note inside it, which means the same folder.
+    await drag(row(files, "test_note"), row(files, "my_project"));
 
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(
       invoke.mock.calls.find((call) => (call[1] as { command?: string })?.command === "move-path"),
     ).toBeUndefined();
+  });
+
+  it("does not let a locked row start a drag", async () => {
+    bridge(undefined, { locks: new Set(["ideas/test_note.md"]) });
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await waitFor(() => expect(row(files, "test_note")).toHaveAttribute("data-locked", "true"));
+    await drag(row(files, "test_note"), row(files, "projects"));
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(row(files, "test_note")).not.toHaveClass("tree__row--dragging");
+    expect(commandsCalled()).not.toContain("move-path");
   });
 
   it("does nothing when a note is dropped back where it started", async () => {
@@ -1120,205 +1393,3 @@ describe("dragging a note between folders", () => {
     await waitFor(() => expect(titleOf(note)).toBe("hello_world"));
   });
 });
-
-describe("a vault that cannot be read", () => {
-  it("says why instead of showing an empty workspace forever", async () => {
-    // A vault folder that has moved, or a path saved by an older build, would
-    // otherwise leave the tree empty and the graph "building" with the reason
-    // only in Diagnostics.
-    invoke.mockImplementation((command: string) => {
-      if (command === "cli_status") return Promise.resolve(STATUS);
-      return Promise.resolve({
-        ok: false,
-        error: { code: "NOT_INITIALIZED", message: "this folder is not a Heimdall vault" },
-      });
-    });
-
-    render(<App />);
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("NOT_INITIALIZED");
-    expect(screen.getByRole("alert")).toHaveTextContent("not a Heimdall vault");
-  });
-
-  it("clears the warning once the vault loads", async () => {
-    bridge();
-    render(<App />);
-
-    await screen.findByRole("region", { name: "Files" });
-    expect(screen.queryByRole("alert")).toBeNull();
-  });
-});
-
-describe("things that should not silently lose work", () => {
-  it("stays on the note when the flush before navigating fails", async () => {
-    // Replacing the buffer would destroy the edit and leave the reason in a log
-    // the user has no reason to open.
-    bridge();
-    const original = invoke.getMockImplementation()!;
-    invoke.mockImplementation((command: string, args: Record<string, unknown>) => {
-      const request = args as { command: string };
-      if (command === "invoke_cli" && request.command === "write-document") {
-        return Promise.resolve({
-          ok: false,
-          error: { code: "IO_ERROR", message: "the vault is read-only" },
-        });
-      }
-      return original(command, args);
-    });
-
-    render(<App />);
-    const files = await screen.findByRole("region", { name: "Files" });
-    await userEvent.click(within(files).getByText("how_lens_works"));
-
-    const note = screen.getByRole("region", { name: "Note" });
-    const properties = await within(note).findByRole("region", { name: "Properties" });
-    await userEvent.click(within(properties).getByRole("button", { name: "Remove articles" }));
-
-    await userEvent.click(within(files).getByText("profile"));
-
-    // The edited note is still on screen, and the failure is visible.
-    await waitFor(() => expect(titleOf(note)).toBe("how_lens_works"));
-    expect(await screen.findByText(/read-only/)).toBeInTheDocument();
-  });
-
-  it("stops retrying a write that keeps failing", { timeout: 15_000 }, async () => {
-    // A read-only file or an unplugged vault would otherwise spawn a CLI
-    // process every second and a half for as long as the window is open.
-    bridge();
-    const original = invoke.getMockImplementation()!;
-    invoke.mockImplementation((command: string, args: Record<string, unknown>) => {
-      const request = args as { command: string };
-      if (command === "invoke_cli" && request.command === "write-document") {
-        return Promise.resolve({ ok: false, error: { code: "IO_ERROR", message: "no" } });
-      }
-      return original(command, args);
-    });
-
-    render(<App />);
-    const files = await screen.findByRole("region", { name: "Files" });
-    await userEvent.click(within(files).getByText("how_lens_works"));
-
-    const note = screen.getByRole("region", { name: "Note" });
-    const properties = await within(note).findByRole("region", { name: "Properties" });
-    await userEvent.click(within(properties).getByRole("button", { name: "Remove articles" }));
-
-    const writes = () =>
-      invoke.mock.calls.filter(
-        (call) => (call[1] as { command?: string })?.command === "write-document",
-      ).length;
-
-    // Let autosave make its one attempt.
-    await waitFor(() => expect(writes()).toBeGreaterThan(0), { timeout: 4000 });
-    const attempted = writes();
-
-    // Then wait out several more autosave windows. This pins the behaviour
-    // rather than reproducing a live fault: the serialised save plus the
-    // failure backoff both prevent it, and before either existed this climbed
-    // by one roughly every second and a half for as long as the window was open.
-    await new Promise((resolve) => setTimeout(resolve, AUTOSAVE_WINDOWS));
-    expect(writes()).toBe(attempted);
-  });
-});
-
-describe("a note that cannot be written", () => {
-  it("gives an entry a read-only editor rather than a caret that goes nowhere", async () => {
-    // Entries are created by an agent and their frontmatter is Heimdall's, so
-    // the editor reads them but does not offer to save them. A normal caret
-    // would let someone type a paragraph that is silently discarded.
-    bridge();
-    render(<App />);
-
-    const files = await screen.findByRole("region", { name: "Files" });
-    await userEvent.click(within(files).getByText("2026-08-21_23-54-22"));
-
-    const note = screen.getByRole("region", { name: "Note" });
-    await waitFor(() => expect(within(note).getByRole("heading", { level: 1 })).toBeInTheDocument());
-    await userEvent.click(within(note).getByRole("button", { name: "Edit" }));
-
-    const editor = within(note).getByTestId("source-editor");
-    expect(editor.querySelector(".cm-content")).toHaveAttribute("contenteditable", "false");
-  });
-});
-
-describe("the note's title", () => {
-  it("is the filename, and renaming one renames the other", async () => {
-    // There is no separate title to keep in step: a note is always called
-    // something, and that something is the name of the file.
-    bridge();
-    render(<App />);
-
-    const files = await screen.findByRole("region", { name: "Files" });
-    await userEvent.click(within(files).getByText("test_note"));
-
-    const note = screen.getByRole("region", { name: "Note" });
-    // The heading is typed into in source and read in preview.
-    expect(within(note).queryByLabelText("Note name")).toBeNull();
-    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
-
-    const field = await within(note).findByLabelText("Note name");
-    expect(field).toHaveValue("test_note");
-
-    await userEvent.clear(field);
-    await userEvent.type(field, "renamed_from_title");
-    await userEvent.tab();
-
-    await waitFor(() => {
-      const move = invoke.mock.calls.find(
-        (call) => (call[1] as { command?: string })?.command === "move-path",
-      );
-      expect(move?.[1]).toMatchObject({
-        request: { from: "ideas/test_note.md", to: "ideas/renamed_from_title.md" },
-      });
-    });
-  });
-
-  it("always exists, even for a note with no heading in its body", async () => {
-    bridge();
-    render(<App />);
-
-    const files = await screen.findByRole("region", { name: "Files" });
-    await userEvent.click(within(files).getByText("test_note"));
-
-    const note = screen.getByRole("region", { name: "Note" });
-    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
-    expect(await within(note).findByLabelText("Note name")).toHaveValue("test_note");
-  });
-
-  it("is not editable for protected content, which Heimdall names", async () => {
-    bridge();
-    render(<App />);
-
-    const files = await screen.findByRole("region", { name: "Files" });
-    await userEvent.click(within(files).getByText("memory_1"));
-
-    const note = screen.getByRole("region", { name: "Note" });
-    await waitFor(() => expect(within(note).getByRole("heading", { level: 1 })).toBeInTheDocument());
-    expect(within(note).queryByLabelText("Note name")).toBeNull();
-
-    await userEvent.click(within(note).getByRole("button", { name: "Edit" }));
-    expect(within(note).queryByLabelText("Note name")).toBeNull();
-  });
-
-  it("abandons an edit on Escape", async () => {
-    bridge();
-    render(<App />);
-
-    const files = await screen.findByRole("region", { name: "Files" });
-    await userEvent.click(within(files).getByText("test_note"));
-
-    const note = screen.getByRole("region", { name: "Note" });
-    // The heading is typed into in source and read in preview.
-    expect(within(note).queryByLabelText("Note name")).toBeNull();
-    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
-
-    const field = await within(note).findByLabelText("Note name");
-    await userEvent.clear(field);
-    await userEvent.type(field, "abandoned{Escape}");
-
-    expect(field).toHaveValue("test_note");
-    expect(
-      invoke.mock.calls.find((call) => (call[1] as { command?: string })?.command === "move-path"),
-    ).toBeUndefined();
-  });
-});
-

@@ -132,3 +132,23 @@ export function IconMore(props: IconProps) {
     </Svg>
   );
 }
+
+/** A closed padlock: the path is read-only. */
+export function IconLock(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M3.5 7.5h9v6h-9z" />
+      <path d="M5.5 7.5V5a2.5 2.5 0 0 1 5 0v2.5" />
+    </Svg>
+  );
+}
+
+/** An open padlock: the path can be written. */
+export function IconUnlock(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M3.5 7.5h9v6h-9z" />
+      <path d="M5.5 7.5V5a2.5 2.5 0 0 1 5 0" />
+    </Svg>
+  );
+}

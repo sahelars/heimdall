@@ -16,18 +16,21 @@ import {
   createFolder,
   deletePath,
   listAllDocuments,
+  lockPath,
   movePath,
   readWholeDocument,
+  readLockState,
   relinkPaths,
   saveDocument,
+  unlockPath,
 } from "./api/documents";
 import { backlinksOf, backlinksUnder, loadVaultIndex, type VaultIndex } from "./api/index-graph";
-import { baseName, isProtected, parentOf, sourceOf, titleOf } from "./api/source";
+import { baseName, parentOf, titleOf } from "./api/source";
 import type { CliStatus, DomainError, LinkGraphData, RelinkData } from "./api/types";
 import { Button, Failure } from "./components";
 import { withTitle } from "./markdown/frontmatter";
 import { Explorer } from "./features/explorer/Explorer";
-import type { TreeInput, TreeNode } from "./features/explorer/tree";
+import { containsLocked, type TreeInput, type TreeNode } from "./features/explorer/tree";
 import { GraphPane } from "./features/graph/GraphPane";
 import { Mermaid } from "./features/note/Mermaid";
 import { NoteView, type OpenNote, type ViewMode } from "./features/note/NoteView";
@@ -64,18 +67,32 @@ import {
 import { resolveWikilink } from "./markdown/wikilinks";
 
 /**
- * Where a new note or folder goes.
+ * Where a new note or folder goes: beside whatever is open.
  *
- * Beside whatever is open, unless that is inside `aios/` — the protected tree
- * has no create operation, so putting it there would only earn a refusal.
+ * A locked folder is not skipped here. The CLI refuses a create inside one with
+ * `LOCKED`, and saying so in a dialog is better than quietly putting the note
+ * somewhere the user did not choose.
  */
 function destinationFolder(openPath: string | null): string {
-  if (!openPath) return "";
-  const folder = parentOf(openPath);
-  return isProtected(folder) ? "" : folder;
+  return openPath ? parentOf(openPath) : "";
 }
 
-/** The event the Rust menu emits for Heimdall → Settings…. */
+/**
+ * What a `LOCKED` refusal says, in words.
+ *
+ * `locked_at` names the folder or note whose rule applies, and `""` is the vault
+ * root — which is the part worth telling someone, since the rule that stopped
+ * them is often on a folder rather than on what they touched.
+ */
+export function describeLocked(error: DomainError): string {
+  const path = typeof error.details?.path === "string" ? error.details.path : null;
+  const at = typeof error.details?.locked_at === "string" ? error.details.locked_at : null;
+  const what = path ? `"${path}"` : "That path";
+  if (at === null) return `${what} is locked, so it cannot be changed.`;
+  const where = at === "" ? "the whole vault is locked" : at === path ? "it is locked" : `"${at}" is locked`;
+  return `${what} cannot be changed: ${where}. Unlock it to make this change.`;
+}
+
 /** `n thing` or `n things`, which is most of what a report has to say. */
 function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
@@ -100,6 +117,18 @@ export function describeShortfall(result: RelinkData): string | null {
         result.skipped.length === 1 ? "was" : "were"
       } left pointing at the old name, in ${where.slice(0, 3).join(", ")}${
         where.length > 3 ? ` and ${where.length - 3} more` : ""
+      }.`,
+    );
+  }
+  const locked = result.locked ?? [];
+  if (locked.length > 0) {
+    said.push(
+      `${plural(locked.length, "locked note")} ${
+        locked.length === 1 ? "links" : "link"
+      } here and ${locked.length === 1 ? "was" : "were"} left unchanged because ${
+        locked.length === 1 ? "it is" : "they are"
+      } locked: ${locked.slice(0, 3).join(", ")}${
+        locked.length > 3 ? ` and ${locked.length - 3} more` : ""
       }.`,
     );
   }
@@ -149,6 +178,8 @@ interface MoveRequest {
 interface PendingMove extends MoveRequest {
   /** The notes that link in, which the dialog lists. */
   linking: string[];
+  /** Those of them that are locked, which `relink` will leave unchanged. */
+  lockedLinking: string[];
 }
 
 const SETTINGS_EVENT = "menu:settings";
@@ -182,6 +213,13 @@ export function App() {
   const [renaming, setRenaming] = useState<TreeNode | null>(null);
   const [deleting, setDeleting] = useState<TreeNode | null>(null);
   const [actionError, setActionError] = useState<DomainError | null>(null);
+  /**
+   * A write refused because something is locked.
+   *
+   * A dialog, never the banner: autosave triggers a reload 1.5 seconds after
+   * any edit, and a successful reload clears the banner before it is read.
+   */
+  const [lockedError, setLockedError] = useState<DomainError | null>(null);
   /**
    * Whether the banner is showing a failure `reload` itself put there.
    *
@@ -218,6 +256,7 @@ export function App() {
 
   const [index, setIndex] = useState<VaultIndex | null>(null);
   const [listing, setListing] = useState<TreeInput[]>([]);
+  const [rootLocked, setRootLocked] = useState(false);
   const [truncated, setTruncated] = useState(false);
 
   const [history, setHistory] = useState<HistoryState>(EMPTY_HISTORY);
@@ -345,6 +384,12 @@ export function App() {
 
   /** Put a failure on the banner and keep it there until it is dismissed. */
   const showError = useCallback((error: DomainError) => {
+    // A lock is not a failure to dismiss and forget: it names what to unlock,
+    // and it has to survive the reload that follows every write.
+    if (error.code === "LOCKED") {
+      setLockedError(error);
+      return;
+    }
     bannerFromReload.current = false;
     setActionError(error);
   }, []);
@@ -359,15 +404,16 @@ export function App() {
         ]);
         setIndex(nextIndex);
         setTruncated(nextListing.truncated);
-        // The tree comes from both: the listing supplies ordinary folders,
-        // including empty ones, and the index is the only thing that sees the
-        // protected tree at all.
-        setListing([
-          ...nextListing.entries.map((entry) => ({ path: entry.path, kind: entry.kind })),
-          ...nextIndex.nodes
-            .filter((node) => isProtected(node.path))
-            .map((node) => ({ path: node.path, kind: "document" as const })),
-        ]);
+        setRootLocked(nextListing.rootLocked);
+        // The tree is the listing alone: it supplies every folder, including
+        // empty ones, and the lock state of each path.
+        setListing(
+          nextListing.entries.map((entry) => ({
+            path: entry.path,
+            kind: entry.kind,
+            locked: entry.locked,
+          })),
+        );
         if (bannerFromReload.current) {
           bannerFromReload.current = false;
           setActionError(null);
@@ -377,12 +423,13 @@ export function App() {
           record("link-graph", thrown.error);
           // Its own, so its own success may clear it again.
           bannerFromReload.current = true;
-          // A vault that has moved, or was never initialised, otherwise leaves
+          // A vault that has moved, or cannot be read, otherwise leaves
           // the workspace showing an empty tree and "Building the graph…"
           // forever with the reason buried in Diagnostics.
           setActionError(thrown.error);
           setIndex(null);
           setListing([]);
+          setRootLocked(false);
         }
       }
     },
@@ -449,12 +496,6 @@ export function App() {
         return next;
       });
       setLoading(true);
-      // Entries are the one thing the editor reads but does not offer to write.
-      // They are created by an agent and their frontmatter is Heimdall's (SPEC
-      // §6); editing the body is possible, but doing it by accident while
-      // reading a summary is not what anyone wants.
-      const source = sourceOf(path);
-      const editable = source !== "entry-conversation" && source !== "entry-notification";
 
       try {
         const document = await readWholeDocument(vault, path);
@@ -468,7 +509,12 @@ export function App() {
           path,
           buffer: document.content,
           dirty: false,
-          editable,
+          // A locked note is read, not written: the CLI would refuse the save,
+          // and letting someone type into a note that cannot keep it is worse
+          // than not offering a caret.
+          editable: !document.locked,
+          locked: document.locked,
+          lockedAt: document.lockedAt,
           saving: false,
           conflict: null,
           error: null,
@@ -488,6 +534,8 @@ export function App() {
           buffer: "",
           dirty: false,
           editable: false,
+          locked: false,
+          lockedAt: null,
           saving: false,
           conflict: null,
           error,
@@ -572,6 +620,21 @@ export function App() {
         // Remember what failed, so autosave does not retry the same bytes every
         // second and a half for as long as the window is open.
         failedAt.current = { path: current.path, text: writing };
+
+        // Locked underneath the editor — by an agent, or another window. The
+        // buffer is kept, the note stops offering a caret, and the dialog says
+        // what to unlock; the edits are still there to save once it is.
+        if (error.code === "LOCKED") {
+          setLockedError(error);
+          const lockedAt =
+            typeof error.details?.locked_at === "string" ? error.details.locked_at : null;
+          setNote((previous) =>
+            previous && previous.path === current.path
+              ? { ...previous, saving: false, editable: false, locked: true, lockedAt }
+              : previous,
+          );
+          return false;
+        }
 
         // A conflict is not a failure to report and move on from: the buffer is
         // kept exactly as it is and the choice goes to the person.
@@ -681,8 +744,8 @@ export function App() {
       setPrompt(null);
       setActionError(null);
       if (!vault) return;
-      // Beside the open note, unless that note is in the protected tree — which
-      // has no create operation, so the vault root is the honest default.
+      // Beside the open note; a locked folder refuses it with `LOCKED`, which
+      // `showError` puts in a dialog.
       const folder = destinationFolder(openPath);
       const path = `${folder ? `${folder}/` : ""}${name.replace(/\.md$/i, "")}.md`;
 
@@ -875,7 +938,10 @@ export function App() {
         void performMove(request, false);
         return;
       }
-      setPendingMove({ ...request, linking });
+      const lockedLinking = linking.filter(
+        (path) => index?.nodes[index.indexOf.get(path) ?? -1]?.locked ?? false,
+      );
+      setPendingMove({ ...request, linking, lockedLinking });
     },
     [vault, index, performMove],
   );
@@ -979,22 +1045,91 @@ export function App() {
     [vault, openPath, reload, record, showError],
   );
 
+  /** Folders whose own state is locked, and the root as `""` when it is. */
+  const lockedDirs = useMemo(() => {
+    const found = new Set(
+      listing.filter((entry) => entry.kind === "directory" && entry.locked).map((entry) => entry.path),
+    );
+    if (rootLocked) found.add("");
+    return found;
+  }, [listing, rootLocked]);
+
+  /**
+   * Lock or unlock one path, or the whole vault when `path` is null.
+   *
+   * Unsaved edits are written first: locking a dirty note would otherwise strand
+   * them in a buffer that can no longer be saved. The open note's editability
+   * then follows the new state without reopening it, so the caret and the undo
+   * history stay where they were.
+   */
+  const toggleLock = useCallback(
+    async (path: string | null, locked: boolean) => {
+      if (!vault) return;
+      setActionError(null);
+      if (!(await flush.current())) return;
+
+      try {
+        if (locked) await unlockPath(vault, path);
+        else await lockPath(vault, path);
+      } catch (thrown) {
+        if (thrown instanceof CliFailure) {
+          record(`${locked ? "unlock" : "lock"} ${path ?? "vault"}`, thrown.error);
+          showError(thrown.error);
+        }
+        return;
+      }
+
+      await reload(vault);
+
+      const current = noteNow.current;
+      if (!current || current.error) return;
+      try {
+        const state = await readLockState(vault, current.path);
+        // Edits a refused write left in the buffer can go out now; autosave
+        // would otherwise skip them as bytes that already failed once.
+        if (!state.locked && failedAt.current?.path === current.path) failedAt.current = null;
+        setNote((previous) =>
+          previous && previous.path === current.path
+            ? {
+                ...previous,
+                locked: state.locked,
+                lockedAt: state.lockedAt,
+                editable: !state.locked,
+              }
+            : previous,
+        );
+      } catch (thrown) {
+        if (thrown instanceof CliFailure) record(`read ${current.path}`, thrown.error);
+      }
+    },
+    [vault, reload, record, showError],
+  );
+
   /**
    * What a right-click offers.
    *
-   * The protected tree is Heimdall's structure, so it is browsable but not
-   * rearrangeable — the CLI would refuse, and offering the option would only
-   * produce an error.
+   * A locked path cannot be renamed or deleted, nor can a folder with anything
+   * locked inside it, nor anything inside a locked folder — the CLI would
+   * refuse, and offering the option would only produce an error. Locking is
+   * always offered, since it is how the rest comes back.
    */
   const menuItems = useCallback(
     (node: TreeNode): MenuItem[] => {
-      if (node.inAios) return [];
+      const pinned = containsLocked(node) || lockedDirs.has(parentOf(node.path));
       return [
-        { label: "Rename…", onSelect: () => setRenaming(node) },
-        { label: "Delete…", onSelect: () => setDeleting(node), destructive: true },
+        ...(pinned
+          ? []
+          : [
+              { label: "Rename…", onSelect: () => setRenaming(node) },
+              { label: "Delete…", onSelect: () => setDeleting(node), destructive: true },
+            ]),
+        {
+          label: node.locked ? "Unlock" : "Lock",
+          onSelect: () => void toggleLock(node.path, node.locked),
+        },
       ];
     },
-    [],
+    [lockedDirs, toggleLock],
   );
 
   /* Render ---------------------------------------------------------------- */
@@ -1048,6 +1183,8 @@ export function App() {
                 menuItems(node).length > 0 ? setMenu({ node, ...at }) : undefined
               }
               onMove={(path, folder) => void moveInto(path, folder)}
+              rootLocked={rootLocked}
+              onToggleVaultLock={() => void toggleLock(null, rootLocked)}
             />
           }
           centre={
@@ -1083,9 +1220,11 @@ export function App() {
               resolves={resolves}
               onResolveConflict={(choice) => void resolveConflict(choice)}
               // The heading and the filename are the same fact, so editing one
-              // moves both. Protected content is Heimdall's to name, so it is
-              // not offered.
-              onRename={note && !isProtected(note.path) ? (name) => void retitle(name) : null}
+              // moves both. A locked note cannot be moved, so it is not offered.
+              onRename={note && !note.locked ? (name) => void retitle(name) : null}
+              onToggleLock={
+                note && !note.error ? () => void toggleLock(note.path, note.locked) : null
+              }
             />
           }
           right={
@@ -1168,6 +1307,13 @@ export function App() {
             ) : null}
           </ul>
         ) : null}
+        {pendingMove && pendingMove.lockedLinking.length > 0 ? (
+          <p className="muted">
+            {pendingMove.lockedLinking.length} of these{" "}
+            {pendingMove.lockedLinking.length === 1 ? "is" : "are"} locked and will be left
+            unchanged, still pointing at the old name.
+          </p>
+        ) : null}
       </Confirm>
 
       {/*
@@ -1180,6 +1326,19 @@ export function App() {
           <p>{shortfall}</p>
           <div className="row confirm__actions">
             <Button primary onClick={() => setShortfall(null)}>
+              OK
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* A refusal because something is locked. A dialog for the same reason
+          the shortfall is one: the banner does not survive the next reload. */}
+      <Modal title="Locked" open={lockedError !== null} onClose={() => setLockedError(null)}>
+        <div className="confirm__frame">
+          <p>{lockedError ? describeLocked(lockedError) : ""}</p>
+          <div className="row confirm__actions">
+            <Button primary onClick={() => setLockedError(null)}>
               OK
             </Button>
           </div>

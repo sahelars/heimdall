@@ -24,7 +24,7 @@ async fn connect(vault: &str) -> RunningService<RoleClient, ()> {
                 .arg("mcp")
                 .arg("--vault")
                 .arg(vault)
-                .env("HEIMDALL_LOCK_DIR", common::lock_dir());
+                .env("HEIMDALL_DATA_DIR", common::data_dir());
         },
     ))
     .expect("spawn heimdall mcp");
@@ -80,31 +80,57 @@ async fn both_adapters_produce_the_same_domain_outcome_for_reads() {
     // structuredContent. Below those two wrappers the domain result is one
     // value produced by one core operation, and it must stay identical.
     let cases: Vec<(&str, Vec<&str>, Value)> = vec![
-        ("list_memories", vec!["list-memories"], json!({})),
-        ("read_memory", vec!["read-memory"], json!({})),
+        ("read", vec!["read"], json!({})),
+        ("read", vec!["read", "--recursive"], json!({ "recursive": true })),
+        ("read", vec!["read", "ideas"], json!({ "path": "ideas" })),
         (
-            "list_documents",
-            vec!["list-documents", "--recursive"],
-            json!({ "recursive": true }),
-        ),
-        (
-            "read_documents",
-            vec!["read-documents", "--doc", "ideas/hello_world.md"],
-            json!({ "documents": [{ "path": "ideas/hello_world.md" }] }),
-        ),
-        (
-            "list_entries",
-            vec!["list-entries", "--kind", "conversation"],
-            json!({ "kind": "conversation" }),
+            "read",
+            vec!["read", "ideas/hello_world.md", "--max-lines", "2"],
+            json!({ "path": "ideas/hello_world.md", "max_lines": 2 }),
         ),
     ];
 
     for (tool, mut argv, args) in cases {
         argv.extend(["--vault", vault.as_str()]);
         let shell = data(&run(&argv));
-        let mcp = structured(&client, tool, args).await;
-        assert_eq!(shell, mcp, "{tool} disagreed between adapters");
+        let mcp = structured(&client, tool, args.clone()).await;
+        assert_eq!(shell, mcp, "{tool} {args} disagreed between adapters");
     }
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn both_adapters_produce_the_same_domain_outcome_for_locks() {
+    let (_tmp, vault) = new_vault();
+    let client = connect(&vault).await;
+
+    let over_mcp = structured(&client, "lock", json!({ "path": "ideas" })).await;
+    assert_eq!(over_mcp["locked"], true);
+    assert_eq!(over_mcp["changed"], true);
+
+    // Locking again through the shell is the same outcome, with nothing changed.
+    let shell = data(&run(&["lock", "ideas", "--vault", &vault]));
+    assert_eq!(shell["locked"], true);
+    assert_eq!(shell["changed"], false);
+
+    // Both see the lock in a read.
+    let read = structured(&client, "read", json!({ "path": "ideas/hello_world.md" })).await;
+    assert_eq!(read["locked"], true);
+    assert_eq!(read["locked_at"], "ideas");
+
+    let unlocked = structured(&client, "unlock", json!({ "path": "ideas" })).await;
+    assert_eq!(
+        unlocked,
+        data(&run(&["lock", "ideas", "--vault", &vault]))
+            .as_object()
+            .map(|lock| {
+                let mut expected = lock.clone();
+                expected.insert("locked".into(), json!(false));
+                Value::Object(expected)
+            })
+            .unwrap()
+    );
 
     client.cancel().await.unwrap();
 }
@@ -113,43 +139,40 @@ async fn both_adapters_produce_the_same_domain_outcome_for_reads() {
 async fn both_adapters_produce_the_same_domain_outcome_for_failures() {
     let (_tmp, vault) = new_vault();
     let client = connect(&vault).await;
+    data(&run(&["lock", "projects", "--vault", &vault]));
 
-    let cases: Vec<(&str, Vec<&str>, Value)> = vec![
+    let cases: Vec<(&str, Vec<&str>, Value, &[u8])> = vec![
+        ("read", vec!["read", "missing.md"], json!({ "path": "missing.md" }), b""),
+        ("read", vec!["read", "--limit", "201"], json!({ "limit": 201 }), b""),
+        ("read", vec!["read", ".trash"], json!({ "path": ".trash" }), b""),
         (
-            "read_entry",
-            vec!["read-entry", "--kind", "conversation", "--id", "missing.md"],
-            json!({ "kind": "conversation", "id": "missing.md" }),
+            "write",
+            vec!["write", "ideas/hello_world.md"],
+            json!({ "path": "ideas/hello_world.md", "content": "x\n" }),
+            b"x\n",
         ),
         (
-            "list_documents",
-            vec!["list-documents", "--path", "aios"],
-            json!({ "path": "aios" }),
+            "write",
+            vec!["write", "projects/new.md"],
+            json!({ "path": "projects/new.md", "content": "x\n" }),
+            b"x\n",
         ),
-        (
-            "list_documents",
-            vec!["list-documents", "--limit", "201"],
-            json!({ "limit": 201 }),
-        ),
-        (
-            "read_memory",
-            vec!["read-memory", "--extended", "../escape.md"],
-            json!({ "extended": "../escape.md" }),
-        ),
+        ("lock", vec!["lock", "missing.md"], json!({ "path": "missing.md" }), b""),
     ];
 
-    for (tool, mut argv, args) in cases {
+    for (tool, mut argv, args, stdin) in cases {
         argv.extend(["--vault", vault.as_str()]);
-        let shell = envelope(&run(&argv));
-        let mcp = failure(&client, tool, args).await;
+        let shell = envelope(&run_with_stdin(&argv, stdin));
+        let mcp = failure(&client, tool, args.clone()).await;
 
-        assert_eq!(shell["error"]["code"], mcp["code"], "{tool} code differs");
+        assert_eq!(shell["error"]["code"], mcp["code"], "{tool} {args} code differs");
         assert_eq!(
             shell["error"]["message"], mcp["message"],
-            "{tool} message differs"
+            "{tool} {args} message differs"
         );
         assert_eq!(
             shell["error"]["details"], mcp["details"],
-            "{tool} details differ"
+            "{tool} {args} details differ"
         );
     }
 
@@ -160,39 +183,51 @@ async fn both_adapters_produce_the_same_domain_outcome_for_failures() {
 async fn a_write_through_one_adapter_is_visible_through_the_other() {
     let (_tmp, vault) = new_vault();
     let client = connect(&vault).await;
+    let note = "projects/my_project.md";
 
     // Write over MCP...
-    let revision = structured(&client, "read_memory", json!({})).await["revision"]
+    let revision = structured(&client, "read", json!({ "path": note })).await["document"]["revision"]
         .as_str()
         .unwrap()
         .to_string();
     let written = structured(
         &client,
-        "write_memory",
-        json!({ "content": "# Memory\n\nvia mcp\n", "expected_revision": revision }),
+        "write",
+        json!({ "path": note, "content": "# Plan\n\nvia mcp\n", "expected_revision": revision }),
     )
     .await;
 
     // ...and read it back through the shell.
-    let shell = data(&run(&["read-memory", "--vault", &vault]));
-    assert_eq!(shell["content"], "# Memory\n\nvia mcp\n");
-    assert_eq!(shell["revision"], written["new_revision"]);
+    let shell = data(&run(&["read", note, "--vault", &vault]));
+    assert_eq!(shell["document"]["content"], "# Plan\n\nvia mcp\n");
+    assert_eq!(shell["document"]["revision"], written["new_revision"]);
 
     // A revision taken over MCP is the same token the shell compares against,
     // so a stale write is refused whichever adapter attempts it.
     let stale = run_with_stdin(
-        &["write-memory", "--vault", &vault, "--expected-revision", &revision],
+        &["write", note, "--vault", &vault, "--expected-revision", &revision],
         b"clobber\n",
     );
     assert_eq!(error_code(&stale), "REVISION_CONFLICT");
 
     let conflict = failure(
         &client,
-        "write_memory",
-        json!({ "content": "clobber\n", "expected_revision": revision }),
+        "write",
+        json!({ "path": note, "content": "clobber\n", "expected_revision": revision }),
     )
     .await;
     assert_eq!(conflict["code"], "REVISION_CONFLICT");
+
+    // A lock taken at the shell stops the next MCP write.
+    data(&run(&["lock", note, "--vault", &vault]));
+    let locked = failure(
+        &client,
+        "write",
+        json!({ "path": note, "content": "x\n", "expected_revision": written["new_revision"] }),
+    )
+    .await;
+    assert_eq!(locked["code"], "LOCKED");
+    assert_eq!(locked["details"]["locked_at"], note);
 
     client.cancel().await.unwrap();
 }
@@ -206,7 +241,7 @@ async fn mcp_results_are_typed_and_never_carry_the_shell_envelope() {
     let (_tmp, vault) = new_vault();
     let client = connect(&vault).await;
 
-    let result = call(&client, "list_memories", json!({}))
+    let result = call(&client, "read", json!({}))
         .await
         .unwrap();
     let structured = result.structured_content.clone().unwrap();
@@ -217,10 +252,10 @@ async fn mcp_results_are_typed_and_never_carry_the_shell_envelope() {
             "shell envelope field {leaked} leaked into MCP: {structured}"
         );
     }
-    assert!(structured.get("memories").is_some());
+    assert!(structured.get("listing").is_some());
 
     // The shell keeps its envelope for exactly the same operation.
-    let shell = envelope(&run(&["list-memories", "--vault", &vault]));
+    let shell = envelope(&run(&["read", "--vault", &vault]));
     assert_eq!(shell["ok"], true);
     assert_eq!(shell["meta"]["schema_version"], 1);
     assert_eq!(shell["data"], structured);
@@ -251,10 +286,11 @@ async fn every_tool_result_validates_against_its_published_output_schema() {
     // promises; a full JSON Schema validator is beyond what this needs to catch
     // drift between the declared and returned types.
     for (tool, args) in [
-        ("list_memories", json!({})),
-        ("read_memory", json!({})),
-        ("list_entries", json!({ "kind": "notification" })),
-        ("list_documents", json!({})),
+        ("read", json!({})),
+        ("read", json!({ "path": "ideas/hello_world.md" })),
+        ("write", json!({ "path": "ideas/new.md", "content": "# New\n" })),
+        ("lock", json!({ "path": "ideas" })),
+        ("unlock", json!({})),
     ] {
         let result = structured(&client, tool, args).await;
         let required = schemas[tool]["required"]
@@ -284,7 +320,12 @@ async fn a_domain_refusal_and_an_unknown_tool_are_different_kinds_of_failure() {
 
     // A refusal the server understood: a tool result flagged isError, carrying
     // a domain code the client can branch on.
-    let refused = failure(&client, "read_memory", json!({ "start_line": 0 })).await;
+    let refused = failure(
+        &client,
+        "read",
+        json!({ "path": "ideas/hello_world.md", "start_line": 0 }),
+    )
+    .await;
     assert_eq!(refused["code"], "INVALID_INPUT");
 
     // A call the server cannot execute at all: a protocol error, not a result.
@@ -308,9 +349,9 @@ async fn arguments_that_violate_a_tool_schema_still_carry_a_domain_code() {
     let client = connect(&vault).await;
 
     for (tool, args) in [
-        ("list_documents", json!({ "limit": "lots" })),
-        ("list_entries", json!({})),
-        ("read_memory", json!({ "unexpected": true })),
+        ("read", json!({ "limit": "lots" })),
+        ("write", json!({ "path": "a.md" })),
+        ("lock", json!({ "unexpected": true })),
     ] {
         let result = failure(&client, tool, args).await;
         assert_eq!(
@@ -333,18 +374,6 @@ async fn no_tool_call_can_name_or_switch_the_vault() {
     let (_other_tmp, other_vault) = new_vault();
     let client = connect(&vault).await;
 
-    // Mark the two vaults apart.
-    let revision = structured(&client, "read_memory", json!({})).await["revision"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    structured(
-        &client,
-        "write_memory",
-        json!({ "content": "# Served vault\n", "expected_revision": revision }),
-    )
-    .await;
-
     // No tool advertises a vault input...
     for tool in client.list_all_tools().await.unwrap() {
         let schema = serde_json::to_string(&tool.input_schema).unwrap();
@@ -358,83 +387,39 @@ async fn no_tool_call_can_name_or_switch_the_vault() {
     }
 
     // ...and supplying one anyway is refused rather than honored.
-    let refused = failure(
-        &client,
-        "read_memory",
-        json!({ "vault": other_vault.as_str() }),
-    )
-    .await;
+    let refused = failure(&client, "read", json!({ "vault": other_vault.as_str() })).await;
     assert_eq!(refused["code"], "INVALID_INPUT");
 
-    // The other vault is untouched and the served one still holds its content.
-    let other = data(&run(&["read-memory", "--vault", &other_vault]));
-    assert_ne!(other["content"], "# Served vault\n");
-    assert_eq!(
-        structured(&client, "read_memory", json!({})).await["content"],
-        "# Served vault\n"
-    );
+    // An absolute path is read as a path inside the served vault, never as a
+    // way out of it.
+    let absolute = format!("{other_vault}/ideas/hello_world.md");
+    let outside = failure(&client, "read", json!({ "path": absolute })).await;
+    assert_eq!(outside["code"], "NOT_FOUND");
+
+    // A lock set over MCP lands on the served vault, not the other one.
+    structured(&client, "lock", json!({})).await;
+    assert_eq!(data(&run(&["read", "--vault", &other_vault]))["locked"], false);
+    assert_eq!(data(&run(&["read", "--vault", &vault]))["locked"], true);
 
     client.cancel().await.unwrap();
 }
 
 #[tokio::test]
-async fn protected_content_stays_unreachable_through_document_tools() {
+async fn hidden_folders_and_the_trash_stay_unreachable() {
     let (_tmp, vault) = new_vault();
+    std::fs::create_dir_all(format!("{vault}/.trash")).unwrap();
+    std::fs::write(format!("{vault}/.trash/gone.md"), "gone\n").unwrap();
     let client = connect(&vault).await;
 
-    for args in [
-        json!({ "path": "aios" }),
-        json!({ "path": "AIOS" }),
-        json!({ "path": "aios/memories" }),
-    ] {
-        assert_eq!(failure(&client, "list_documents", args).await["code"], "NOT_FOUND");
+    for path in [".trash", ".trash/gone.md"] {
+        assert_eq!(failure(&client, "read", json!({ "path": path })).await["code"], "INVALID_INPUT");
     }
+    let write = failure(&client, "write", json!({ "path": ".trash/new.md", "content": "x" })).await;
+    assert_eq!(write["code"], "INVALID_INPUT");
 
-    for path in ["aios/memories/memory.md", "AIOS/memories/memory.md"] {
-        let refused = failure(
-            &client,
-            "read_documents",
-            json!({ "documents": [{ "path": path }] }),
-        )
-        .await;
-        assert_eq!(refused["code"], "NOT_FOUND", "{path}");
-    }
-
-    // A recursive listing never surfaces it either.
-    let listed = structured(
-        &client,
-        "list_documents",
-        json!({ "recursive": true, "max_depth": 16 }),
-    )
-    .await;
-    let paths = serde_json::to_string(&listed["entries"]).unwrap();
-    assert!(!paths.contains("aios"), "{paths}");
-
-    client.cancel().await.unwrap();
-}
-
-#[tokio::test]
-async fn an_uninitialized_vault_connects_and_explains_itself() {
-    let dir = tempfile::tempdir().unwrap();
-    let empty = dir.path().to_str().unwrap().to_string();
-
-    // The server still starts: a client that connects should be told what is
-    // wrong rather than watching the process disappear (SPEC §7).
-    let client = connect(&empty).await;
-
-    for (tool, args) in [
-        ("list_documents", json!({})),
-        ("read_memory", json!({})),
-        ("list_memories", json!({})),
-        ("list_entries", json!({ "kind": "conversation" })),
-    ] {
-        let result = failure(&client, tool, args).await;
-        assert_eq!(result["code"], "NOT_INITIALIZED", "{tool}");
-        assert!(
-            result["message"].as_str().unwrap().contains("heimdall create"),
-            "{tool} gives no actionable guidance: {result}"
-        );
-    }
+    let listed = structured(&client, "read", json!({ "recursive": true, "max_depth": 16 })).await;
+    let paths = serde_json::to_string(&listed["listing"]["entries"]).unwrap();
+    assert!(!paths.contains(".trash"), "{paths}");
 
     client.cancel().await.unwrap();
 }
@@ -471,11 +456,18 @@ async fn diagnostics_go_to_stderr_without_disturbing_the_protocol() {
     // to work in this vault, and the only one Heimdall has — there is no
     // instructions file for a client to go and find (SPEC §12).
     let instructions = info.instructions.as_deref().expect("server instructions");
-    assert!(instructions.contains("aios/"));
-    assert!(instructions.contains("List content before reading it"));
-    assert!(instructions.contains("read_memory"), "{instructions}");
+    assert!(instructions.contains("`read`"), "{instructions}");
+    assert!(instructions.contains("locked"), "{instructions}");
 
-    assert_eq!(client.list_all_tools().await.unwrap().len(), 8);
+    let mut names: Vec<_> = client
+        .list_all_tools()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["lock", "read", "unlock", "write"]);
 
     client.cancel().await.unwrap();
 }

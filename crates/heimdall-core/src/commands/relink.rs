@@ -17,8 +17,12 @@
 //!   between a client's read and its write, and here there is no gap to close.
 //!   Every read and every write happens under the one lock, so no other
 //!   Heimdall process can interleave. That is also why this calls
-//!   `vault.read`/`vault.atomic_write` directly rather than `write_document` —
-//!   a locking operation inside a lock body is a self-deadlock (SPEC §14).
+//!   `vault.read`/`vault.atomic_write` directly rather than `write` — a
+//!   locking operation inside a lock body is a self-deadlock (SPEC §14).
+//!
+//! A locked note is never rewritten. Its links are left as they stand and the
+//! note is named in `locked`, so the client can say which links a lock kept
+//! broken rather than letting the user find them later.
 //!
 //! The interesting part is not the orchestration but deciding *which* `[[foo]]`
 //! meant the note that moved, and what to write in its place. Both answers come
@@ -28,7 +32,7 @@
 //! confirm it lands on the moved note; only then is it spliced in. A link that
 //! no proposal satisfies is reported and left exactly as it was.
 //!
-//! Deliberately no `JsonSchema` derive, for the reason `write_document` gives:
+//! Deliberately no `JsonSchema` derive, for the reason `link_graph` gives:
 //! a type without one cannot be given an MCP tool without a compile error.
 
 use serde::{Deserialize, Serialize};
@@ -37,6 +41,7 @@ use crate::commands::links::{self, LinkStyle};
 use crate::commands::resolve::{self, Index};
 use crate::errors::{Error, Result};
 use crate::limits;
+use crate::notelocks::LockRules;
 use crate::paths::RelPath;
 use crate::revisions::Revision;
 use crate::storage::Vault;
@@ -97,11 +102,12 @@ pub struct RelinkResponse {
     pub dry_run: bool,
     pub updated: Vec<RelinkUpdate>,
     pub skipped: Vec<RelinkSkip>,
+    /// Notes that link at what moved but are locked, so were not rewritten.
+    pub locked: Vec<String>,
     pub truncated: RelinkTruncation,
 }
 
 pub fn relink(vault: &Vault, request: RelinkRequest) -> Result<RelinkResponse> {
-    vault.ensure_initialized()?;
     let from = RelPath::parse(&request.from)?;
     let to = RelPath::parse(&request.to)?;
     if from.as_str() == to.as_str() {
@@ -119,9 +125,6 @@ pub fn relink(vault: &Vault, request: RelinkRequest) -> Result<RelinkResponse> {
             &RelPath::root(),
             1,
             limits::RECURSE_DEPTH_MAX,
-            // The protected tree links out with wikilinks too (SPEC §6), and a
-            // memory left pointing at a renamed note is as broken as a note is.
-            true,
             &mut found,
             &mut nodes_omitted,
         );
@@ -143,8 +146,10 @@ pub fn relink(vault: &Vault, request: RelinkRequest) -> Result<RelinkResponse> {
         let before_index = Index::build(before.iter());
         let after_index = Index::build(found.iter().map(|note| &note.path));
 
+        let rules = LockRules::load(vault)?;
         let mut updated = Vec::new();
         let mut skipped = Vec::new();
+        let mut locked = Vec::new();
         let mut truncated = RelinkTruncation {
             node_cap_hit: nodes_omitted > 0,
             nodes_omitted,
@@ -213,6 +218,10 @@ pub fn relink(vault: &Vault, request: RelinkRequest) -> Result<RelinkResponse> {
             let Some(rewritten) = outcome.text else {
                 continue;
             };
+            if rules.is_locked(&note.path) {
+                locked.push(note.path.to_string());
+                continue;
+            }
             let new_revision = if dry_run {
                 Revision::of_bytes(rewritten.as_bytes())
             } else {
@@ -231,6 +240,7 @@ pub fn relink(vault: &Vault, request: RelinkRequest) -> Result<RelinkResponse> {
             dry_run,
             updated,
             skipped,
+            locked,
             truncated,
         })
     })

@@ -6,9 +6,11 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   IconCollapse,
+  IconLock,
   IconNewFolder,
   IconNewNote,
   IconSort,
+  IconUnlock,
 } from "../../components/icons";
 import { FileTree } from "./FileTree";
 import {
@@ -30,6 +32,10 @@ interface ExplorerProps {
   onNewFolder: () => void;
   onContextMenu: (node: TreeNode, at: { x: number; y: number }) => void;
   onMove: (path: string, folder: string) => void;
+  /** Whether the vault root is locked — every path in it then is too. */
+  rootLocked?: boolean;
+  /** Lock or unlock the whole vault. Absent, the toggle is not shown. */
+  onToggleVaultLock?: () => void;
 }
 
 export function Explorer({
@@ -41,6 +47,8 @@ export function Explorer({
   onNewFolder,
   onContextMenu,
   onMove,
+  rootLocked = false,
+  onToggleVaultLock,
 }: ExplorerProps) {
   const [order, setOrder] = useState<SortOrder>("name");
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
@@ -115,6 +123,18 @@ export function Explorer({
         >
           <IconCollapse />
         </button>
+        {onToggleVaultLock ? (
+          <button
+            type="button"
+            className="icon-button"
+            title={rootLocked ? "Unlock vault" : "Lock vault"}
+            aria-label={rootLocked ? "Unlock vault" : "Lock vault"}
+            aria-pressed={rootLocked}
+            onClick={onToggleVaultLock}
+          >
+            {rootLocked ? <IconLock /> : <IconUnlock />}
+          </button>
+        ) : null}
       </div>
 
       <div className="explorer__scroll">
@@ -129,6 +149,7 @@ export function Explorer({
             onOpen={onOpen}
             onContextMenu={onContextMenu}
             onMove={onMove}
+            rootLocked={rootLocked}
           />
         )}
         {truncated ? (

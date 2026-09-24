@@ -1,7 +1,11 @@
-//! `heimdall create` — scaffold a new vault or initialize an existing one.
+//! `heimdall create` — scaffold a new vault, or adopt an existing folder of
+//! notes as one.
 //!
 //! Setup performed by a human, directly or through the desktop app. It is a
 //! shell command only and is never exposed as an MCP tool (SPEC §7).
+//!
+//! Either way the vault is registered (see [`crate::registry`]), which is what
+//! lets `heimdall read` find it from any folder inside.
 
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
@@ -9,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::errors::{Error, Result};
 use crate::paths::{self, RelPath};
 use crate::storage::Vault;
+use crate::registry;
 use crate::template;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -20,14 +25,15 @@ pub struct CreateVaultRequest {
     pub root: Utf8PathBuf,
 }
 
-/// Whether a complete vault was built or an existing one was initialized.
+/// Whether a new vault was built or an existing folder was adopted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CreateMode {
     /// The target was missing or empty: the full template was written.
     Scaffolded,
-    /// The target already had content: only missing `aios/` structure was added.
-    Initialized,
+    /// The target already had content: nothing was written into it, and it was
+    /// registered as a vault as it stands.
+    Registered,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -89,14 +95,15 @@ fn build(path: &Utf8PathBuf) -> Result<(CreateMode, Vec<String>)> {
         .iter()
         .any(|child| !paths::is_junk(&child.name));
 
-    let (mode, scaffold) = if has_content {
-        (CreateMode::Initialized, template::scaffold_aios_only(&vault)?)
+    // A folder already in use is the user's: no example notes appear in it.
+    let (mode, created) = if has_content {
+        (CreateMode::Registered, Vec::new())
     } else {
-        (CreateMode::Scaffolded, template::scaffold_full(&vault)?)
+        (CreateMode::Scaffolded, template::scaffold_full(&vault)?.created())
     };
 
-    vault.ensure_initialized()?;
-    Ok((mode, scaffold.created()))
+    registry::register(&vault)?;
+    Ok((mode, created))
 }
 
 #[cfg(test)]
@@ -125,8 +132,6 @@ mod tests {
         assert_eq!(response.mode, CreateMode::Scaffolded);
         assert_eq!(response.path, root.join("demo"));
         let vault = Vault::open(&response.path).unwrap();
-        vault.ensure_initialized().unwrap();
-        assert!(vault.is_file(&RelPath::parse("aios/memories/memory.md").unwrap()));
         assert!(vault.is_file(&RelPath::parse("ideas/hello_world.md").unwrap()));
     }
 
@@ -138,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn an_existing_vault_gets_only_the_missing_aios_structure() {
+    fn an_existing_folder_is_registered_and_left_untouched() {
         let (_tmp, root) = root_dir();
         let existing = root.join("existing-vault");
         // A hidden folder as well as an ordinary note: initialization must not
@@ -148,10 +153,10 @@ mod tests {
         std::fs::write(existing.join("my_note.md"), b"my content").unwrap();
 
         let response = create(&root, "existing-vault").unwrap();
-        assert_eq!(response.mode, CreateMode::Initialized);
+        assert_eq!(response.mode, CreateMode::Registered);
+        assert!(response.created.is_empty());
 
         let vault = Vault::open(&existing).unwrap();
-        vault.ensure_initialized().unwrap();
         // Existing content is untouched and no example notes appear.
         assert_eq!(
             vault.read(&RelPath::parse("my_note.md").unwrap()).unwrap(),
@@ -171,9 +176,8 @@ mod tests {
         create(&root, "demo").unwrap();
         let again = create(&root, "demo").unwrap();
 
-        // The vault now has content, so the second run takes the initialize path
-        // and finds nothing missing.
-        assert_eq!(again.mode, CreateMode::Initialized);
+        // The vault now has content, so the second run only registers it.
+        assert_eq!(again.mode, CreateMode::Registered);
         assert!(again.created.is_empty());
     }
 

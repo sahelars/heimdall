@@ -8,13 +8,12 @@
 use camino::Utf8PathBuf;
 use heimdall_core::commands::{move_path, relink, MovePathRequest, RelinkRequest, RelinkResponse};
 use heimdall_core::paths::RelPath;
-use heimdall_core::{template, Vault};
+use heimdall_core::Vault;
 
 fn vault() -> (tempfile::TempDir, Vault) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-    let vault = Vault::open_with_lock_dir(&root, &test_lock_dir()).unwrap();
-    template::scaffold_aios_only(&vault).unwrap();
+    let vault = Vault::open_with_data_dir(&root, &test_data_dir()).unwrap();
     (dir, vault)
 }
 
@@ -338,40 +337,21 @@ fn a_moved_notes_own_relative_links_are_re_expressed_from_its_new_home() {
     assert_eq!(read(&vault, "source.md"), "See [[projects/sibling]].\n");
 }
 
-/* The protected tree ---------------------------------------------------- */
+/* Locks ----------------------------------------------------------------- */
 
 #[test]
-fn a_memory_linking_to_a_renamed_note_follows_it() {
+fn a_locked_note_keeps_its_links_and_is_named_instead() {
     let (_dir, vault) = vault();
     note(&vault, "projects/roadmap.md", "# Roadmap\n");
-    note(
-        &vault,
-        "aios/memories/memory.md",
-        "- [[projects/roadmap|The roadmap]]\n",
-    );
+    note(&vault, "kept/index.md", "- [[roadmap]]\n");
+    note(&vault, "open.md", "- [[roadmap]]\n");
+    heimdall_core::lock(&vault, heimdall_core::LockRequest { path: Some("kept".into()) }).unwrap();
 
-    move_and_relink(&vault, "projects/roadmap.md", "projects/plan.md");
+    let response = move_and_relink(&vault, "projects/roadmap.md", "projects/plan.md");
 
-    assert_eq!(
-        read(&vault, "aios/memories/memory.md"),
-        "- [[projects/plan|The roadmap]]\n"
-    );
-}
-
-#[test]
-fn an_entrys_heimdall_frontmatter_is_untouched_by_a_rewrite() {
-    let (_dir, vault) = vault();
-    note(&vault, "roadmap.md", "# Roadmap\n");
-    let entry = "---\ncreated_at: 2026-08-16T14:30:00Z\ntype: conversation\ntags:\n  - a\n---\n\n# Summary\n\nSee [[roadmap]].\n";
-    note(&vault, "aios/conversations/2026-08-16_14-30-00.md", entry);
-
-    move_and_relink(&vault, "roadmap.md", "plan.md");
-
-    assert_eq!(
-        read(&vault, "aios/conversations/2026-08-16_14-30-00.md"),
-        entry.replace("[[roadmap]]", "[[plan]]"),
-        "only the link changed; Heimdall's own keys are byte-identical"
-    );
+    assert_eq!(read(&vault, "kept/index.md"), "- [[roadmap]]\n", "a lock is never written through");
+    assert_eq!(read(&vault, "open.md"), "- [[plan]]\n");
+    assert_eq!(response.locked, ["kept/index.md"]);
 }
 
 /* Contract -------------------------------------------------------------- */
@@ -448,8 +428,8 @@ fn a_second_run_over_a_settled_vault_changes_nothing() {
     assert_eq!(read(&vault, "source.md"), settled);
 }
 
-fn test_lock_dir() -> camino::Utf8PathBuf {
+fn test_data_dir() -> camino::Utf8PathBuf {
     camino::Utf8PathBuf::from_path_buf(std::env::temp_dir())
         .expect("temp dir is UTF-8")
-        .join("heimdall-test-locks")
+        .join("heimdall-test-data")
 }

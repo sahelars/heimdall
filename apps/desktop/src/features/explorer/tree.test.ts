@@ -1,14 +1,20 @@
 /**
  * The sidebar's tree (SPEC §17).
  *
- * The reference screenshots are mostly a statement about this shape: `aios/`
- * with its memories and entries nested beneath it, ordinary folders below, and
- * folders always above files.
+ * The reference screenshots are mostly a statement about this shape: folders
+ * nested the way their paths say, and folders always above files.
  */
 
 import { describe, expect, it } from "vitest";
 
-import { ancestorsOf, buildTree, folderPaths, type TreeInput } from "./tree";
+import {
+  ancestorsOf,
+  buildTree,
+  containsLocked,
+  folderPaths,
+  lockedFolders,
+  type TreeInput,
+} from "./tree";
 
 const doc = (path: string): TreeInput => ({ path, kind: "document" });
 const dir = (path: string): TreeInput => ({ path, kind: "directory" });
@@ -39,37 +45,49 @@ describe("building the tree", () => {
     ]);
   });
 
-  it("infers the folders of the protected tree, which the index reports as notes only", () => {
-    // `list-documents` never returns anything under `aios/`, so those folders
-    // exist only because the note paths imply them.
-    const tree = buildTree([
-      doc("aios/notes.md"),
-      doc("aios/memories/memory.md"),
-      doc("aios/memories/extended/memory_1.md"),
-      doc("aios/conversations/2026-08-16_10-30-00.md"),
-    ]);
+  it("infers a folder implied by a note deeper than the listing reached", () => {
+    const tree = buildTree([dir("a"), doc("a/b/c/note.md")]);
 
-    expect(outline(tree)).toEqual([
-      "aios/",
-      "  conversations/",
-      "    2026-08-16_10-30-00",
-      "  memories/",
-      "    extended/",
-      "      memory_1",
-      // `memory.md` sits inside `memories/`; a note a user dropped straight
-      // into `aios/` sits beside that folder, one level up.
-      "    memory",
-      "  notes",
-    ]);
+    expect(outline(tree)).toEqual(["a/", "  b/", "    c/", "      note"]);
   });
 
-  it("marks everything under the protected tree, and nothing else", () => {
-    const tree = buildTree([doc("aios/memories/memory.md"), doc("ideas/note.md")]);
+  it("carries each entry's lock state onto its node", () => {
+    const tree = buildTree([
+      { path: "private", kind: "directory", locked: true },
+      { path: "private/plan.md", kind: "document", locked: true },
+      { path: "private/open.md", kind: "document", locked: false },
+      doc("ideas/note.md"),
+    ]);
 
-    const aios = tree.find((node) => node.path === "aios")!;
-    expect(aios.inAios).toBe(true);
-    expect(aios.children[0]!.children[0]!.inAios).toBe(true);
-    expect(tree.find((node) => node.path === "ideas")!.inAios).toBe(false);
+    const locked = tree.find((node) => node.path === "private")!;
+    expect(locked.locked).toBe(true);
+    expect(locked.children.map((child) => [child.label, child.locked])).toEqual([
+      ["open", false],
+      ["plan", true],
+    ]);
+    expect(tree.find((node) => node.path === "ideas")!.locked).toBe(false);
+  });
+
+  it("lets an inferred folder inherit its parent's lock", () => {
+    const tree = buildTree([
+      { path: "private", kind: "directory", locked: true },
+      { path: "private/deep/note.md", kind: "document", locked: true },
+    ]);
+
+    expect(tree[0]!.children[0]!.locked).toBe(true);
+  });
+
+  it("finds locked folders, and folders holding anything locked", () => {
+    const tree = buildTree([
+      { path: "open", kind: "directory", locked: false },
+      { path: "open/pinned.md", kind: "document", locked: true },
+      { path: "private", kind: "directory", locked: true },
+      doc("free.md"),
+    ]);
+
+    expect([...lockedFolders(tree)]).toEqual(["private"]);
+    expect(containsLocked(tree.find((node) => node.path === "open")!)).toBe(true);
+    expect(containsLocked(tree.find((node) => node.path === "free.md")!)).toBe(false);
   });
 
   it("keeps a folder that holds nothing yet", () => {

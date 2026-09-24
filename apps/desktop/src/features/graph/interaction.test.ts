@@ -144,9 +144,9 @@ describe("framing the graph", () => {
     // The bug this exists to stop: drawing at the configured scale about the
     // origin left 9 of 13 nodes past the bottom-right edge of the pane.
     const nodes = [
-      { id: "a", title: "a", inAios: false, degree: 1, x: 32, y: -12 },
-      { id: "b", title: "b", inAios: false, degree: 1, x: 300, y: 317 },
-      { id: "c", title: "c", inAios: false, degree: 1, x: 150, y: 150 },
+      { id: "a", title: "a", degree: 1, x: 32, y: -12 },
+      { id: "b", title: "b", degree: 1, x: 300, y: 317 },
+      { id: "c", title: "c", degree: 1, x: 150, y: 150 },
     ];
 
     const transform = fitToView(nodes, size);
@@ -162,8 +162,8 @@ describe("framing the graph", () => {
 
   it("centres the graph rather than pinning it to a corner", () => {
     const nodes = [
-      { id: "a", title: "a", inAios: false, degree: 1, x: 0, y: 0 },
-      { id: "b", title: "b", inAios: false, degree: 1, x: 100, y: 100 },
+      { id: "a", title: "a", degree: 1, x: 0, y: 0 },
+      { id: "b", title: "b", degree: 1, x: 100, y: 100 },
     ];
 
     const middle = worldToScreen({ x: 50, y: 50 }, fitToView(nodes, size));
@@ -176,8 +176,8 @@ describe("framing the graph", () => {
     // quarter of the way down it: a fixed 40px of padding, and a magnification
     // cap of 1.4 that bound first for any ordinary vault.
     const nodes = [
-      { id: "a", title: "a", inAios: false, degree: 1, x: 0, y: 0 },
-      { id: "b", title: "b", inAios: false, degree: 1, x: 300, y: 200 },
+      { id: "a", title: "a", degree: 1, x: 0, y: 0 },
+      { id: "b", title: "b", degree: 1, x: 300, y: 200 },
     ];
     const pane = { width: 400, height: 900 };
 
@@ -191,8 +191,8 @@ describe("framing the graph", () => {
     // Two linked notes are sixty units apart. Filled to the pane they would be
     // two dots the size of coins.
     const nodes = [
-      { id: "a", title: "a", inAios: false, degree: 1, x: 0, y: 0 },
-      { id: "b", title: "b", inAios: false, degree: 1, x: 60, y: 0 },
+      { id: "a", title: "a", degree: 1, x: 0, y: 0 },
+      { id: "b", title: "b", degree: 1, x: 60, y: 0 },
     ];
 
     const { k } = fitToView(nodes, { width: 400, height: 900 });
@@ -200,7 +200,7 @@ describe("framing the graph", () => {
   });
 
   it("never magnifies past the cap it is given", () => {
-    const nodes = [{ id: "a", title: "a", inAios: false, degree: 1, x: 10, y: 10 }];
+    const nodes = [{ id: "a", title: "a", degree: 1, x: 10, y: 10 }];
     expect(fitToView(nodes, size, 1.4).k).toBeLessThanOrEqual(1.4);
   });
 
@@ -216,8 +216,8 @@ describe("keeping a layout across a rebuild", () => {
     // dropped back to a fresh spiral each time someone finished a sentence.
     const input = {
       nodes: [
-        { path: "a.md", title: "a", in_aios: false },
-        { path: "b.md", title: "b", in_aios: false },
+        { path: "a.md", title: "a" },
+        { path: "b.md", title: "b" },
       ],
       edges: [{ from: 0, to: 1 }],
     };
@@ -233,7 +233,7 @@ describe("keeping a layout across a rebuild", () => {
 
   it("leaves a note that is new to the graph unplaced, so d3 positions it", () => {
     const before = buildModel(
-      { nodes: [{ path: "a.md", title: "a", in_aios: false }], edges: [] },
+      { nodes: [{ path: "a.md", title: "a" }], edges: [] },
       GRAPH_DEFAULTS,
     );
     before.nodes[0]!.x = 10;
@@ -241,8 +241,8 @@ describe("keeping a layout across a rebuild", () => {
     const after = buildModel(
       {
         nodes: [
-          { path: "a.md", title: "a", in_aios: false },
-          { path: "new.md", title: "new", in_aios: false },
+          { path: "a.md", title: "a" },
+          { path: "new.md", title: "new" },
         ],
         edges: [],
       },
@@ -255,11 +255,11 @@ describe("keeping a layout across a rebuild", () => {
   });
 
   it("recognises the same graph arriving as new objects", () => {
-    const input = { nodes: [{ path: "a.md", title: "a", in_aios: false }], edges: [] };
+    const input = { nodes: [{ path: "a.md", title: "a" }], edges: [] };
     expect(sameShape(buildModel(input, GRAPH_DEFAULTS), buildModel(input, GRAPH_DEFAULTS))).toBe(true);
 
     const grown = {
-      nodes: [...input.nodes, { path: "b.md", title: "b", in_aios: false }],
+      nodes: [...input.nodes, { path: "b.md", title: "b" }],
       edges: [],
     };
     expect(sameShape(buildModel(input, GRAPH_DEFAULTS), buildModel(grown, GRAPH_DEFAULTS))).toBe(false);
@@ -271,9 +271,9 @@ describe("neighbourhoods", () => {
     const model = buildModel(
       {
         nodes: [
-          { path: "a.md", title: "a", in_aios: false },
-          { path: "b.md", title: "b", in_aios: false },
-          { path: "c.md", title: "c", in_aios: false },
+          { path: "a.md", title: "a" },
+          { path: "b.md", title: "b" },
+          { path: "c.md", title: "c" },
         ],
         edges: [{ from: 0, to: 1 }],
       },

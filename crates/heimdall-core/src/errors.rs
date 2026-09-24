@@ -20,6 +20,7 @@ pub enum ErrorCode {
     AlreadyExists,
     NotInitialized,
     RevisionConflict,
+    Locked,
     IoError,
     InternalError,
 }
@@ -34,6 +35,7 @@ impl ErrorCode {
             Self::AlreadyExists => "ALREADY_EXISTS",
             Self::NotInitialized => "NOT_INITIALIZED",
             Self::RevisionConflict => "REVISION_CONFLICT",
+            Self::Locked => "LOCKED",
             Self::IoError => "IO_ERROR",
             Self::InternalError => "INTERNAL_ERROR",
         }
@@ -101,6 +103,10 @@ impl Error {
 
     pub fn revision_conflict(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::RevisionConflict, message)
+    }
+
+    pub fn locked(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::Locked, message)
     }
 
     pub fn io_error(message: impl Into<String>) -> Self {
@@ -199,7 +205,7 @@ mod tests {
 
     #[test]
     fn absolute_paths_are_redacted_from_messages() {
-        let err = io::Error::other("failed at /Users/someone/Secret Vault/aios");
+        let err = io::Error::other("failed at /Users/someone/Secret Vault/notes");
         let message = Error::from_io("read", &err).message;
         assert!(!message.contains("/Users/someone"), "{message}");
     }

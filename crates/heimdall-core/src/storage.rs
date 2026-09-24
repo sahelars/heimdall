@@ -6,9 +6,10 @@
 //! absolute children, and symlinks pointing out of the vault fail at the
 //! syscall boundary rather than being filtered by hand.
 //!
-//! The one thing deliberately kept outside that capability is the write lock.
-//! It is Heimdall's own coordination state rather than vault content, and a
-//! vault is a folder of the user's Markdown — nothing of ours belongs in it.
+//! The things deliberately kept outside that capability are the write lock and
+//! the vault's note locks. Both are Heimdall's own state rather than vault
+//! content, and a vault is a folder of the user's Markdown — nothing of ours
+//! belongs in it.
 
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,8 +21,9 @@ use cap_std::fs::{Dir, OpenOptions};
 use fs4::fs_std::FileExt;
 use time::OffsetDateTime;
 
+use crate::appdata;
 use crate::errors::{Error, Result};
-use crate::paths::{self, RelPath};
+use crate::paths::RelPath;
 use crate::revisions::Revision;
 use crate::timestamps;
 
@@ -57,29 +59,27 @@ pub struct Vault {
     /// The canonical location of this vault. Canonical rather than as-typed
     /// because it is the key two processes must agree on to share a lock.
     root: Utf8PathBuf,
-    /// Where this vault's write lock lives, outside the vault itself.
-    lock_dir: Utf8PathBuf,
+    /// Heimdall's per-user application data, outside the vault itself: the
+    /// write lock and the note-lock rules both live beneath it.
+    data_dir: Utf8PathBuf,
 }
 
 impl Vault {
     /// Open an existing directory as a vault capability.
-    ///
-    /// This does not check initialization; call [`Vault::ensure_initialized`]
-    /// before any domain operation that reads or writes managed content.
     pub fn open(root: &Utf8Path) -> Result<Self> {
-        Self::open_inner(root, default_lock_dir())
+        Self::open_inner(root, appdata::data_dir())
     }
 
-    /// Open a vault whose write lock lives somewhere chosen by the caller.
+    /// Open a vault whose application data lives somewhere chosen by the caller.
     ///
     /// Only tests need this. They must not write into the developer's real
     /// application-data directory, and an environment variable would be racy
     /// across the parallel threads the concurrency tests already use.
-    pub fn open_with_lock_dir(root: &Utf8Path, lock_dir: &Utf8Path) -> Result<Self> {
-        Self::open_inner(root, lock_dir.to_owned())
+    pub fn open_with_data_dir(root: &Utf8Path, data_dir: &Utf8Path) -> Result<Self> {
+        Self::open_inner(root, data_dir.to_owned())
     }
 
-    fn open_inner(root: &Utf8Path, lock_dir: Utf8PathBuf) -> Result<Self> {
+    fn open_inner(root: &Utf8Path, data_dir: Utf8PathBuf) -> Result<Self> {
         let dir = Dir::open_ambient_dir(root.as_std_path(), ambient_authority()).map_err(|err| {
             match err.kind() {
                 std::io::ErrorKind::NotFound => {
@@ -103,7 +103,7 @@ impl Vault {
         Ok(Self {
             dir,
             root,
-            lock_dir,
+            data_dir,
         })
     }
 
@@ -112,31 +112,9 @@ impl Vault {
         &self.root
     }
 
-    /// Verify the managed `aios/` structure exists, or explain how to fix it.
-    ///
-    /// The managed directories plus the main memory are the whole skeleton: the
-    /// memory is the one file a vault must have, because it is where a user's
-    /// standing instructions to their assistant live (SPEC §6).
-    pub fn ensure_initialized(&self) -> Result<()> {
-        let mut missing: Vec<String> = Vec::new();
-
-        for dir in paths::REQUIRED_DIRS {
-            if !self.dir.is_dir(dir) {
-                missing.push(format!("{dir}/"));
-            }
-        }
-        if !self.dir.is_file(paths::MAIN_MEMORY_FILE) {
-            missing.push(paths::MAIN_MEMORY_FILE.to_string());
-        }
-
-        if missing.is_empty() {
-            return Ok(());
-        }
-        Err(Error::not_initialized(
-            "this vault has no complete aios/ structure; run \"heimdall create\" against it \
-             (or initialize it from the desktop app) to add the missing managed content",
-        )
-        .with_detail("missing", missing))
+    /// Where this vault's application data lives.
+    pub fn data_dir(&self) -> &Utf8Path {
+        &self.data_dir
     }
 
     pub fn exists(&self, path: &RelPath) -> bool {
@@ -284,7 +262,7 @@ impl Vault {
     /// POSIX `rename` silently replaces the destination, which SPEC §14 forbids.
     /// `cap-std` exposes no `renameat2(RENAME_NOREPLACE)`, so the check and the
     /// rename must both happen under the destination's file lock — the same
-    /// discipline `write_memory` uses around revision comparison. Callers are
+    /// discipline `write` uses around revision comparison. Callers are
     /// responsible for holding that lock.
     ///
     /// Being honest about what this does and does not guarantee: it serializes
@@ -421,8 +399,20 @@ impl Vault {
     /// unlinks a held lock file is the same divergence that made sidecars
     /// unsafe to clean up.
     pub fn lock_path(&self) -> Utf8PathBuf {
-        let key = blake3::hash(self.root.as_str().as_bytes()).to_hex();
-        self.lock_dir.join(format!("{key}.lock"))
+        self.data_dir.join("locks").join(format!("{}.lock", self.key()))
+    }
+
+    /// Where this vault's note-lock rules live (see [`crate::notelocks`]).
+    ///
+    /// Beside the write lock for the same reason and under the same key: they
+    /// are Heimdall's state about the vault, not part of it.
+    pub fn state_path(&self) -> Utf8PathBuf {
+        self.data_dir.join("vaults").join(format!("{}.json", self.key()))
+    }
+
+    /// The name every per-vault file is keyed by: a hash of the canonical root.
+    fn key(&self) -> String {
+        blake3::hash(self.root.as_str().as_bytes()).to_hex().to_string()
     }
 
     /// Open (creating if needed) the file this vault's lock lives on.
@@ -518,41 +508,11 @@ fn acquire(file: &std::fs::File, target: &RelPath, wait_limit: Duration) -> Resu
 /// The lock key has to be one both processes compute identically, and a path as
 /// typed is not that: `~/vault`, `./vault`, and a symlink to it are three
 /// spellings of one directory.
-fn canonicalize(root: &Utf8Path) -> Result<Utf8PathBuf> {
+pub(crate) fn canonicalize(root: &Utf8Path) -> Result<Utf8PathBuf> {
     let resolved = std::fs::canonicalize(root.as_std_path())
         .map_err(|err| Error::from_io("resolve vault path", &err))?;
     Utf8PathBuf::from_path_buf(resolved)
         .map_err(|_| Error::invalid_input("vault path is not valid UTF-8"))
-}
-
-/// Where write locks live when the caller has not chosen somewhere.
-///
-/// Application data rather than cache: the system may purge a cache, and a
-/// purge that unlinks a lock file some process is holding would leave the next
-/// writer locking a different inode — the divergence that makes lock files
-/// unsafe to remove at all. `HEIMDALL_LOCK_DIR` overrides it for a sandboxed
-/// deployment with no writable home.
-fn default_lock_dir() -> Utf8PathBuf {
-    if let Some(raw) = std::env::var_os("HEIMDALL_LOCK_DIR") {
-        if let Ok(path) = Utf8PathBuf::from_path_buf(raw.into()) {
-            return path;
-        }
-    }
-    // A test run must never write into the developer's real application data.
-    // Integration tests pass a directory explicitly; this covers the unit tests
-    // in this crate, which open vaults from a dozen different modules.
-    if cfg!(test) {
-        return Utf8PathBuf::from_path_buf(std::env::temp_dir())
-            .unwrap_or_else(|_| Utf8PathBuf::from("/tmp"))
-            .join("heimdall-test-locks");
-    }
-    let base = dirs::data_local_dir()
-        .and_then(|path| Utf8PathBuf::from_path_buf(path).ok())
-        .unwrap_or_else(|| {
-            Utf8PathBuf::from_path_buf(std::env::temp_dir())
-                .unwrap_or_else(|_| Utf8PathBuf::from("/tmp"))
-        });
-    base.join("heimdall").join("locks")
 }
 
 /// `cap-std` addresses the directory itself as `.`, not as an empty path.
@@ -584,28 +544,6 @@ mod tests {
     fn opening_a_missing_directory_is_not_found() {
         let err = Vault::open(Utf8Path::new("/nonexistent-heimdall-vault")).unwrap_err();
         assert_eq!(err.code, ErrorCode::NotFound);
-    }
-
-    #[test]
-    fn an_empty_directory_is_not_an_initialized_vault() {
-        let (_tmp, vault) = temp_vault();
-        let err = vault.ensure_initialized().unwrap_err();
-        assert_eq!(err.code, ErrorCode::NotInitialized);
-        assert!(err.message.contains("heimdall create"), "{}", err.message);
-        assert!(err.details["missing"].as_array().unwrap().len() > 1);
-    }
-
-    #[test]
-    fn the_managed_skeleton_satisfies_initialization() {
-        let (_tmp, vault) = temp_vault();
-        for dir in paths::REQUIRED_DIRS {
-            vault.create_dir_all(&rel(dir)).unwrap();
-        }
-        vault
-            .atomic_write(&rel(paths::MAIN_MEMORY_FILE), b"# Memory\n")
-            .unwrap();
-
-        vault.ensure_initialized().unwrap();
     }
 
     #[test]
@@ -649,13 +587,13 @@ mod tests {
     #[test]
     fn create_dir_all_reports_only_the_directories_it_made() {
         let (_tmp, vault) = temp_vault();
-        let created = vault.create_dir_all(&rel("aios/memories/extended")).unwrap();
+        let created = vault.create_dir_all(&rel("ideas/drafts/old")).unwrap();
         assert_eq!(
             created.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
-            ["aios", "aios/memories", "aios/memories/extended"]
+            ["ideas", "ideas/drafts", "ideas/drafts/old"]
         );
         // Re-running creates nothing.
-        assert!(vault.create_dir_all(&rel("aios/memories")).unwrap().is_empty());
+        assert!(vault.create_dir_all(&rel("ideas/drafts")).unwrap().is_empty());
     }
 
     #[test]
@@ -719,7 +657,7 @@ mod tests {
     #[test]
     fn a_file_lock_is_released_when_the_body_returns() {
         let (_tmp, vault) = temp_vault();
-        let path = rel("memory.md");
+        let path = rel("note.md");
         vault.atomic_write(&path, b"one").unwrap();
 
         let value = vault.with_write_lock(&path, || Ok(7)).unwrap();
@@ -731,7 +669,7 @@ mod tests {
     #[test]
     fn a_lock_failure_inside_the_body_still_releases_the_lock() {
         let (_tmp, vault) = temp_vault();
-        let path = rel("memory.md");
+        let path = rel("note.md");
         vault.atomic_write(&path, b"one").unwrap();
 
         let err = vault
@@ -744,7 +682,7 @@ mod tests {
     #[test]
     fn waiting_for_a_stuck_holder_gives_up_instead_of_hanging() {
         let (_tmp, vault) = temp_vault();
-        let path = rel("memory.md");
+        let path = rel("note.md");
         vault.atomic_write(&path, b"one").unwrap();
 
         // Hold the file this vault actually locks, the way a wedged process
@@ -771,7 +709,7 @@ mod tests {
         let waiter = open(false);
         let err = acquire(&waiter, &path, Duration::from_millis(50)).unwrap_err();
         assert_eq!(err.code, ErrorCode::IoError);
-        assert_eq!(err.details["path"], "memory.md");
+        assert_eq!(err.details["path"], "note.md");
 
         // Once the holder lets go, the same waiter succeeds.
         FileExt::unlock(&holder).unwrap();
@@ -809,7 +747,7 @@ mod tests {
         // The reason the lock moved out of the vault at all. A sidecar could
         // never be safely removed, so every note ever written left one behind.
         let (tmp, vault) = temp_vault();
-        let path = rel("memory.md");
+        let path = rel("note.md");
         vault.atomic_write(&path, b"one").unwrap();
         vault.with_write_lock(&path, || Ok(())).unwrap();
 
@@ -833,18 +771,18 @@ mod tests {
         // moved out still has one beside every note it ever wrote, and those
         // must stay invisible rather than appearing as content.
         let (_tmp, vault) = temp_vault();
-        let path = rel("memory.md");
+        let path = rel("note.md");
         vault.atomic_write(&path, b"one").unwrap();
-        vault.atomic_write(&rel(".memory.md.lock"), b"").unwrap();
+        vault.atomic_write(&rel(".note.md.lock"), b"").unwrap();
 
         let listable: Vec<_> = vault
             .children(&RelPath::root())
             .unwrap()
             .into_iter()
             .map(|c| c.name)
-            .filter(|name| paths::is_listable(name))
+            .filter(|name| crate::paths::is_listable(name))
             .collect();
-        assert_eq!(listable, vec!["memory.md"]);
+        assert_eq!(listable, vec!["note.md"]);
     }
 }
 

@@ -5,7 +5,7 @@
  * about — can be pinned down without rendering anything.
  */
 
-import { baseName, isProtected, titleOf } from "../../api/source";
+import { baseName, parentOf, titleOf } from "../../api/source";
 
 export interface TreeNode {
   /** Vault-relative path. A folder has no extension. */
@@ -13,13 +13,15 @@ export interface TreeNode {
   /** What the row shows: a folder's name, or a note's name without `.md`. */
   label: string;
   kind: "directory" | "document";
-  inAios: boolean;
+  /** Read-only, by its own rule or an enclosing folder's. */
+  locked: boolean;
   children: TreeNode[];
 }
 
 export interface TreeInput {
   path: string;
   kind: "directory" | "document";
+  locked?: boolean;
 }
 
 export type SortOrder = "name" | "name-desc" | "modified";
@@ -27,10 +29,10 @@ export type SortOrder = "name" | "name-desc" | "modified";
 /**
  * Build the tree.
  *
- * Folders are inferred from the paths themselves as well as taken from the
- * input, because the link index reports notes only — the protected tree reaches
- * the sidebar through it, and `aios/memories/extended/x.md` has to imply the two
- * folders above it or the subtree would be flat.
+ * The recursive listing reports every folder it reaches, but a folder past
+ * its depth limit can still be implied by a note inside it, so folders are also
+ * inferred from paths. An inferred folder takes its lock state from its parent,
+ * which is the one rule that can reach it without being listed.
  */
 export function buildTree(entries: TreeInput[], order: SortOrder = "name"): TreeNode[] {
   const root: TreeNode[] = [];
@@ -40,21 +42,26 @@ export function buildTree(entries: TreeInput[], order: SortOrder = "name"): Tree
     const existing = folders.get(path);
     if (existing) return existing;
 
+    const parent = path.includes("/") ? folderAt(parentOf(path)) : null;
     const node: TreeNode = {
       path,
       label: baseName(path),
       kind: "directory",
-      inAios: isProtected(path),
+      locked: explicit.get(path) ?? parent?.locked ?? false,
       children: [],
     };
     folders.set(path, node);
 
-    const slash = path.lastIndexOf("/");
-    if (slash === -1) root.push(node);
-    else folderAt(path.slice(0, slash)).children.push(node);
+    if (parent) parent.children.push(node);
+    else root.push(node);
 
     return node;
   };
+
+  const explicit = new Map<string, boolean>();
+  for (const entry of entries) {
+    if (entry.kind === "directory" && entry.path) explicit.set(entry.path, entry.locked ?? false);
+  }
 
   // Folders first, so a directory that also appears implicitly is only made
   // once and keeps the identity the explicit entry gave it.
@@ -68,7 +75,7 @@ export function buildTree(entries: TreeInput[], order: SortOrder = "name"): Tree
       path: entry.path,
       label: titleOf(entry.path),
       kind: "document",
-      inAios: isProtected(entry.path),
+      locked: entry.locked ?? false,
       children: [],
     };
     const slash = entry.path.lastIndexOf("/");
@@ -95,6 +102,25 @@ export function folderPaths(nodes: TreeNode[]): string[] {
   return nodes.flatMap((node) =>
     node.kind === "directory" ? [node.path, ...folderPaths(node.children)] : [],
   );
+}
+
+/** Whether a node or anything beneath it is locked. */
+export function containsLocked(node: TreeNode): boolean {
+  return node.locked || node.children.some(containsLocked);
+}
+
+/** Every folder path whose own state is locked, for testing drop targets. */
+export function lockedFolders(nodes: TreeNode[]): Set<string> {
+  const found = new Set<string>();
+  const walk = (list: TreeNode[]) => {
+    for (const node of list) {
+      if (node.kind !== "directory") continue;
+      if (node.locked) found.add(node.path);
+      walk(node.children);
+    }
+  };
+  walk(nodes);
+  return found;
 }
 
 /** Every folder that has to be open for `path` to be visible. */

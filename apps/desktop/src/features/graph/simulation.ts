@@ -77,7 +77,6 @@ export const REHEAT_ALPHA = 0.3;
 export interface SimNode extends SimulationNodeDatum {
   id: string;
   title: string;
-  inAios: boolean;
   degree: number;
 }
 
@@ -92,7 +91,7 @@ export interface GraphModel {
 }
 
 export interface GraphInput {
-  nodes: { path: string; title: string; in_aios: boolean }[];
+  nodes: { path: string; title: string }[];
   edges: { from: number; to: number }[];
 }
 
@@ -132,7 +131,6 @@ export function buildModel(
       return {
         id: node.path,
         title: node.title,
-        inAios: node.in_aios,
         degree: degree.get(node.path) ?? 0,
         // Undefined for a note new to the graph, which is what tells d3 to
         // place it rather than leave it at the origin.

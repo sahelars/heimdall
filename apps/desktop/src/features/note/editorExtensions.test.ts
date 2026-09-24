@@ -110,3 +110,24 @@ describe("holding a rule's colour", () => {
     expect(rules("")).toEqual([]);
   });
 });
+
+describe("editability", () => {
+  it("can be switched without rebuilding the state, keeping the document and history", async () => {
+    const { editability, editableCompartment } = await import("./editorExtensions");
+    const { history, undoDepth } = await import("@codemirror/commands");
+    let state = EditorState.create({
+      doc: "one",
+      extensions: [history(), editableCompartment.of(editability(true))],
+    });
+    state = state.update({ changes: { from: 3, insert: " two" } }).state;
+    expect(state.readOnly).toBe(false);
+
+    state = state.update({ effects: editableCompartment.reconfigure(editability(false)) }).state;
+    expect(state.readOnly).toBe(true);
+    expect(state.doc.toString()).toBe("one two");
+    expect(undoDepth(state)).toBe(1);
+
+    state = state.update({ effects: editableCompartment.reconfigure(editability(true)) }).state;
+    expect(state.readOnly).toBe(false);
+  });
+});

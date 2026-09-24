@@ -13,21 +13,21 @@ pub fn binary() -> PathBuf {
     assert_cmd::cargo::cargo_bin("heimdall")
 }
 
-/// Where the forked binaries keep their write locks.
+/// Where the forked binaries keep Heimdall's application data.
 ///
-/// These are real `heimdall` processes, so they resolve the production lock
+/// These are real `heimdall` processes, so they resolve the production data
 /// directory — the developer's actual application-data folder — unless told
-/// otherwise. `HEIMDALL_LOCK_DIR` is what tells them otherwise. Every vault
-/// here is a fresh temp directory and lock files are named by a hash of the
-/// vault path, so one shared directory cannot collide.
-pub fn lock_dir() -> PathBuf {
-    std::env::temp_dir().join("heimdall-test-locks")
+/// otherwise. `HEIMDALL_DATA_DIR` is what tells them otherwise. Every vault
+/// here is a fresh temp directory and per-vault files are named by a hash of
+/// the vault path, so one shared directory cannot collide.
+pub fn data_dir() -> PathBuf {
+    std::env::temp_dir().join("heimdall-test-data")
 }
 
 /// A `heimdall` command that will not write into the real application data.
 pub fn command() -> std::process::Command {
     let mut command = std::process::Command::new(binary());
-    command.env("HEIMDALL_LOCK_DIR", lock_dir());
+    command.env("HEIMDALL_DATA_DIR", data_dir());
     command
 }
 
@@ -83,8 +83,8 @@ pub fn error_code(output: &Output) -> String {
     envelope["error"]["code"].as_str().unwrap().to_string()
 }
 
-/// The revision currently stored for the main memory.
-pub fn main_memory_revision(vault: &str) -> String {
-    let output = run(&["read-memory", "--vault", vault]);
-    data(&output)["revision"].as_str().unwrap().to_string()
+/// The revision currently stored for one note.
+pub fn revision_of(vault: &str, path: &str) -> String {
+    let output = run(&["read", path, "--vault", vault]);
+    data(&output)["document"]["revision"].as_str().unwrap().to_string()
 }

@@ -12,36 +12,64 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 
-const { readWholeDocument, saveDocument, listAllDocuments, CliFailure } = await import(
-  "./documents"
-);
+const {
+  readWholeDocument,
+  readLockState,
+  saveDocument,
+  listAllDocuments,
+  lockPath,
+  unlockPath,
+  CliFailure,
+} = await import("./documents");
 
-/** One chunk of a `read-documents` response. */
+/** One chunk of a `read` response for a note. */
 function chunk(options: {
   content: string;
   complete: boolean;
   nextLine?: number | null;
   revision?: string;
   sizeBytes: number;
+  locked?: boolean;
+  lockedAt?: string;
 }) {
   return {
     ok: true,
     data: {
-      documents: [
-        {
-          path: "ideas/note.md",
-          returned: true,
-          content: options.content,
-          start_line: 1,
-          end_line: 1,
-          next_line: options.complete ? null : (options.nextLine ?? 2),
-          complete: options.complete,
-          size_bytes: options.sizeBytes,
-          revision: options.revision ?? "blake3:aa",
-        },
-      ],
-      total_bytes: options.content.length,
-      truncated: false,
+      path: "ideas/note.md",
+      kind: "document",
+      locked: options.locked ?? false,
+      ...(options.locked ? { locked_at: options.lockedAt ?? "ideas/note.md" } : {}),
+      document: {
+        path: "ideas/note.md",
+        content: options.content,
+        start_line: 1,
+        end_line: 1,
+        next_line: options.complete ? null : (options.nextLine ?? 2),
+        complete: options.complete,
+        size_bytes: options.sizeBytes,
+        revision: options.revision ?? "blake3:aa",
+      },
+    },
+  };
+}
+
+/** One page of a `read` response for a folder. */
+function page(
+  entries: { path: string; kind: "document" | "directory"; locked?: boolean }[],
+  nextCursor: string | null,
+  options: { scanGuardHit?: boolean; locked?: boolean } = {},
+) {
+  return {
+    ok: true,
+    data: {
+      path: "",
+      kind: "directory",
+      locked: options.locked ?? false,
+      listing: {
+        entries: entries.map((entry) => ({ modified_at: "", locked: false, ...entry })),
+        next_cursor: nextCursor,
+        scan_guard_hit: options.scanGuardHit ?? false,
+      },
     },
   };
 }
@@ -62,7 +90,33 @@ describe("reading a whole document", () => {
     expect(document.content).toBe(content);
     expect(document.revision).toBe("blake3:aa");
     expect(document.chunks).toBe(1);
+    expect(document.locked).toBe(false);
+    expect(document.lockedAt).toBeNull();
     expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("invoke_cli", {
+      command: "read",
+      request: {
+        vault: "/v",
+        path: "ideas/note.md",
+        "start-line": 1,
+        "max-lines": 1000,
+        "max-total-bytes": 262_144,
+      },
+      stdin: undefined,
+    });
+  });
+
+  it("reports a locked note, and the rule that locks it", async () => {
+    const content = "# Note\n";
+    invoke.mockResolvedValue(
+      chunk({ content, complete: true, sizeBytes: bytes(content), locked: true, lockedAt: "ideas" }),
+    );
+
+    const document = await readWholeDocument("/v", "ideas/note.md");
+
+    expect(document.content).toBe(content);
+    expect(document.locked).toBe(true);
+    expect(document.lockedAt).toBe("ideas");
   });
 
   it("follows the continuation and reassembles the chunks in order", async () => {
@@ -139,17 +193,10 @@ describe("reading a whole document", () => {
     await expect(readWholeDocument("/v", "ideas/note.md")).rejects.toThrow(/assembled to/);
   });
 
-  it("surfaces a skipped document rather than returning an empty file", async () => {
-    invoke.mockResolvedValue({
-      ok: true,
-      data: {
-        documents: [{ path: "ideas/note.md", returned: false, reason: "byte_budget_exhausted" }],
-        total_bytes: 0,
-        truncated: true,
-      },
-    });
+  it("refuses a folder rather than returning an empty file", async () => {
+    invoke.mockResolvedValue(page([], null));
 
-    await expect(readWholeDocument("/v", "ideas/note.md")).rejects.toThrow(/was not returned/);
+    await expect(readWholeDocument("/v", "ideas")).rejects.toThrow(/is a folder/);
   });
 
   it("passes a domain failure through with its code intact", async () => {
@@ -175,7 +222,7 @@ describe("saving", () => {
 
     expect(result).toEqual({ revision: "blake3:bb", created: false });
     expect(invoke).toHaveBeenCalledWith("invoke_cli", {
-      command: "write-document",
+      command: "write",
       request: { vault: "/v", path: "ideas/note.md", "expected-revision": "blake3:aa" },
       stdin: "body\n",
     });
@@ -191,7 +238,10 @@ describe("saving", () => {
 
     // Omitting the revision is what the CLI treats as a caller mistake, which is
     // exactly the protection this relies on.
-    expect(invoke.mock.calls[0]![1]).toMatchObject({ request: { create: true } });
+    expect(invoke.mock.calls[0]![1]).toMatchObject({
+      command: "write",
+      request: { vault: "/v", path: "ideas/new.md", create: true },
+    });
   });
 
   it("raises a revision conflict instead of reporting success", async () => {
@@ -208,143 +258,123 @@ describe("saving", () => {
       CliFailure,
     );
   });
+
+  it("carries a lock refusal through with the rule that caused it", async () => {
+    invoke.mockResolvedValue({
+      ok: false,
+      error: {
+        code: "LOCKED",
+        message: '"ideas/note.md" is locked',
+        details: { path: "ideas/note.md", locked_at: "ideas" },
+      },
+    });
+
+    await expect(saveDocument("/v", "ideas/note.md", "x", "blake3:aa")).rejects.toMatchObject({
+      error: { code: "LOCKED", details: { locked_at: "ideas" } },
+    });
+  });
+});
+
+describe("locking", () => {
+  it("locks and unlocks one path", async () => {
+    invoke.mockResolvedValue({
+      ok: true,
+      data: { path: "ideas", kind: "directory", locked: true, changed: true },
+    });
+
+    const locked = await lockPath("/v", "ideas");
+    expect(locked).toEqual({ path: "ideas", kind: "directory", locked: true, changed: true });
+    expect(invoke).toHaveBeenLastCalledWith("invoke_cli", {
+      command: "lock",
+      request: { vault: "/v", path: "ideas" },
+      stdin: undefined,
+    });
+
+    invoke.mockResolvedValue({
+      ok: true,
+      data: { path: "ideas/note.md", kind: "document", locked: false, changed: true },
+    });
+    await unlockPath("/v", "ideas/note.md");
+    expect(invoke).toHaveBeenLastCalledWith("invoke_cli", {
+      command: "unlock",
+      request: { vault: "/v", path: "ideas/note.md" },
+      stdin: undefined,
+    });
+  });
+
+  it("locks the whole vault by naming no path at all", async () => {
+    invoke.mockResolvedValue({
+      ok: true,
+      data: { path: "", kind: "directory", locked: true, changed: true },
+    });
+
+    await lockPath("/v", null);
+    expect(invoke).toHaveBeenCalledWith("invoke_cli", {
+      command: "lock",
+      request: { vault: "/v" },
+      stdin: undefined,
+    });
+  });
+
+  it("passes a failure through", async () => {
+    invoke.mockResolvedValue({ ok: false, error: { code: "NOT_FOUND", message: "no such path" } });
+
+    await expect(unlockPath("/v", "gone.md")).rejects.toMatchObject({
+      error: { code: "NOT_FOUND" },
+    });
+  });
+
+  it("reads one path's lock state with a one-line read", async () => {
+    invoke.mockResolvedValue(
+      chunk({ content: "x\n", complete: false, sizeBytes: 9, locked: true, lockedAt: "" }),
+    );
+
+    expect(await readLockState("/v", "ideas/note.md")).toEqual({ locked: true, lockedAt: "" });
+    expect(invoke.mock.calls[0]![1]).toMatchObject({
+      command: "read",
+      request: { path: "ideas/note.md", "max-lines": 1 },
+    });
+  });
 });
 
 describe("listing the vault", () => {
   it("follows the cursor to the end and returns one flat list", async () => {
     invoke
-      .mockResolvedValueOnce({
-        ok: true,
-        data: {
-          entries: [{ path: "a.md", kind: "document", modified_at: "" }],
-          next_cursor: "a.md",
-          scan_guard_hit: false,
-        },
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        data: {
-          entries: [{ path: "b.md", kind: "document", modified_at: "" }],
-          next_cursor: null,
-          scan_guard_hit: false,
-        },
-      });
+      .mockResolvedValueOnce(page([{ path: "a.md", kind: "document" }], "a.md"))
+      .mockResolvedValueOnce(page([{ path: "b.md", kind: "document", locked: true }], null));
 
     const listing = await listAllDocuments("/v");
 
-    expect(listing.entries.map((entry) => entry.path)).toEqual(["a.md", "b.md"]);
+    expect(listing.entries.map((entry) => [entry.path, entry.locked])).toEqual([
+      ["a.md", false],
+      ["b.md", true],
+    ]);
     expect(listing.truncated).toBe(false);
-    expect(invoke.mock.calls[1]![1]).toMatchObject({ request: { cursor: "a.md" } });
+    expect(listing.rootLocked).toBe(false);
+    expect(invoke.mock.calls[0]![1]).toEqual({
+      command: "read",
+      request: { vault: "/v", recursive: true, "max-depth": 16, limit: 200 },
+      stdin: undefined,
+    });
+    expect(invoke.mock.calls[1]![1]).toMatchObject({ command: "read", request: { cursor: "a.md" } });
+  });
+
+  it("says when the vault root itself is locked", async () => {
+    invoke.mockResolvedValue(page([{ path: "a.md", kind: "document", locked: true }], null, { locked: true }));
+
+    const listing = await listAllDocuments("/v");
+
+    expect(listing.rootLocked).toBe(true);
   });
 
   it("reports a listing it had to stop rather than implying it is complete", async () => {
-    invoke.mockResolvedValue({
-      ok: true,
-      data: {
-        entries: [{ path: "a.md", kind: "document", modified_at: "" }],
-        next_cursor: "a.md",
-        scan_guard_hit: true,
-      },
-    });
+    invoke.mockResolvedValue(
+      page([{ path: "a.md", kind: "document" }], "a.md", { scanGuardHit: true }),
+    );
 
     const listing = await listAllDocuments("/v");
 
     expect(listing.truncated).toBe(true);
     expect(listing.scanGuardHit).toBe(true);
-  });
-});
-
-describe("reaching the protected tree", () => {
-  /** A complete single-chunk read, as the protected commands return it. */
-  function whole(path: string, content: string) {
-    return {
-      ok: true,
-      data: {
-        path,
-        content,
-        start_line: 1,
-        end_line: 1,
-        next_line: null,
-        complete: true,
-        size_bytes: bytes(content),
-        revision: "blake3:aa",
-      },
-    };
-  }
-
-  const cases: [string, string, string, Record<string, unknown>][] = [
-    ["the main memory", "aios/memories/memory.md", "read-memory", {}],
-    [
-      "an extended memory",
-      "aios/memories/extended/memory_1.md",
-      "read-memory",
-      { extended: "memory_1.md" },
-    ],
-    [
-      "a conversation",
-      "aios/conversations/2026-08-16_10-30-00.md",
-      "read-entry",
-      { kind: "conversation", id: "2026-08-16_10-30-00.md" },
-    ],
-    [
-      "a notification",
-      "aios/notifications/2026-08-16_10-30-00.md",
-      "read-entry",
-      { kind: "notification", id: "2026-08-16_10-30-00.md" },
-    ],
-  ];
-
-  it.each(cases)("reads %s with the command that owns it", async (_name, path, command, extra) => {
-    // `read-documents` excludes aios/ at every depth, so routing everything
-    // through it would mean the editor could not open half the tree — and
-    // making it able to would mean a general read tool, which is the one thing
-    // Heimdall does not have.
-    invoke.mockResolvedValue(whole(path, "body\n"));
-
-    const document = await readWholeDocument("/v", path);
-
-    expect(document.content).toBe("body\n");
-    expect(invoke).toHaveBeenCalledWith("invoke_cli", {
-      command,
-      request: { vault: "/v", "start-line": 1, "max-lines": 1000, ...extra },
-      stdin: undefined,
-    });
-  });
-
-  it("still reads an ordinary note through read-documents", async () => {
-    const content = "ordinary\n";
-    invoke.mockResolvedValue(chunk({ content, complete: true, sizeBytes: bytes(content) }));
-
-    await readWholeDocument("/v", "ideas/note.md");
-    expect(invoke.mock.calls[0]![1]).toMatchObject({ command: "read-documents" });
-  });
-
-  it("saves a memory with write-memory and an entry with write-entry", async () => {
-    invoke.mockResolvedValue({
-      ok: true,
-      data: { path: "x", new_revision: "blake3:bb", size_bytes: 1, created: false },
-    });
-
-    await saveDocument("/v", "aios/memories/extended/memory_1.md", "body\n", "blake3:aa");
-    expect(invoke.mock.calls[0]![1]).toMatchObject({
-      command: "write-memory",
-      request: { extended: "memory_1.md", "expected-revision": "blake3:aa" },
-      stdin: "body\n",
-    });
-
-    invoke.mockClear();
-    await saveDocument("/v", "aios/conversations/2026-08-16_10-30-00.md", "body\n", "blake3:aa");
-    expect(invoke.mock.calls[0]![1]).toMatchObject({
-      command: "write-entry",
-      request: { kind: "conversation", id: "2026-08-16_10-30-00.md" },
-    });
-  });
-
-  it("refuses to invent a create form for content that always exists", async () => {
-    // An entry exists by the time the editor can open it, so a null revision
-    // there is a caller mistake rather than a shorthand for "create it".
-    await expect(
-      saveDocument("/v", "aios/notifications/2026-08-16_10-30-00.md", "x", null),
-    ).rejects.toThrow(/created by an agent/);
   });
 });

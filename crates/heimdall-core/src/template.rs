@@ -42,68 +42,30 @@ impl Scaffold {
     }
 }
 
-/// Write the complete template: the `aios/` structure and the example notes.
+/// Write the complete template: the example notes it ships.
 pub fn scaffold_full(vault: &Vault) -> Result<Scaffold> {
-    scaffold(vault, false)
-}
-
-/// Add only the managed `aios/` structure, leaving every existing note and any
-/// other content untouched.
-pub fn scaffold_aios_only(vault: &Vault) -> Result<Scaffold> {
-    scaffold(vault, true)
-}
-
-fn scaffold(vault: &Vault, aios_only: bool) -> Result<Scaffold> {
     let mut scaffold = Scaffold::default();
-    match write_entries(vault, &TEMPLATE, aios_only, &mut scaffold) {
-        Ok(()) => {}
-        Err(err) => {
-            scaffold.rollback_empty_dirs(vault);
-            return Err(err);
-        }
-    }
-
-    // The managed container directories are created here rather than embedded:
-    // an empty directory has nothing to include, and neither git nor
-    // `include_dir` can carry one.
-    for dir in paths::REQUIRED_DIRS {
-        let path = RelPath::parse(dir)?;
-        match vault.create_dir_all(&path) {
-            Ok(created) => scaffold.created_dirs.extend(created),
-            Err(err) => {
-                scaffold.rollback_empty_dirs(vault);
-                return Err(err);
-            }
-        }
+    if let Err(err) = write_entries(vault, &TEMPLATE, &mut scaffold) {
+        scaffold.rollback_empty_dirs(vault);
+        return Err(err);
     }
     Ok(scaffold)
 }
 
-fn write_entries(
-    vault: &Vault,
-    dir: &Embedded<'_>,
-    aios_only: bool,
-    scaffold: &mut Scaffold,
-) -> Result<()> {
+fn write_entries(vault: &Vault, dir: &Embedded<'_>, scaffold: &mut Scaffold) -> Result<()> {
     for entry in dir.entries() {
         match entry {
             DirEntry::Dir(child) => {
                 let Some(path) = template_path(child.path())? else {
                     continue;
                 };
-                if aios_only && !path.is_in_aios() {
-                    continue;
-                }
                 scaffold.created_dirs.extend(vault.create_dir_all(&path)?);
-                write_entries(vault, child, aios_only, scaffold)?;
+                write_entries(vault, child, scaffold)?;
             }
             DirEntry::File(file) => {
                 let Some(path) = template_path(file.path())? else {
                     continue;
                 };
-                if aios_only && !path.is_in_aios() {
-                    continue;
-                }
                 // Existing files are never overwritten (SPEC §7).
                 if vault.exists(&path) {
                     continue;
@@ -146,21 +108,18 @@ mod tests {
 
     #[test]
     fn the_template_is_embedded() {
-        assert!(TEMPLATE.get_dir("aios").is_some());
-        assert!(TEMPLATE.get_file("aios/memories/memory.md").is_some());
+        assert!(TEMPLATE.get_file("ideas/hello_world.md").is_some());
+        // The protected tree is gone for good; a stray copy must not come back.
+        assert!(TEMPLATE.get_dir("aios").is_none());
     }
 
     #[test]
-    fn a_full_scaffold_writes_the_template_and_every_managed_directory() {
+    fn a_full_scaffold_writes_the_template() {
         let (_tmp, vault) = temp_vault();
         let scaffold = scaffold_full(&vault).unwrap();
 
-        vault.ensure_initialized().unwrap();
-        assert!(vault.is_file(&rel("aios/memories/memory.md")));
         assert!(vault.is_file(&rel("ideas/hello_world.md")));
-        for dir in paths::REQUIRED_DIRS {
-            assert!(vault.is_dir(&rel(dir)), "{dir} missing");
-        }
+        assert!(vault.is_file(&rel("projects/my_project.md")));
         assert!(!scaffold.created_files.is_empty());
     }
 
@@ -186,16 +145,6 @@ mod tests {
     }
 
     #[test]
-    fn an_aios_only_scaffold_adds_no_top_level_content() {
-        let (_tmp, vault) = temp_vault();
-        scaffold_aios_only(&vault).unwrap();
-
-        vault.ensure_initialized().unwrap();
-        assert!(!vault.exists(&rel("ideas")));
-        assert!(!vault.exists(&rel("projects")));
-    }
-
-    #[test]
     fn scaffolding_never_overwrites_an_existing_file() {
         let (_tmp, vault) = temp_vault();
         vault.create_dir_all(&rel("ideas")).unwrap();
@@ -215,6 +164,5 @@ mod tests {
 
         assert!(second.created_files.is_empty());
         assert!(second.created_dirs.is_empty());
-        vault.ensure_initialized().unwrap();
     }
 }

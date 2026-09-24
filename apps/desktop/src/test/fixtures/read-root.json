@@ -1,0 +1,91 @@
+{
+  "path": "",
+  "kind": "directory",
+  "locked": false,
+  "listing": {
+    "entries": [
+      {
+        "path": "ideas",
+        "kind": "directory",
+        "modified_at": "2026-08-21T23:54:22Z",
+        "locked": false
+      },
+      {
+        "path": "ideas/game_idea.md",
+        "kind": "document",
+        "size_bytes": 34,
+        "modified_at": "2026-08-21T23:54:22Z",
+        "locked": false
+      },
+      {
+        "path": "ideas/hello_world.md",
+        "kind": "document",
+        "size_bytes": 58,
+        "modified_at": "2026-08-21T23:54:22Z",
+        "locked": false
+      },
+      {
+        "path": "ideas/test_note.md",
+        "kind": "document",
+        "size_bytes": 12,
+        "modified_at": "2026-08-21T23:54:22Z",
+        "locked": false
+      },
+      {
+        "path": "projects",
+        "kind": "directory",
+        "modified_at": "2026-08-21T23:54:22Z",
+        "locked": false
+      },
+      {
+        "path": "projects/lens",
+        "kind": "directory",
+        "modified_at": "2026-08-21T23:54:22Z",
+        "locked": false
+      },
+      {
+        "path": "projects/lens/articles.md",
+        "kind": "document",
+        "size_bytes": 66,
+        "modified_at": "2026-08-21T23:54:22Z",
+        "locked": false
+      },
+      {
+        "path": "projects/lens/how_lens_works.md",
+        "kind": "document",
+        "size_bytes": 503,
+        "modified_at": "2026-08-21T23:54:22Z",
+        "locked": false
+      },
+      {
+        "path": "projects/lens/profile.md",
+        "kind": "document",
+        "size_bytes": 35,
+        "modified_at": "2026-08-21T23:54:22Z",
+        "locked": false
+      },
+      {
+        "path": "projects/my_project.md",
+        "kind": "document",
+        "size_bytes": 25,
+        "modified_at": "2026-08-21T23:54:22Z",
+        "locked": false
+      },
+      {
+        "path": "projects/heimdall",
+        "kind": "directory",
+        "modified_at": "2026-08-21T23:54:22Z",
+        "locked": false
+      },
+      {
+        "path": "projects/heimdall/what_is_heimdall.md",
+        "kind": "document",
+        "size_bytes": 46,
+        "modified_at": "2026-08-21T23:54:22Z",
+        "locked": false
+      }
+    ],
+    "next_cursor": null,
+    "scan_guard_hit": false
+  }
+}

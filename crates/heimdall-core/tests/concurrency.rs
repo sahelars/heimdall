@@ -6,26 +6,25 @@
 //! can report `NotFound` for a leaf another writer is creating at that very
 //! instant, so a write would fail with a bogus `NOT_FOUND` under load.
 
-use std::collections::HashSet;
 use std::sync::Mutex;
 
 use camino::Utf8PathBuf;
-use heimdall_core::commands::{create_entry, CreateEntryRequest, EntryKind};
-use heimdall_core::paths::{self, RelPath};
-use heimdall_core::{template, Vault};
+use heimdall_core::commands::{lock, write, LockRequest, WriteRequest};
+use heimdall_core::paths::RelPath;
+use heimdall_core::{template, ErrorCode, Vault};
 
 const THREADS: usize = 16;
 
 fn scaffolded_vault() -> (tempfile::TempDir, Vault) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-    let vault = Vault::open_with_lock_dir(&root, &test_lock_dir()).unwrap();
+    let vault = Vault::open_with_data_dir(&root, &test_data_dir()).unwrap();
     template::scaffold_full(&vault).unwrap();
     (dir, vault)
 }
 
-fn main_memory() -> RelPath {
-    RelPath::parse(paths::MAIN_MEMORY_FILE).unwrap()
+fn target_note() -> RelPath {
+    RelPath::parse("ideas/hello_world.md").unwrap()
 }
 
 #[test]
@@ -33,7 +32,7 @@ fn many_writers_can_acquire_one_lock_that_does_not_exist_yet() {
     // Every round starts with no sidecar, so all threads race to create it.
     for round in 0..15 {
         let (_tmp, vault) = scaffolded_vault();
-        let target = main_memory();
+        let target = target_note();
 
         std::thread::scope(|scope| {
             for _ in 0..THREADS {
@@ -53,7 +52,7 @@ fn many_writers_can_acquire_one_lock_that_does_not_exist_yet() {
 #[test]
 fn the_lock_actually_excludes_concurrent_holders() {
     let (_tmp, vault) = scaffolded_vault();
-    let target = main_memory();
+    let target = target_note();
     let inside = Mutex::new(0usize);
     let overlaps = Mutex::new(0usize);
 
@@ -88,7 +87,7 @@ fn the_lock_actually_excludes_concurrent_holders() {
 fn locked_read_modify_write_never_loses_or_corrupts_a_write() {
     for round in 0..4 {
         let (_tmp, vault) = scaffolded_vault();
-        let target = main_memory();
+        let target = target_note();
 
         std::thread::scope(|scope| {
             for index in 0..8 {
@@ -115,45 +114,97 @@ fn locked_read_modify_write_never_loses_or_corrupts_a_write() {
 }
 
 #[test]
-fn concurrent_entry_creation_gives_every_writer_its_own_file() {
+fn concurrent_creates_of_one_note_leave_exactly_one_winner() {
     for round in 0..8 {
         let (_tmp, vault) = scaffolded_vault();
-        let ids = Mutex::new(Vec::new());
+        let winners = Mutex::new(Vec::new());
 
         std::thread::scope(|scope| {
             for index in 0..THREADS {
-                let (vault, ids) = (&vault, &ids);
+                let (vault, winners) = (&vault, &winners);
                 scope.spawn(move || {
-                    let response = create_entry(
+                    let outcome = write(
                         vault,
-                        CreateEntryRequest {
-                            kind: EntryKind::Conversation,
+                        WriteRequest {
+                            path: "ideas/race.md".to_string(),
                             content: format!("body {index}\n"),
+                            expected_revision: None,
                         },
-                    )
-                    .unwrap_or_else(|err| panic!("round {round}: {} {}", err.code, err.message));
-                    ids.lock().unwrap().push(response.id);
+                    );
+                    match outcome {
+                        Ok(_) => winners.lock().unwrap().push(index),
+                        Err(err) => assert_eq!(err.code, ErrorCode::RevisionConflict, "round {round}"),
+                    }
                 });
             }
         });
 
-        // Entries are create-only: `O_EXCL` hands each writer a distinct name
-        // even when they all land in the same second.
-        let ids = ids.into_inner().unwrap();
-        let unique: HashSet<_> = ids.iter().collect();
-        assert_eq!(unique.len(), THREADS, "round {round} ids collided: {ids:?}");
+        // A create never replaces a note, so however many writers race for one
+        // path, exactly one of them made it.
+        let winners = winners.into_inner().unwrap();
+        assert_eq!(winners.len(), 1, "round {round}: {winners:?}");
+        let stored = String::from_utf8(vault.read(&RelPath::parse("ideas/race.md").unwrap()).unwrap()).unwrap();
+        assert_eq!(stored, format!("body {}\n", winners[0]));
     }
 }
 
-/// Where these tests keep their write locks.
+#[test]
+fn a_lock_racing_writers_is_never_half_applied() {
+    // Every write either lands before the lock or is refused after it; none
+    // lands after the lock was taken.
+    let (_tmp, vault) = scaffolded_vault();
+    let target = target_note();
+    let revision = heimdall_core::Revision::of_bytes(&vault.read(&target).unwrap());
+
+    std::thread::scope(|scope| {
+        let vault = &vault;
+        scope.spawn(move || {
+            lock(vault, LockRequest { path: Some("ideas".to_string()) }).unwrap();
+        });
+        for index in 0..THREADS {
+            let revision = revision.clone();
+            scope.spawn(move || {
+                let _ = write(
+                    vault,
+                    WriteRequest {
+                        path: format!("ideas/new_{index}.md"),
+                        content: "x\n".to_string(),
+                        expected_revision: None,
+                    },
+                );
+                let _ = write(
+                    vault,
+                    WriteRequest {
+                        path: "ideas/hello_world.md".to_string(),
+                        content: format!("{index}\n"),
+                        expected_revision: Some(Some(revision)),
+                    },
+                );
+            });
+        }
+    });
+
+    let err = write(
+        &vault,
+        WriteRequest {
+            path: "ideas/after.md".to_string(),
+            content: "x\n".to_string(),
+            expected_revision: None,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Locked);
+}
+
+/// Where these tests keep Heimdall's application data (write locks, lock rules).
 ///
 /// Outside the vault, as production does, but under the system temp directory
 /// rather than the real application-data one: a test run must not leave files
-/// in a developer's home. Lock files are named by a hash of the vault's path
-/// and every vault here is a fresh temp directory, so sharing one directory
-/// cannot collide.
-fn test_lock_dir() -> camino::Utf8PathBuf {
+/// in a developer's home. Per-vault files are named by a hash of the vault's
+/// path and every vault here is a fresh temp directory, so sharing one
+/// directory cannot collide.
+fn test_data_dir() -> camino::Utf8PathBuf {
     camino::Utf8PathBuf::from_path_buf(std::env::temp_dir())
         .expect("temp dir is UTF-8")
-        .join("heimdall-test-locks")
+        .join("heimdall-test-data")
 }

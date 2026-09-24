@@ -3,8 +3,8 @@
 //!
 //! Optimistic concurrency only holds if the comparison and the write are one
 //! indivisible step. These tests race real `heimdall` processes: without the
-//! per-file lock, several writers read the same revision, all find it current,
-//! and all report success while silently overwriting one another.
+//! vault's write lock, several writers read the same revision, all find it
+//! current, and all report success while silently overwriting one another.
 
 mod common;
 
@@ -14,10 +14,12 @@ use std::process::{Child, Stdio};
 use common::*;
 
 const WRITERS: usize = 8;
+const NOTE: &str = "projects/my_project.md";
 
-fn spawn_writer(vault: &str, revision: &str, content: &str) -> Child {
+fn spawn_write(vault: &str, args: &[&str], content: &str) -> Child {
     let mut child = common::command()
-        .args(["write-memory", "--vault", vault, "--expected-revision", revision])
+        .args(["write", "--vault", vault])
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -35,10 +37,16 @@ fn spawn_writer(vault: &str, revision: &str, content: &str) -> Child {
 #[test]
 fn concurrent_writers_sharing_one_revision_produce_exactly_one_winner() {
     let (_tmp, vault) = new_vault();
-    let revision = main_memory_revision(&vault);
+    let revision = revision_of(&vault, NOTE);
 
     let children: Vec<_> = (0..WRITERS)
-        .map(|index| spawn_writer(&vault, &revision, &format!("# Memory\n\nwriter {index}\n")))
+        .map(|index| {
+            spawn_write(
+                &vault,
+                &[NOTE, "--expected-revision", &revision],
+                &format!("# My Project\n\nwriter {index}\n"),
+            )
+        })
         .collect();
 
     let mut winners = Vec::new();
@@ -63,100 +71,46 @@ fn concurrent_writers_sharing_one_revision_produce_exactly_one_winner() {
     assert_eq!(conflicts, WRITERS - 1);
 
     // The stored file is precisely the winner's, not a blend of several writes.
-    let stored = main_memory_revision(&vault);
-    assert_eq!(stored, winners[0]);
-
-    let content = data(&run(&["read-memory", "--vault", &vault]))["content"]
+    assert_eq!(revision_of(&vault, NOTE), winners[0]);
+    let content = data(&run(&["read", NOTE, "--vault", &vault]))["document"]["content"]
         .as_str()
         .unwrap()
         .to_string();
-    assert!(content.starts_with("# Memory\n\nwriter "), "{content:?}");
+    assert!(content.starts_with("# My Project\n\nwriter "), "{content:?}");
     assert_eq!(content.lines().count(), 3, "content was interleaved: {content:?}");
 }
 
 #[test]
-fn concurrent_creates_of_one_extended_memory_leave_a_single_file() {
+fn concurrent_creates_of_one_note_leave_a_single_file() {
     let (_tmp, vault) = new_vault();
 
     let children: Vec<_> = (0..WRITERS)
-        .map(|index| {
-            let mut child = common::command()
-                .args([
-                    "write-memory",
-                    "--vault",
-                    &vault,
-                    "--extended",
-                    "topic.md",
-                    "--create",
-                ])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(format!("creator {index}\n").as_bytes())
-                .unwrap();
-            child
-        })
+        .map(|index| spawn_write(&vault, &["ideas/topic.md"], &format!("creator {index}\n")))
         .collect();
 
     let successes = children
         .into_iter()
-        .filter(|_| true)
         .map(|child| child.wait_with_output().unwrap())
         .filter(|output| envelope(output)["ok"] == true)
         .count();
 
-    assert_eq!(successes, 1, "a create-only write must not race into a replace");
-
-    let memories = data(&run(&["list-memories", "--vault", &vault]));
-    let topics = memories["memories"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|m| m["name"] == "topic.md")
-        .count();
-    assert_eq!(topics, 1);
+    assert_eq!(successes, 1, "a create must not race into a replace");
 }
 
 #[test]
-fn concurrent_entry_creation_never_overwrites_an_existing_entry() {
+fn a_lock_taken_by_one_process_binds_every_other() {
     let (_tmp, vault) = new_vault();
+    let revision = revision_of(&vault, NOTE);
+    data(&run(&["lock", "projects", "--vault", &vault]));
 
-    let children: Vec<_> = (0..WRITERS)
-        .map(|index| {
-            let mut child = common::command()
-                .args(["create-entry", "--vault", &vault, "--kind", "conversation"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(format!("# Summary {index}\n").as_bytes())
-                .unwrap();
-            child
-        })
-        .collect();
+    let refused = spawn_write(&vault, &[NOTE, "--expected-revision", &revision], "x\n")
+        .wait_with_output()
+        .unwrap();
+    assert_eq!(error_code(&refused), "LOCKED");
 
-    let ids: Vec<String> = children
-        .into_iter()
-        .map(|child| child.wait_with_output().unwrap())
-        .map(|output| data(&output)["id"].as_str().unwrap().to_string())
-        .collect();
-
-    // Entries are create-only: every writer gets its own file, even when they
-    // all land in the same second.
-    let unique: std::collections::HashSet<_> = ids.iter().collect();
-    assert_eq!(unique.len(), WRITERS, "ids collided: {ids:?}");
-
-    let listed = data(&run(&["list-entries", "--vault", &vault, "--kind", "conversation"]));
-    assert_eq!(listed["entries"].as_array().unwrap().len(), WRITERS);
+    data(&run(&["unlock", "projects", "--vault", &vault]));
+    let accepted = spawn_write(&vault, &[NOTE, "--expected-revision", &revision], "x\n")
+        .wait_with_output()
+        .unwrap();
+    assert_eq!(data(&accepted)["created"], false);
 }

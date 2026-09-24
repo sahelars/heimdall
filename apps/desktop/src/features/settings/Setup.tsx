@@ -1,5 +1,5 @@
 /**
- * Setup — create a templated vault, or initialize an existing folder as one.
+ * Setup — create a templated vault, or open an existing folder of notes as one.
  *
  * This screen sets a vault up; it never browses or edits its content. The
  * workspace does that (SPEC §15).
@@ -50,11 +50,11 @@ export function Setup({
   }
 
   /**
-   * Initializing an existing vault is the same `create` call with the folder
-   * split into its parent and name — the CLI adds only the missing `aios/`
-   * structure and leaves every existing file untouched (SPEC §7).
+   * Opening an existing folder is the same `create` call with the folder split
+   * into its parent and name. A folder that already holds notes is registered
+   * as a vault and nothing is written into it (SPEC §7).
    */
-  async function initializeExisting() {
+  async function openExisting() {
     const chosen = await open({ directory: true, multiple: false });
     if (typeof chosen !== "string") return;
 
@@ -87,7 +87,13 @@ export function Setup({
     try {
       const response = await inspectVault(vault);
       if (response.ok && response.data) {
-        setChecked(`${response.data.memories.length} memory file(s) readable`);
+        const count = response.data.listing?.entries.length ?? 0;
+        const more = response.data.listing?.next_cursor ? "+" : "";
+        setChecked(
+          `Readable: ${count}${more} item${count === 1 && !more ? "" : "s"} at the vault root${
+            response.data.locked ? ", locked" : ""
+          }`,
+        );
       } else if (response.error) {
         setError(response.error);
       }
@@ -100,7 +106,7 @@ export function Setup({
     <>
       <Panel
         title="Create a vault"
-        description="Scaffolds a complete vault: the managed aios/ structure and example notes."
+        description="Creates a new folder with a few example notes to start from."
       >
         {/*
           * The hint sits under the row rather than inside the first field.
@@ -137,27 +143,27 @@ export function Setup({
 
       <Panel
         title="Use an existing folder"
-        description="Adds only the missing aios/ structure. Existing files are never touched, and no example notes are added."
+        description="Opens a folder of notes you already have as a vault. Nothing is written into it: no example notes, no hidden files."
       >
         <div className="row">
-          <Button onClick={initializeExisting} disabled={busy}>
-            Choose a folder and initialize…
+          <Button onClick={openExisting} disabled={busy}>
+            Choose a folder…
           </Button>
         </div>
       </Panel>
 
       {created ? (
         <Notice
-          title={created.mode === "scaffolded" ? "Vault created" : "Vault initialized"}
+          title={created.mode === "scaffolded" ? "Vault created" : "Vault opened"}
         >
           <Facts
             rows={[
               ["Path", created.path],
               [
-                created.mode === "scaffolded" ? "Written" : "Added",
+                "Written",
                 created.created.length > 0
                   ? `${created.created.length} item(s)`
-                  : "nothing was missing",
+                  : "nothing — the folder is used as it is",
               ],
             ]}
           />

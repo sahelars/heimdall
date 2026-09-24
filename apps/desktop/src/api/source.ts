@@ -1,52 +1,10 @@
 /**
- * Which operation reads and writes a given vault path.
+ * Path helpers for vault-relative paths.
  *
- * Ordinary notes go through `read-documents` / `write-document`. The protected
- * tree does not: `read-documents` excludes `aios/` at every depth by design
- * (SPEC §6), so a note there has to be reached by the operation that owns it.
- * Every caller that opens or saves a path dispatches on this rather than
- * assuming one pair of commands covers the vault.
+ * Every note in the vault is read and written the same way (`read` / `write`),
+ * so there is no routing here — only the small string operations the UI keeps
+ * reaching for.
  */
-
-export type DocumentSource =
-  | "document"
-  | "memory-main"
-  | "memory-extended"
-  | "entry-conversation"
-  | "entry-notification";
-
-const MAIN_MEMORY = "aios/memories/memory.md";
-const EXTENDED_PREFIX = "aios/memories/extended/";
-const CONVERSATIONS_PREFIX = "aios/conversations/";
-const NOTIFICATIONS_PREFIX = "aios/notifications/";
-
-/**
- * Compare the way the vault contract does.
- *
- * `aios/` is matched case-insensitively for the reason SPEC §6 gives: on macOS
- * and Windows `AIOS/notes.md` and `aios/notes.md` are the same file, so a
- * case-sensitive check here would route a protected path to the ordinary
- * commands, which would then report it as missing.
- */
-function is(path: string, other: string): boolean {
-  return path.toLowerCase() === other.toLowerCase();
-}
-
-function startsWith(path: string, prefix: string): boolean {
-  return path.toLowerCase().startsWith(prefix.toLowerCase());
-}
-
-export function sourceOf(path: string): DocumentSource {
-  if (is(path, MAIN_MEMORY)) return "memory-main";
-  if (startsWith(path, EXTENDED_PREFIX)) return "memory-extended";
-  if (startsWith(path, CONVERSATIONS_PREFIX)) return "entry-conversation";
-  if (startsWith(path, NOTIFICATIONS_PREFIX)) return "entry-notification";
-  return "document";
-}
-
-export function isProtected(path: string): boolean {
-  return path.toLowerCase() === "aios" || startsWith(path, "aios/");
-}
 
 /** The filename, without its folders. */
 export function baseName(path: string): string {

@@ -22,10 +22,7 @@ use rmcp::service::RequestContext;
 use rmcp::{tool, tool_handler, tool_router, ErrorData, Json, RoleServer, ServerHandler, ServiceExt};
 use serde_json::json;
 use heimdall_core::commands::{
-    self, CreateEntryRequest, CreateEntryResponse, ListDocumentsRequest, ListDocumentsResponse,
-    ListEntriesRequest, ListEntriesResponse, ListMemoriesRequest, ListMemoriesResponse,
-    ReadDocumentsRequest, ReadDocumentsResponse, ReadEntryRequest,
-    ReadMemoryRequest, ReadResult, WriteMemoryRequest, WriteMemoryResponse,
+    self, LockRequest, LockResponse, ReadRequest, ReadResponse, WriteRequest, WriteResponse,
 };
 // `Result` is deliberately not imported: the rmcp macros expand bare `Result`
 // in generated code, which a domain alias in scope would silently capture.
@@ -43,18 +40,17 @@ pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2025_11_25;
 /// Server-level guidance, published at initialization (SPEC §12).
 ///
 /// This is how the protocol itself tells a client how to behave in this vault —
-/// there is no instructions file for a client to go and find. What varies per
-/// vault is the user's own standing preferences, and those live in the main
-/// memory, which `read_memory` returns.
+/// there is no instructions file for a client to go and find.
 const INSTRUCTIONS: &str = "\
-Heimdall manages one Markdown vault. Ordinary notes live outside `aios/`; \
-protected memories and entries (conversation summaries and notifications) live \
-inside it. Read the main memory with `read_memory` at the start of a session: \
-it holds the user's durable context and how they want you to work in this \
-vault. List content before reading it, request only the ranges needed, and \
-follow continuation metadata. Use `write_memory` only for durable memory and \
-always pass the revision returned by the latest read. Use `create_entry` for \
-conversation summaries and notifications; it never replaces existing files.";
+Heimdall manages one Markdown vault with four tools. Start with `read` and no \
+path: it lists the vault root. `read` on a folder lists it; `read` on a note \
+returns a bounded range of its lines and the revision a write needs. Request \
+only the ranges you need and follow `next_line` and `next_cursor`. `write` \
+creates a note, or replaces one when you pass the `expected_revision` from your \
+latest read; it never overwrites anything silently. Every read says whether a \
+path is `locked`. A locked note or folder is read-only: the user locked it so \
+that it would not change. Do not call `unlock` unless the user asks you to, and \
+use `lock` when they ask you to protect something.";
 
 /// One vault, one server process. The handle is shared across concurrent tool
 /// calls; the vault it points at is fixed for the process lifetime.
@@ -151,140 +147,73 @@ fn with_domain_code(tool: &str, response: CallToolResponse) -> CallToolResponse 
 #[tool_router(router = tool_router)]
 impl HeimdallServer {
     #[tool(
-        name = "list_documents",
-        description = "Discover ordinary Markdown notes before choosing what to read. \
-                       Returns metadata only — relative path, kind, size, modification time — \
-                       never content or revisions. Non-recursive by default; recursive listing \
-                       needs `recursive: true` and defaults to depth 4 (maximum 16). Page size \
-                       defaults to 50 and caps at 200; when more remains, pass the returned \
-                       `next_cursor` back as `cursor`. Lists directories and .md files only. \
-                       Cannot see the protected `aios/` tree at any depth — use list_memories \
-                       or list_entries for that. Read-only."
+        name = "read",
+        description = "Read a folder or a Markdown note in the vault. Omit `path` to read the \
+                       vault root. A folder returns `listing`: paths, kinds, sizes, \
+                       modification times, and whether each is locked — never content. It is \
+                       non-recursive unless `recursive: true` (depth 4 by default, maximum 16), \
+                       pages at 50 entries (maximum 200), and returns `next_cursor` to pass \
+                       back as `cursor`. A note returns `document`: at most 200 lines by \
+                       default (maximum 1000) and 64 KiB (maximum 256 KiB), with \
+                       `complete: false` and `next_line` when more remains, and the \
+                       `revision` to pass to write. Cannot read hidden folders, the trash, or \
+                       files that are not Markdown. Read-only."
     )]
-    async fn list_documents(
+    async fn read(
         &self,
-        Parameters(request): Parameters<ListDocumentsRequest>,
-    ) -> Result<Json<ListDocumentsResponse>, CallToolResult> {
-        self.run(move |vault| commands::list_documents(vault, request))
-            .await
+        Parameters(request): Parameters<ReadRequest>,
+    ) -> Result<Json<ReadResponse>, CallToolResult> {
+        self.run(move |vault| commands::read(vault, request)).await
     }
 
     #[tool(
-        name = "read_documents",
-        description = "Read selected, bounded ranges of ordinary notes found with \
-                       list_documents. Takes 1 to 10 explicit Markdown paths; directories are \
-                       rejected. Each selection returns at most 200 lines by default (maximum \
-                       1000), and the call returns at most 64 KiB of content by default \
-                       (maximum 256 KiB). Selections that do not fit the budget come back \
-                       marked `returned: false` rather than silently dropped, and a partial \
-                       file always reports `complete: false` with `next_line`. Cannot read \
-                       anything under `aios/`. Read-only."
+        name = "write",
+        description = "MUTATES CONTENT. Create a Markdown note, or replace one completely. \
+                       This is a whole-file write, not a patch or an append — send the full \
+                       text. To replace a note, pass the `expected_revision` from your latest \
+                       read of it; a stale revision fails with REVISION_CONFLICT and nothing \
+                       is written. Without a revision it only creates, and fails with \
+                       REVISION_CONFLICT if the note exists. The note's folder must already \
+                       exist. A locked note, or a new note in a locked folder, fails with \
+                       LOCKED. Cannot write hidden folders or non-Markdown files; content is \
+                       capped at 1 MiB."
     )]
-    async fn read_documents(
+    async fn write(
         &self,
-        Parameters(request): Parameters<ReadDocumentsRequest>,
-    ) -> Result<Json<ReadDocumentsResponse>, CallToolResult> {
-        self.run(move |vault| commands::read_documents(vault, request))
-            .await
+        Parameters(request): Parameters<WriteRequest>,
+    ) -> Result<Json<WriteResponse>, CallToolResult> {
+        self.run(move |vault| commands::write(vault, request)).await
     }
 
     #[tool(
-        name = "list_memories",
-        description = "Discover durable memory files: the main memory first, then extended \
-                       memories by filename. Returns metadata only, never content or revisions \
-                       — read a memory to get the revision a write will need. Honors `limit` \
-                       (default 50, maximum 200) and does not paginate. Read-only."
+        name = "lock",
+        description = "MUTATES CONTENT. Lock a folder or a Markdown note so nothing can write, \
+                       move, or delete it until it is unlocked; it can still be read. Omit \
+                       `path` to lock the whole vault. Locking a folder locks everything \
+                       inside it, including notes that had been unlocked on their own. \
+                       Changes no file content — the lock is stored outside the vault. Use it \
+                       when the user asks you to protect something."
     )]
-    async fn list_memories(
+    async fn lock(
         &self,
-        Parameters(request): Parameters<ListMemoriesRequest>,
-    ) -> Result<Json<ListMemoriesResponse>, CallToolResult> {
-        self.run(move |vault| commands::list_memories(vault, request))
-            .await
+        Parameters(request): Parameters<LockRequest>,
+    ) -> Result<Json<LockResponse>, CallToolResult> {
+        self.run(move |vault| commands::lock(vault, request)).await
     }
 
     #[tool(
-        name = "read_memory",
-        description = "Read a bounded range of the main memory, or of one extended memory named \
-                       by `extended`. `extended` takes a bare filename from list_memories \
-                       ending in .md, never a path. Returns the revision to pass to \
-                       write_memory. Bounded at 200 lines by default, maximum 1000. Read-only."
+        name = "unlock",
+        description = "MUTATES CONTENT. Unlock a folder or a Markdown note so it can be \
+                       written again. Omit `path` to unlock the whole vault. Unlocking a \
+                       folder unlocks everything inside it; a single note can be unlocked \
+                       inside a locked folder. A lock is the user's decision: call this only \
+                       when the user asks you to, never to get a write through."
     )]
-    async fn read_memory(
+    async fn unlock(
         &self,
-        Parameters(request): Parameters<ReadMemoryRequest>,
-    ) -> Result<Json<ReadResult>, CallToolResult> {
-        self.run(move |vault| commands::read_memory(vault, request))
-            .await
-    }
-
-    #[tool(
-        name = "write_memory",
-        description = "MUTATES CONTENT. Replace the complete main memory, or one extended \
-                       memory, with new content. This is a whole-file replacement, not a patch \
-                       or an append — send the full text you want stored. Always pass \
-                       `expected_revision` from the latest read of that file; pass explicit \
-                       null only to create a new extended memory. A stale revision fails with \
-                       REVISION_CONFLICT and nothing is written. The main memory is capped at \
-                       32 KiB and warns from 24 KiB, at which point durable topic detail should \
-                       move into extended memories linked from memory.md; extended memories are \
-                       capped at 1 MiB. Do not use this for ordinary notes or append-only logs."
-    )]
-    async fn write_memory(
-        &self,
-        Parameters(request): Parameters<WriteMemoryRequest>,
-    ) -> Result<Json<WriteMemoryResponse>, CallToolResult> {
-        self.run(move |vault| commands::write_memory(vault, request))
-            .await
-    }
-
-    #[tool(
-        name = "list_entries",
-        description = "Discover conversation summaries or notifications by metadata, newest \
-                       first. `kind` is required and selects which folder is listed. Returns \
-                       the filename as `id`, creation time, and size — read a selected entry to \
-                       get its content and revision. Honors `limit` (default 50, maximum 200). \
-                       Read-only."
-    )]
-    async fn list_entries(
-        &self,
-        Parameters(request): Parameters<ListEntriesRequest>,
-    ) -> Result<Json<ListEntriesResponse>, CallToolResult> {
-        self.run(move |vault| commands::list_entries(vault, request))
-            .await
-    }
-
-    #[tool(
-        name = "read_entry",
-        description = "Read one entry selected from list_entries. `id` is a bare filename, \
-                       never a path, and `kind` must match the folder the entry lives in. \
-                       Bounded at 200 lines by default, maximum 1000, with continuation \
-                       metadata when more remains. Read-only."
-    )]
-    async fn read_entry(
-        &self,
-        Parameters(request): Parameters<ReadEntryRequest>,
-    ) -> Result<Json<ReadResult>, CallToolResult> {
-        self.run(move |vault| commands::read_entry(vault, request))
-            .await
-    }
-
-    #[tool(
-        name = "create_entry",
-        description = "MUTATES CONTENT. Create a new conversation summary or notification. \
-                       Entries are create-only: this never replaces an existing file, and a \
-                       same-second collision gets a numeric suffix. Heimdall owns the \
-                       frontmatter and adds `created_at` and `type` itself, so content that \
-                       begins with its own `---` block is rejected — send the body only. \
-                       Summaries should be high-level and compressed, not transcripts. Content \
-                       is capped at 1 MiB."
-    )]
-    async fn create_entry(
-        &self,
-        Parameters(request): Parameters<CreateEntryRequest>,
-    ) -> Result<Json<CreateEntryResponse>, CallToolResult> {
-        self.run(move |vault| commands::create_entry(vault, request))
-            .await
+        Parameters(request): Parameters<LockRequest>,
+    ) -> Result<Json<LockResponse>, CallToolResult> {
+        self.run(move |vault| commands::unlock(vault, request)).await
     }
 }
 
@@ -319,13 +248,13 @@ impl ServerHandler for HeimdallServer {
 
 /// Serve one vault over stdio until the client disconnects.
 ///
-/// An uninitialized vault is not a startup failure: SPEC §7 requires domain
-/// tools to answer `NOT_INITIALIZED` with actionable guidance, which lets a
-/// client connect and be told what to do rather than seeing the server vanish.
-/// A vault path that does not resolve at all is a configuration error, and
-/// fails here.
+/// A vault path that does not resolve is a configuration error, and fails
+/// here. A vault served over MCP is registered too, so the shell can find it
+/// from inside; that is a convenience and never stops the server starting.
 pub fn serve(vault_path: &Utf8Path) -> CoreResult<()> {
-    let vault = Arc::new(Vault::open(vault_path)?);
+    let vault = Vault::open(vault_path)?;
+    let _ = heimdall_core::registry::register(&vault);
+    let vault = Arc::new(vault);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -371,30 +300,18 @@ mod tests {
     }
 
     #[test]
-    fn the_surface_is_exactly_the_eight_v1_tools() {
+    fn the_surface_is_exactly_the_four_tools() {
         let mut names: Vec<_> = tools().iter().map(|t| t.name.to_string()).collect();
         names.sort();
-        assert_eq!(
-            names,
-            [
-                "create_entry",
-                "list_documents",
-                "list_entries",
-                "list_memories",
-                "read_documents",
-                "read_entry",
-                "read_memory",
-                "write_memory",
-            ]
-        );
+        assert_eq!(names, ["lock", "read", "unlock", "write"]);
     }
 
     #[test]
     fn the_desktop_client_commands_are_not_reachable_over_mcp() {
-        // Editing a note, deleting one, and indexing a whole vault are things a
-        // human does at the keyboard — the same category as `heimdall create`
-        // (SPEC §7, §9). They are shell commands the desktop calls; the tool
-        // surface above stays at eight.
+        // Moving, deleting, and indexing a whole vault are things a human does
+        // at the keyboard — the same category as `heimdall create` (SPEC §7,
+        // §9). They are shell commands the desktop calls; the tool surface
+        // above stays at four.
         //
         // This test is a second line of defence, not the first. None of those
         // commands derive `JsonSchema`, so giving one a `#[tool]` would not
@@ -402,17 +319,15 @@ mod tests {
         // been added to the request types that should not have been.
         let names: Vec<_> = tools().iter().map(|t| t.name.to_string()).collect();
         for forbidden in [
-            "write_document",
             "create_folder",
             "move_path",
             "relink",
             "delete_path",
-            "write_entry",
             "link_graph",
-            "write-document",
+            "create-folder",
+            "move-path",
             "delete-path",
             "link-graph",
-            "relink",
         ] {
             assert!(!names.contains(&forbidden.to_string()), "{forbidden} exposed");
         }
@@ -464,7 +379,7 @@ mod tests {
                 "{} has a thin description",
                 tool.name
             );
-            let mutates = matches!(tool.name.as_ref(), "write_memory" | "create_entry");
+            let mutates = matches!(tool.name.as_ref(), "write" | "lock" | "unlock");
             assert_eq!(
                 description.contains("MUTATES CONTENT"),
                 mutates,
@@ -492,14 +407,15 @@ mod tests {
         assert!(info.capabilities.tools.is_some());
         assert_eq!(info.server_info.name, "heimdall");
         let instructions = info.instructions.expect("instructions are required");
-        assert!(instructions.contains("aios/"));
-        assert!(instructions.contains("write_memory"));
+        for tool in ["`read`", "`write`", "`unlock`", "`lock`", "locked"] {
+            assert!(instructions.contains(tool), "instructions never mention {tool}");
+        }
     }
 
     #[test]
     fn a_domain_failure_is_structured_and_flagged_without_leaking_content() {
         let error = Error::revision_conflict("stale")
-            .with_detail("path", "aios/memories/memory.md")
+            .with_detail("path", "projects/plan.md")
             .with_detail("current_revision", "blake3:abc");
         let result = domain_failure(&error);
 
