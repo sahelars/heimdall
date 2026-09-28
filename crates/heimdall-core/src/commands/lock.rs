@@ -5,8 +5,10 @@
 //! everything in it, and so does unlocking — including notes that had been
 //! given their own rule — after which a single note inside can be set apart
 //! again. The rules themselves are in [`crate::notelocks`].
+//!
+//! Shell-only: a lock is the user's decision, so neither type derives
+//! `JsonSchema` and neither can be given an MCP tool (SPEC §9).
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::commands::types::DocumentKind;
@@ -15,7 +17,7 @@ use crate::notelocks::LockRules;
 use crate::paths::RelPath;
 use crate::storage::Vault;
 
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LockRequest {
     /// A folder or a Markdown note, relative to the vault root. Omit it for the
@@ -23,7 +25,7 @@ pub struct LockRequest {
     pub path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LockResponse {
     /// The vault-relative path; empty for the whole vault.
     pub path: String,

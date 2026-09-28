@@ -5,7 +5,7 @@
 
 ## 1. Product definition
 
-Heimdall is an intent-aware MCP layer for Markdown vaults. It gives AI clients two verbs over a vault — `read` and `write` — instead of unrestricted filesystem access, and it gives people a guardrail over what those verbs may touch: any note, any folder, or the whole vault can be **locked**, and a locked path is read-only for everyone until it is unlocked.
+Heimdall is an intent-aware MCP layer for Markdown vaults. It gives AI clients two verbs over a vault — `read` and `write` — instead of unrestricted filesystem access, and it gives people a guardrail over what those verbs may touch: any note, any folder, or the whole vault can be **locked**, and a locked path is read-only for everyone until the person unlocks it. Agents can see a lock but never set or lift one: locks are set from the shell and the desktop, not over MCP.
 
 Heimdall has two independently installable products:
 
@@ -27,9 +27,9 @@ The desktop application bundles a version-matched CLI and calls it for every dom
 ## 3. Design principles
 
 - Keep one implementation of domain and filesystem behavior in `heimdall-core`.
-- Give AI clients purpose-aware operations, not arbitrary file access: two verbs, `read` and `write`, plus the lock controls.
+- Give AI clients purpose-aware operations, not arbitrary file access: two verbs, `read` and `write`, and nothing that changes what those verbs may touch.
 - Read before writing, and read only selected, bounded content.
-- A lock is the user's decision and binds every writer — agents, scripts, and the desktop editor alike.
+- A lock is the user's decision and binds every writer — agents, scripts, and the desktop editor alike. Only people set and lift locks; no MCP tool can.
 - One vault per server process; scope is fixed by configuration, never by tool input.
 - Never overwrite user data silently.
 - Use optimistic concurrency for replace-style writes.
@@ -207,7 +207,7 @@ A lock makes part of a vault read-only. It is the guardrail a person puts around
 - **Who it binds.** Everyone who writes through Heimdall: MCP clients, the shell, and the desktop editor, which opens a locked note read-only. It is not a file permission, and another editor writing the files directly is outside it — the same boundary §14 draws for the write lock.
 - **Links.** `relink` (§15) never rewrites a locked note; it reports the note instead, because a lock is exactly a promise that the note will not change.
 - **Housekeeping.** Rules for paths that no longer exist — renamed or deleted outside Heimdall — are ignored and pruned on the next `lock` or `unlock`. A note moved by `move_path` cannot carry a lock, since a locked note does not move; one deleted to the trash does not take a rule with it, and a note restored from the trash comes back writable.
-- **Who may unlock.** Anyone who may lock, over any surface, including MCP (§9). A lock is therefore a guardrail against mistakes, not a security boundary against a hostile agent; the MCP instructions (§12) tell clients that a lock is the user's decision and not to unlock anything the user did not ask them to.
+- **Who may lock and unlock.** People, through the shell and the desktop. Neither is an MCP tool (§9), in either direction: an agent that could `unlock` could get past any lock, and one that could `lock` a folder would erase every note-level unlock the user had set beneath it, with no way to put them back. So against an agent whose only access to the vault is Heimdall's MCP server, a lock is a boundary rather than a request. It is not a boundary against a process holding the user's own shell or filesystem access — one that can run `heimdall unlock`, rewrite the lock rules in the application-data directory (§14), or simply edit the file. That is what operating-system permissions are for, and Heimdall does not pretend otherwise.
 
 ## 7. Vault creation and configuration
 
@@ -357,25 +357,23 @@ Every note read returns a `document` of this shape (§10):
 
 ## 9. MCP surface
 
-V1 is tools-only for broad client compatibility. The surface is four tools, and the shell has a subcommand of exactly the same name for each — `heimdall read`, `heimdall write`, `heimdall lock`, `heimdall unlock` — mirroring the same core operation. The names are the plain verbs: no `read_file`, `read-documents`, or other qualified spelling.
+V1 is tools-only for broad client compatibility. The surface is two tools, and the shell has a subcommand of exactly the same name for each — `heimdall read`, `heimdall write` — mirroring the same core operation. The names are the plain verbs: no `read_file`, `read-documents`, or other qualified spelling.
 
 | Tool | Use | Mutates |
 |---|---|---|
 | `read` | Read a folder (a bounded listing) or a note (a bounded range of its lines). Omit `path` for the vault root. Reports lock state. | No |
 | `write` | Create a note, or replace one given the revision from the latest read. Never overwrites silently; refused with `LOCKED` on a locked path. | Yes |
-| `lock` | Make a note, a folder, or the whole vault read-only. | Yes (lock state only) |
-| `unlock` | Make a note, a folder, or the whole vault writable again. | Yes (lock state only) |
 
-Four tools total. Do not add a general `read_file`, `write_file`, or `execute` tool. Vault creation is shell-only (§7).
+Two tools total. Do not add a general `read_file`, `write_file`, or `execute` tool. Vault creation is shell-only (§7).
 
 There is deliberately no agent-instructions file and no tool to read one. MCP already has a channel for telling a client how to behave — the `instructions` string published at initialization (§12). What varies per vault belongs in the vault's own notes, which `read` reaches like any other.
 
-`lock` and `unlock` are tools because the user asked for locks to be settable from wherever they work, including through an assistant. The consequence is stated plainly in §6: an agent that can unlock can get past a lock, so a lock is a guardrail rather than a security boundary, and the instructions and the `unlock` description both say the lock is the user's decision. A server flag to withhold `unlock` from MCP is on the roadmap (§13).
+`lock` and `unlock` are shell subcommands and not tools. A lock decides what an agent may change, so an agent must not be able to change it — not by unlocking, and not by locking either, since a folder lock clears the note-level rules beneath it (§6). This is unconditional rather than a server flag: a flag would make the weaker setup the default. Their request and response types derive no `JsonSchema`, so, like the client operations below, neither can be given a tool without a compile error. An agent that meets a lock reports it — `LOCKED` carries `locked_at` — and the person decides.
 
 The desktop's client surface is separate, and larger (§15). It is reached only through
 shell subcommands, and its request and response types deliberately derive no
 `JsonSchema` — `rmcp` builds a tool's schemas from those types, so a client operation
-cannot be given a tool without a compile error. "Four tools" is therefore a property the
+cannot be given a tool without a compile error. "Two tools" is therefore a property the
 compiler holds, not a promise review has to keep.
 
 ## 10. Tool contracts
@@ -460,9 +458,9 @@ Behavior:
 
 That an absent revision means "create" rather than "error" is deliberate: it makes the common case — writing a new note — one argument shorter, and it still can never replace anything, which is the property the older "absent is a mistake" rule existed to protect.
 
-### `lock` and `unlock`
+### `lock` and `unlock` (shell only)
 
-Input:
+Not MCP tools (§9); the shell takes `path` positionally (§11), and the core request is:
 
 ```json
 { "path": "projects" }
@@ -577,7 +575,7 @@ rules would already have made its first call without them.
 
 Publish concise server-level instructions equivalent to:
 
-> Heimdall manages one Markdown vault with four tools. Start with `read` and no path: it lists the vault root. `read` on a folder lists it; `read` on a note returns a bounded range of its lines and the revision a write needs. Request only the ranges you need and follow `next_line` and `next_cursor`. `write` creates a note, or replaces one when you pass the `expected_revision` from your latest read; it never overwrites anything silently. Every read says whether a path is `locked`. A locked note or folder is read-only: the user locked it so that it would not change. Do not call `unlock` unless the user asks you to, and use `lock` when they ask you to protect something.
+> Heimdall manages one Markdown vault with two tools. Start with `read` and no path: it lists the vault root. `read` on a folder lists it; `read` on a note returns a bounded range of its lines and the revision a write needs. Request only the ranges you need and follow `next_line` and `next_cursor`. `write` creates a note, or replaces one when you pass the `expected_revision` from your latest read; it never overwrites anything silently. Every read says whether a path is `locked`. A locked note or folder is read-only, and only the user can change that: locks are set outside this server. If a write is refused with LOCKED, tell the user which lock is responsible (`locked_at`) instead of working around it.
 
 What is fixed for every vault belongs in that string; what varies per vault belongs in
 the vault's own notes. Every tool also receives a strong description explaining when to
@@ -588,7 +586,6 @@ use it, what it cannot access, its limits, and whether it mutates content.
 Deferred features must preserve the same vault restrictions, limits, revisions, and continuation behavior.
 
 - **MCP resources.** Read-oriented content is semantically suitable for resources later (`heimdall://notes/<relative-path>`). Adding resources does not remove `read`; mutation remains tools.
-- **Withholding `unlock` from MCP.** A server flag (for example `heimdall mcp --vault P --no-unlock`) that leaves `unlock` off the tool surface, so a lock can be a boundary against an agent rather than only a guardrail (§6, §9).
 - **Native multi-vault mode.** Friendly vault IDs on every call plus a `list_vaults` tool. Until then, one server process per vault (§7).
 - **MCP Roots** as an explicit, reviewed configuration source.
 - **Non-Markdown file operations**, only with explicit MIME, size, and security rules.
@@ -713,7 +710,7 @@ so a lock or a stale revision refuses the editor exactly as it refuses anyone el
 
 Rules:
 
-- None of these is an MCP tool, and none of their types derives `JsonSchema`. The tool surface stays at exactly four (§9), and a compile error is what enforces it.
+- None of these is an MCP tool, and none of their types derives `JsonSchema`. The tool surface stays at exactly two (§9), and a compile error is what enforces it.
 - A stale revision returns `REVISION_CONFLICT` with the current revision in `details`, and the client resolves it by asking the user — never by merging and never by overwriting.
 - Renaming a note does not rewrite `[[wikilinks]]` **inside `move_path`**. A move is one rename, and folding an unbounded multi-file write into it would leave a rename that half succeeded with no way to say so. `relink` is that work, as its own operation with its own report, and the client calls it next.
 - `relink` is bounded and checked, which is what the older rule was protecting. **Bounded:** only files holding a link to the moved path are written; the scan is the whole vault under the graph's caps (§8) plus a substring prefilter, and the writes are capped again. **Checked:** the whole read-modify-write runs inside one write lock, which is strictly stronger than an `expected_revision` a caller could pass — a revision check closes the gap between a client's read and its write, and here there is no gap. That is also why it uses the vault primitives directly rather than `write`: a locking operation inside a lock body is a self-deadlock (§14).
@@ -815,7 +812,7 @@ The desktop always invokes its own bundled sidecar. It performs no CLI discovery
 
 ### CLI/MCP contract tests
 
-- Shell and MCP adapters produce equivalent domain outcomes for `read`, `write`, `lock`, and `unlock`, successes and failures alike (`NOT_FOUND`, `LIMIT_EXCEEDED`, `INVALID_INPUT`, `REVISION_CONFLICT`, `LOCKED`).
+- Shell and MCP adapters produce equivalent domain outcomes for `read` and `write`, successes and failures alike (`NOT_FOUND`, `LIMIT_EXCEEDED`, `INVALID_INPUT`, `REVISION_CONFLICT`, `LOCKED`).
 - A write or a lock through one adapter is visible through the other.
 - Shell output retains its envelope.
 - MCP output uses typed `structuredContent` without the shell envelope, and every result has the fields its published output schema requires.
@@ -823,7 +820,7 @@ The desktop always invokes its own bundled sidecar. It performs no CLI discovery
 - stdout contains protocol/JSON only; stderr cannot corrupt it.
 - The configured vault boundary is enforced; no tool call can supply a vault path, and an absolute path is read as a path inside the served vault.
 - Run from a folder inside a vault, `read`, `write`, `lock`, and `unlock` need no `--vault`, take the current folder by default, and resolve paths relative to it; from a folder in no vault they report `NOT_INITIALIZED` with guidance.
-- The MCP server advertises exactly `read`, `write`, `lock`, and `unlock`, and none of the client operations — checked both in-process and over a real stdio connection.
+- The MCP server advertises exactly `read` and `write` — not `lock`, `unlock`, or any client operation — checked both in-process and over a real stdio connection; calling `lock` or `unlock` over MCP is a protocol error and leaves the lock rules untouched; a lock set at the shell is reported by an MCP `read` and refuses an MCP `write`.
 
 ### Client operation tests
 
@@ -906,7 +903,7 @@ Delivered ahead of Phase 4, which does not block it.
 
 - Remove the protected `aios/` tree, memories, and entries; every visible note is ordinary content.
 - Collapse the agent-facing surface to `read` and `write`, on the shell and over MCP.
-- Add locks at vault, folder, and note level, with `lock` and `unlock` on the shell, over MCP, and in the desktop.
+- Add locks at vault, folder, and note level, with `lock` and `unlock` on the shell and in the desktop, and lock state reported over MCP.
 - Add the vault registry so the shell works from inside a vault with paths relative to the working directory.
 
 ## 19. Definition of done
@@ -916,7 +913,7 @@ Delivered ahead of Phase 4, which does not block it.
 - `heimdall create` produces the templated vault and safely registers an existing folder of notes.
 - The desktop uses its bundled CLI for every domain operation and can install a working MCP client configuration.
 - No operation performs an unbounded vault read.
-- The MCP surface is exactly `read`, `write`, `lock`, and `unlock`, and no client operation is reachable through it.
+- The MCP surface is exactly `read` and `write`; neither the lock controls nor any client operation is reachable through it.
 - MCP results use typed structured content rather than the shell envelope.
 - The MCP surface has no vault-path or vault-creation capability.
 - Stale writes fail with `REVISION_CONFLICT`, and a write without a revision never replaces a note.

@@ -85,16 +85,22 @@ heimdall mcp --vault ~/Documents/my-vault
 }
 ```
 
-Four tools: `read`, `write`, `lock`, `unlock` — the same four verbs as the
-shell. There is no general file read, write, or execute tool, and no tool takes
+Two tools: `read` and `write` — the same two verbs as the shell. There is no
+`lock` or `unlock` tool, no general file read, write, or execute tool, and no tool takes
 a vault path — the vault is fixed by `--vault` and cannot be named, switched, or
 discovered by a call. Creating a vault stays a shell command.
 
 The server publishes an `instructions` string at initialization telling a client
 to start with `read`, to pass the revision from its latest read when it writes,
-and that a locked path is the user's decision: it must not `unlock` anything it
-was not asked to. A lock is therefore a guardrail against mistakes rather than a
-wall against a hostile agent, since `unlock` is a tool too.
+and that a locked path is read-only until the user unlocks it: a refused write
+is reported, with the lock responsible, rather than worked around.
+
+Locks are set only by people — at the shell or in the desktop. An agent can see
+a lock in every `read` but can neither lift one nor set one (a folder lock
+would erase the note-level unlocks beneath it). Against an agent whose only way
+into the vault is this MCP server, a lock is therefore a real boundary. It is
+not one against an agent that also has your shell or filesystem — that can edit
+the files directly, so keep such tools away from a vault you need protected.
 
 Each tool publishes an input and output schema derived from the same Rust types
 the shell returns, so the two adapters cannot drift. Results come back as typed
@@ -151,7 +157,7 @@ revision refuses it too. The structural edits the MCP surface deliberately does
 not have are shell subcommands the desktop calls instead — `create-folder`,
 `move-path`, `relink`, `delete-path`, and `link-graph`. None of them is an MCP
 tool, and none of their types derives `JsonSchema`, so giving one a tool would
-not compile. The tool surface stays at four. Deleting moves a note into the
+not compile. The tool surface stays at two. Deleting moves a note into the
 vault's `.trash/`; nothing is ever unlinked.
 
 The app always runs the version-matched CLI bundled inside it — never one found

@@ -61,7 +61,8 @@ const STDOUT_LIMIT: usize = 16 * 1024 * 1024;
 /// own dedicated path.
 const ALLOWED: &[(&str, &[&str])] = &[
     ("create", &["name", "root"]),
-    // The four verbs the MCP server also offers (SPEC §9).
+    // The four plain verbs: `read` and `write` are also the MCP tools; `lock`
+    // and `unlock` are the user's alone and are not (SPEC §9).
     (
         "read",
         &[

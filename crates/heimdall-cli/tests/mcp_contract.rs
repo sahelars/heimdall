@@ -101,36 +101,52 @@ async fn both_adapters_produce_the_same_domain_outcome_for_reads() {
 }
 
 #[tokio::test]
-async fn both_adapters_produce_the_same_domain_outcome_for_locks() {
+async fn a_lock_set_by_the_user_binds_mcp_and_mcp_cannot_lift_it() {
     let (_tmp, vault) = new_vault();
     let client = connect(&vault).await;
+    let note = "ideas/hello_world.md";
+    data(&run(&["lock", "ideas", "--vault", &vault]));
 
-    let over_mcp = structured(&client, "lock", json!({ "path": "ideas" })).await;
-    assert_eq!(over_mcp["locked"], true);
-    assert_eq!(over_mcp["changed"], true);
-
-    // Locking again through the shell is the same outcome, with nothing changed.
-    let shell = data(&run(&["lock", "ideas", "--vault", &vault]));
-    assert_eq!(shell["locked"], true);
-    assert_eq!(shell["changed"], false);
-
-    // Both see the lock in a read.
-    let read = structured(&client, "read", json!({ "path": "ideas/hello_world.md" })).await;
+    // MCP sees the lock the shell set, and names the rule responsible.
+    let read = structured(&client, "read", json!({ "path": note })).await;
     assert_eq!(read["locked"], true);
     assert_eq!(read["locked_at"], "ideas");
 
-    let unlocked = structured(&client, "unlock", json!({ "path": "ideas" })).await;
-    assert_eq!(
-        unlocked,
-        data(&run(&["lock", "ideas", "--vault", &vault]))
-            .as_object()
-            .map(|lock| {
-                let mut expected = lock.clone();
-                expected.insert("locked".into(), json!(false));
-                Value::Object(expected)
-            })
-            .unwrap()
-    );
+    let revision = read["document"]["revision"].clone();
+    let refused = failure(
+        &client,
+        "write",
+        json!({ "path": note, "content": "x\n", "expected_revision": revision }),
+    )
+    .await;
+    assert_eq!(refused["code"], "LOCKED");
+    assert_eq!(refused["details"]["locked_at"], "ideas");
+
+    // Neither lock tool exists: calling one is a protocol error, not a result,
+    // and the lock is still in place afterwards (SPEC §6, §9).
+    for (tool, args) in [
+        ("unlock", json!({ "path": "ideas" })),
+        ("unlock", json!({})),
+        ("lock", json!({})),
+    ] {
+        let attempt = call(&client, tool, args).await;
+        assert!(
+            matches!(attempt, Err(ServiceError::McpError(_))),
+            "{tool} must not be a tool, got {attempt:?}"
+        );
+    }
+    assert_eq!(data(&run(&["read", note, "--vault", &vault]))["locked"], true);
+    assert_eq!(data(&run(&["read", "--vault", &vault]))["locked"], false);
+
+    // Only the user lifts it, and then MCP can write again.
+    data(&run(&["unlock", "ideas", "--vault", &vault]));
+    let written = structured(
+        &client,
+        "write",
+        json!({ "path": note, "content": "x\n", "expected_revision": revision }),
+    )
+    .await;
+    assert!(written["new_revision"].is_string());
 
     client.cancel().await.unwrap();
 }
@@ -157,7 +173,6 @@ async fn both_adapters_produce_the_same_domain_outcome_for_failures() {
             json!({ "path": "projects/new.md", "content": "x\n" }),
             b"x\n",
         ),
-        ("lock", vec!["lock", "missing.md"], json!({ "path": "missing.md" }), b""),
     ];
 
     for (tool, mut argv, args, stdin) in cases {
@@ -289,8 +304,6 @@ async fn every_tool_result_validates_against_its_published_output_schema() {
         ("read", json!({})),
         ("read", json!({ "path": "ideas/hello_world.md" })),
         ("write", json!({ "path": "ideas/new.md", "content": "# New\n" })),
-        ("lock", json!({ "path": "ideas" })),
-        ("unlock", json!({})),
     ] {
         let result = structured(&client, tool, args).await;
         let required = schemas[tool]["required"]
@@ -351,7 +364,6 @@ async fn arguments_that_violate_a_tool_schema_still_carry_a_domain_code() {
     for (tool, args) in [
         ("read", json!({ "limit": "lots" })),
         ("write", json!({ "path": "a.md" })),
-        ("lock", json!({ "unexpected": true })),
     ] {
         let result = failure(&client, tool, args).await;
         assert_eq!(
@@ -396,10 +408,10 @@ async fn no_tool_call_can_name_or_switch_the_vault() {
     let outside = failure(&client, "read", json!({ "path": absolute })).await;
     assert_eq!(outside["code"], "NOT_FOUND");
 
-    // A lock set over MCP lands on the served vault, not the other one.
-    structured(&client, "lock", json!({})).await;
-    assert_eq!(data(&run(&["read", "--vault", &other_vault]))["locked"], false);
-    assert_eq!(data(&run(&["read", "--vault", &vault]))["locked"], true);
+    // A write over MCP lands on the served vault, not the other one.
+    structured(&client, "write", json!({ "path": "ideas/served.md", "content": "x\n" })).await;
+    assert_eq!(error_code(&run(&["read", "ideas/served.md", "--vault", &other_vault])), "NOT_FOUND");
+    assert_eq!(data(&run(&["read", "ideas/served.md", "--vault", &vault]))["document"]["content"], "x\n");
 
     client.cancel().await.unwrap();
 }
@@ -467,7 +479,7 @@ async fn diagnostics_go_to_stderr_without_disturbing_the_protocol() {
         .map(|tool| tool.name.to_string())
         .collect();
     names.sort();
-    assert_eq!(names, ["lock", "read", "unlock", "write"]);
+    assert_eq!(names, ["read", "write"]);
 
     client.cancel().await.unwrap();
 }

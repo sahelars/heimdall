@@ -21,9 +21,7 @@ use rmcp::model::{
 use rmcp::service::RequestContext;
 use rmcp::{tool, tool_handler, tool_router, ErrorData, Json, RoleServer, ServerHandler, ServiceExt};
 use serde_json::json;
-use heimdall_core::commands::{
-    self, LockRequest, LockResponse, ReadRequest, ReadResponse, WriteRequest, WriteResponse,
-};
+use heimdall_core::commands::{self, ReadRequest, ReadResponse, WriteRequest, WriteResponse};
 // `Result` is deliberately not imported: the rmcp macros expand bare `Result`
 // in generated code, which a domain alias in scope would silently capture.
 use heimdall_core::{Error, ErrorCode, Vault};
@@ -42,15 +40,16 @@ pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2025_11_25;
 /// This is how the protocol itself tells a client how to behave in this vault —
 /// there is no instructions file for a client to go and find.
 const INSTRUCTIONS: &str = "\
-Heimdall manages one Markdown vault with four tools. Start with `read` and no \
+Heimdall manages one Markdown vault with two tools. Start with `read` and no \
 path: it lists the vault root. `read` on a folder lists it; `read` on a note \
 returns a bounded range of its lines and the revision a write needs. Request \
 only the ranges you need and follow `next_line` and `next_cursor`. `write` \
 creates a note, or replaces one when you pass the `expected_revision` from your \
 latest read; it never overwrites anything silently. Every read says whether a \
-path is `locked`. A locked note or folder is read-only: the user locked it so \
-that it would not change. Do not call `unlock` unless the user asks you to, and \
-use `lock` when they ask you to protect something.";
+path is `locked`. A locked note or folder is read-only, and only the user can \
+change that: locks are set outside this server. If a write is refused with \
+LOCKED, tell the user which lock is responsible (`locked_at`) instead of \
+working around it.";
 
 /// One vault, one server process. The handle is shared across concurrent tool
 /// calls; the vault it points at is fixed for the process lifetime.
@@ -184,37 +183,6 @@ impl HeimdallServer {
     ) -> Result<Json<WriteResponse>, CallToolResult> {
         self.run(move |vault| commands::write(vault, request)).await
     }
-
-    #[tool(
-        name = "lock",
-        description = "MUTATES CONTENT. Lock a folder or a Markdown note so nothing can write, \
-                       move, or delete it until it is unlocked; it can still be read. Omit \
-                       `path` to lock the whole vault. Locking a folder locks everything \
-                       inside it, including notes that had been unlocked on their own. \
-                       Changes no file content — the lock is stored outside the vault. Use it \
-                       when the user asks you to protect something."
-    )]
-    async fn lock(
-        &self,
-        Parameters(request): Parameters<LockRequest>,
-    ) -> Result<Json<LockResponse>, CallToolResult> {
-        self.run(move |vault| commands::lock(vault, request)).await
-    }
-
-    #[tool(
-        name = "unlock",
-        description = "MUTATES CONTENT. Unlock a folder or a Markdown note so it can be \
-                       written again. Omit `path` to unlock the whole vault. Unlocking a \
-                       folder unlocks everything inside it; a single note can be unlocked \
-                       inside a locked folder. A lock is the user's decision: call this only \
-                       when the user asks you to, never to get a write through."
-    )]
-    async fn unlock(
-        &self,
-        Parameters(request): Parameters<LockRequest>,
-    ) -> Result<Json<LockResponse>, CallToolResult> {
-        self.run(move |vault| commands::unlock(vault, request)).await
-    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -300,10 +268,22 @@ mod tests {
     }
 
     #[test]
-    fn the_surface_is_exactly_the_four_tools() {
+    fn the_surface_is_exactly_the_two_tools() {
         let mut names: Vec<_> = tools().iter().map(|t| t.name.to_string()).collect();
         names.sort();
-        assert_eq!(names, ["lock", "read", "unlock", "write"]);
+        assert_eq!(names, ["read", "write"]);
+    }
+
+    #[test]
+    fn locks_are_not_reachable_over_mcp() {
+        // A lock is the user's decision about what an agent may change, so an
+        // agent can neither lift one nor set one (SPEC §6, §9). `LockRequest`
+        // derives no `JsonSchema`, so a tool for it would not compile; this
+        // catches a spelling that dodges the type.
+        let names: Vec<_> = tools().iter().map(|t| t.name.to_string()).collect();
+        for forbidden in ["lock", "unlock", "set_lock", "lock_path", "unlock_path"] {
+            assert!(!names.contains(&forbidden.to_string()), "{forbidden} exposed");
+        }
     }
 
     #[test]
@@ -311,7 +291,7 @@ mod tests {
         // Moving, deleting, and indexing a whole vault are things a human does
         // at the keyboard — the same category as `heimdall create` (SPEC §7,
         // §9). They are shell commands the desktop calls; the tool surface
-        // above stays at four.
+        // above stays at two.
         //
         // This test is a second line of defence, not the first. None of those
         // commands derive `JsonSchema`, so giving one a `#[tool]` would not
@@ -379,7 +359,7 @@ mod tests {
                 "{} has a thin description",
                 tool.name
             );
-            let mutates = matches!(tool.name.as_ref(), "write" | "lock" | "unlock");
+            let mutates = tool.name == "write";
             assert_eq!(
                 description.contains("MUTATES CONTENT"),
                 mutates,
@@ -407,8 +387,11 @@ mod tests {
         assert!(info.capabilities.tools.is_some());
         assert_eq!(info.server_info.name, "heimdall");
         let instructions = info.instructions.expect("instructions are required");
-        for tool in ["`read`", "`write`", "`unlock`", "`lock`", "locked"] {
-            assert!(instructions.contains(tool), "instructions never mention {tool}");
+        for needle in ["`read`", "`write`", "locked", "LOCKED", "`locked_at`"] {
+            assert!(instructions.contains(needle), "instructions never mention {needle}");
+        }
+        for tool in ["`lock`", "`unlock`"] {
+            assert!(!instructions.contains(tool), "instructions offer {tool}");
         }
     }
 
