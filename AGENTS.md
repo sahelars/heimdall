@@ -10,7 +10,7 @@ Heimdall is an intent-aware MCP layer for Markdown vaults: a headless Rust CLI (
 - `docs/SPEC.md` — the specification. `docs/vault-template/` — the canonical default vault contents (example notes only) embedded verbatim into the binary.
 - Integration tests live in each crate's own `tests/` directory; a virtual workspace root has no test target.
 
-**Status: Phases 1–3, 5, and 6 (SPEC §18) are implemented** — core, the direct shell CLI, the MCP stdio server (`heimdall mcp --vault <path>`), the Tauri desktop app, the desktop editor with its client operations and link graph, and the read/write/lock surface with the vault registry. The protected `aios/` tree, memories, and entries are gone. Phase 4 (signed artifacts and installers) is not done.
+**Status: Phases 1–3, 5, and 6 (SPEC §18) are implemented** — core, the direct shell CLI, the MCP stdio server (`heimdall mcp --vault <path>`), the Tauri desktop app, the desktop editor with its client operations and link graph, and the read/write/lock surface with the vault registry. The protected `aios/` tree, memories, and entries are gone. Phase 4 is delivered for macOS on Apple Silicon: a Developer ID–signed, notarized, and stapled DMG (SPEC §16). An Intel or universal build, a standalone CLI archive, and other platforms are not done.
 
 `apps/desktop/src-tauri` is deliberately **not** a workspace member: `tauri::generate_context!` embeds the built frontend, so including it would break `cargo build --workspace` until Vite has run, and it would drag a WebView dependency into the CLI artifact.
 
@@ -39,6 +39,7 @@ Heimdall is an intent-aware MCP layer for Markdown vaults: a headless Rust CLI (
 
 ## Conventions
 
+- Heimdall is source-available under the Sustainable Use License 1.0 (`LICENSE`), owned by Sam Larsen. It is not open source. Never add an OSI license identifier (`MIT`, `Apache-2.0`, …) or license header to our own files or manifests; they use `license-file`. Outside contributions require the CLA (`CLA.md`, enforced by `.github/workflows/cla.yml`). Third-party dependencies keep their own licenses.
 - MCP tool names are snake_case; shell subcommands are kebab-case; the two adapters must produce equivalent domain outcomes (contract-tested).
 - Shell output uses the versioned `{ok, data|error, meta}` JSON envelope; MCP returns typed `structuredContent` and never the shell envelope.
 - Domain errors use the fixed code set in SPEC §11. Add codes deliberately; do not invent ad-hoc ones.
@@ -67,7 +68,8 @@ npm install
 npm run sidecar                  # build the CLI and stage it as an externalBin
 npm test                         # frontend tests (design rules, panes, pure logic)
 npm run tauri:dev                # desktop dev
-npm run tauri:build              # .app and .dmg
+npm run tauri:build              # .app and .dmg (unsigned without APPLE_* set)
+npm run release:mac              # signed + notarized DMG; needs the APPLE_* variables (README → Releasing)
 (cd src-tauri && cargo test)     # bridge tests; needs `npm run sidecar` first
 ```
 

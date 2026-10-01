@@ -4,7 +4,7 @@ description = "Domain rules, bounded reads, and secure vault storage for Heimdal
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 
 [dependencies]
