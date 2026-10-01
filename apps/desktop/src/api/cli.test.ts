@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { clientConfigSnippet, mcpCommand, vaultName } from "./cli";
+import { chatgptConfigSnippet, clientConfigSnippet, mcpCommand, vaultName } from "./cli";
 
 const BUNDLED = "/Applications/Heimdall.app/Contents/MacOS/heimdall";
 
@@ -59,6 +59,27 @@ describe("clientConfigSnippet", () => {
     const awkward = '/Users/n/He said "hi"\\notes';
     const parsed = JSON.parse(clientConfigSnippet(BUNDLED, awkward));
     expect(parsed.mcpServers.heimdall.args[2]).toBe(awkward);
+  });
+});
+
+describe("chatgptConfigSnippet", () => {
+  it("produces the mcp_servers table ChatGPT's config.toml reads", () => {
+    // Byte for byte what "Add entry" writes into a file that has none yet.
+    expect(chatgptConfigSnippet(BUNDLED, "/Users/n/Notes")).toBe(
+      `[mcp_servers.heimdall]\ncommand = "${BUNDLED}"\nargs = ["mcp", "--vault", "/Users/n/Notes"]\n`,
+    );
+  });
+
+  it("uses the entry name a second vault would need", () => {
+    expect(chatgptConfigSnippet(BUNDLED, "/v", "heimdall-work")).toMatch(
+      /^\[mcp_servers\.heimdall-work\]\n/,
+    );
+  });
+
+  it("escapes a path containing spaces, quotes and backslashes", () => {
+    const awkward = '/Users/n/He said "hi"\\notes';
+    const snippet = chatgptConfigSnippet(BUNDLED, awkward);
+    expect(snippet).toContain('"/Users/n/He said \\"hi\\"\\\\notes"]');
   });
 });
 

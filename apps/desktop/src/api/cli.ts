@@ -97,6 +97,22 @@ export function clientConfigSnippet(
   );
 }
 
+/**
+ * The `[mcp_servers.<key>]` table to paste into ChatGPT's `~/.codex/config.toml`.
+ *
+ * Exactly what "Add entry" writes into a file that has none yet, so pasting by
+ * hand and installing produce the same configuration. A JSON string is also a
+ * valid TOML basic string, and `serverKey` is already reduced to a bare key.
+ */
+export function chatgptConfigSnippet(
+  cliPath: string,
+  vault: string,
+  serverKey = "heimdall",
+): string {
+  const args = ["mcp", "--vault", vault].map((arg) => JSON.stringify(arg)).join(", ");
+  return `[mcp_servers.${serverKey}]\ncommand = ${JSON.stringify(cliPath)}\nargs = [${args}]\n`;
+}
+
 /** Quote only when a shell would otherwise split the value. */
 function quote(value: string): string {
   return /[\s"'\\$`;&|<>()]/.test(value) ? `"${value.replace(/(["\\$`])/g, "\\$1")}"` : value;

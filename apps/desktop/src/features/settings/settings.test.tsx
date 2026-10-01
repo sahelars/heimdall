@@ -315,7 +315,7 @@ describe("Server", () => {
     });
     render(<Server vault="/v" status={STATUS} />);
 
-    await screen.findByText("Claude Desktop");
+    await screen.findByText("/Users/n/Library/Application Support/Claude/claude_desktop_config.json");
     // Nothing is written until the button is pressed.
     expect(invoke).not.toHaveBeenCalledWith("install_client_config", expect.anything());
 
@@ -327,6 +327,40 @@ describe("Server", () => {
       vault: "/v",
     });
     expect(screen.getByText(/heimdall-backup\.json/)).toBeInTheDocument();
+  });
+
+  it("shows each client's entry in its own format and under its own name", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "list_client_configs") {
+        return Promise.resolve([
+          {
+            id: "claude-desktop",
+            name: "Claude Desktop",
+            path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
+            present: true,
+            installed: false,
+            stale: false,
+            serverKey: "heimdall",
+          },
+          {
+            id: "chatgpt",
+            name: "ChatGPT",
+            path: "/Users/n/.codex/config.toml",
+            present: true,
+            installed: false,
+            stale: false,
+            serverKey: "heimdall-v",
+          },
+        ]);
+      }
+      return Promise.resolve(null);
+    });
+    const { container } = render(<Server vault="/v" status={STATUS} />);
+
+    await screen.findByText("/Users/n/.codex/config.toml");
+    const snippets = [...container.querySelectorAll("pre.snippet")].map((pre) => pre.textContent);
+    expect(snippets.some((text) => text?.includes('"mcpServers"') && text.includes('"heimdall"'))).toBe(true);
+    expect(snippets.some((text) => text?.startsWith("[mcp_servers.heimdall-v]"))).toBe(true);
   });
 
   it("offers ChatGPT alongside Claude Desktop", async () => {

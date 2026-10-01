@@ -9,6 +9,7 @@
 import { useEffect, useState } from "react";
 
 import {
+  chatgptConfigSnippet,
   clientConfigSnippet,
   healthCheck,
   installClientConfig,
@@ -26,7 +27,9 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
   const [busy, setBusy] = useState(false);
 
   const cliPath = status?.path ?? "";
-  const serverKey = clients.find((client) => client.present)?.serverKey ?? "heimdall";
+  // Each client's own: one file may already give `heimdall` to another vault.
+  const serverKey = (id: string) =>
+    clients.find((client) => client.id === id)?.serverKey ?? "heimdall";
   // A build directory's path is not one to leave in a file the user keeps: a
   // rebuild removes it, and the client then reports a timeout rather than a
   // missing file. The write is refused in Rust; this is so the reason arrives
@@ -79,9 +82,20 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
 
       <Panel
         title="Client configuration"
-        description="Paste this into your AI client's MCP configuration. It points at the copy of the command line tool bundled with this application."
+        description="Paste the entry for your client into its MCP configuration. It points at the copy of the command line tool bundled with this application."
       >
-        <pre className="snippet">{clientConfigSnippet(cliPath, vault, serverKey)}</pre>
+        <div className="field">
+          <span className="field__label">Claude Desktop</span>
+          <span className="field__hint">claude_desktop_config.json</span>
+        </div>
+        <pre className="snippet">
+          {clientConfigSnippet(cliPath, vault, serverKey("claude-desktop"))}
+        </pre>
+        <div className="field">
+          <span className="field__label">ChatGPT</span>
+          <span className="field__hint">~/.codex/config.toml</span>
+        </div>
+        <pre className="snippet">{chatgptConfigSnippet(cliPath, vault, serverKey("chatgpt"))}</pre>
         {developmentBuild ? (
           <Notice title="Development build">
             <p className="muted">
