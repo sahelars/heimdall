@@ -23,6 +23,9 @@ tauri = { version = "2.11", features = [] }
 # The folder picker only. There is deliberately no shell plugin: process
 # execution stays in Rust and React is granted no way to run anything.
 tauri-plugin-dialog = "2.7"
+# ChatGPT's MCP configuration is a hand-kept TOML file; `toml_edit` writes one
+# entry into it and leaves every comment and table around it as it was.
+toml_edit = "0.25"
 
 [dev-dependencies]
 tempfile = "3"

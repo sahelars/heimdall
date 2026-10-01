@@ -329,6 +329,39 @@ describe("Server", () => {
     expect(screen.getByText(/heimdall-backup\.json/)).toBeInTheDocument();
   });
 
+  it("offers ChatGPT alongside Claude Desktop", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "list_client_configs") {
+        return Promise.resolve([
+          {
+            id: "claude-desktop",
+            name: "Claude Desktop",
+            path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
+            present: true,
+            installed: false,
+            stale: false,
+            serverKey: "heimdall",
+          },
+          {
+            id: "chatgpt",
+            name: "ChatGPT",
+            path: "/Users/n/.codex/config.toml",
+            present: false,
+            installed: false,
+            stale: false,
+            serverKey: "heimdall",
+          },
+        ]);
+      }
+      return Promise.resolve(null);
+    });
+    render(<Server vault="/v" status={STATUS} />);
+
+    expect(await screen.findByText("ChatGPT — not installed")).toBeInTheDocument();
+    expect(screen.getByText("/Users/n/.codex/config.toml")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Add entry" })).toHaveLength(2);
+  });
+
   it("asks for a vault before offering to configure anything", () => {
     render(<Server vault="" status={STATUS} />);
     expect(screen.getByText("No vault selected")).toBeInTheDocument();

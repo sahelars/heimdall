@@ -9,25 +9,50 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use toml_edit::{Array, DocumentMut, Item, Table};
 
 use crate::cli_bridge::{DomainError, SidecarOrigin};
+
+/// How a client's configuration file is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Format {
+    /// A JSON object with an `mcpServers` map, as Claude Desktop keeps it.
+    Json,
+    /// A TOML document with an `[mcp_servers.<name>]` table per server.
+    Toml,
+}
+
+/// The table ChatGPT's Codex host reads its MCP servers from.
+///
+/// `~/.codex/config.toml` is shared by the ChatGPT desktop app, the Codex CLI
+/// and its IDE extension; see OpenAI's Model Context Protocol documentation.
+const TOML_SERVERS: &str = "mcp_servers";
+
+struct Client {
+    id: &'static str,
+    name: &'static str,
+    format: Format,
+    /// The file, relative to the user's home directory.
+    segments: &'static [&'static str],
+}
 
 /// The configuration files this application knows how to edit.
 ///
 /// Each entry is a fixed, per-user location. Nothing here is derived from
 /// anything React sends.
-const KNOWN_CLIENTS: &[(&str, &str, &[&str])] = &[
-    (
-        "claude-desktop",
-        "Claude Desktop",
-        &["Library", "Application Support", "Claude", "claude_desktop_config.json"],
-    ),
-    ("cursor", "Cursor", &[".cursor", "mcp.json"]),
-    (
-        "vscode",
-        "Visual Studio Code",
-        &["Library", "Application Support", "Code", "User", "mcp.json"],
-    ),
+const KNOWN_CLIENTS: &[Client] = &[
+    Client {
+        id: "claude-desktop",
+        name: "Claude Desktop",
+        format: Format::Json,
+        segments: &["Library", "Application Support", "Claude", "claude_desktop_config.json"],
+    },
+    Client {
+        id: "chatgpt",
+        name: "ChatGPT",
+        format: Format::Toml,
+        segments: &[".codex", "config.toml"],
+    },
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,9 +168,12 @@ pub fn server_entry(command: &Path, vault: &str) -> Value {
 pub fn known_clients(vault: &str) -> Vec<KnownClient> {
     KNOWN_CLIENTS
         .iter()
-        .filter_map(|(id, name, segments)| {
-            let path = config_path(segments)?;
-            let existing = read_json(&path).unwrap_or_else(|| json!({}));
+        .filter_map(|client| {
+            let path = config_path(client.segments)?;
+            let existing = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| servers_of(client.format, &text))
+                .unwrap_or_else(|| json!({}));
             let key = server_key(&existing, vault);
             let entry = existing
                 .get("mcpServers")
@@ -156,8 +184,8 @@ pub fn known_clients(vault: &str) -> Vec<KnownClient> {
             let stale = entry.is_some_and(|entry| !entry_command_exists(entry));
 
             Some(KnownClient {
-                id: id.to_string(),
-                name: name.to_string(),
+                id: client.id.to_string(),
+                name: client.name.to_string(),
                 path: path.to_string_lossy().to_string(),
                 present: path.is_file(),
                 installed,
@@ -168,12 +196,135 @@ pub fn known_clients(vault: &str) -> Vec<KnownClient> {
         .collect()
 }
 
-fn read_json(path: &Path) -> Option<Value> {
-    let text = std::fs::read_to_string(path).ok()?;
+/// A configuration's servers, in the JSON shape `server_key` and friends read
+/// (`{"mcpServers": {name: {command, args}}}`) whatever the file's format.
+///
+/// `None` when the text does not parse.
+fn servers_of(format: Format, text: &str) -> Option<Value> {
+    match format {
+        Format::Json => parse_json(text),
+        Format::Toml => Some(toml_servers(&text.parse::<DocumentMut>().ok()?)),
+    }
+}
+
+fn parse_json(text: &str) -> Option<Value> {
     if text.trim().is_empty() {
         return Some(json!({}));
     }
-    serde_json::from_str(&text).ok()
+    serde_json::from_str(text).ok()
+}
+
+fn toml_servers(document: &DocumentMut) -> Value {
+    let mut servers = Map::new();
+    if let Some(table) = document.get(TOML_SERVERS).and_then(Item::as_table_like) {
+        for (name, item) in table.iter() {
+            let mut entry = Map::new();
+            if let Some(fields) = item.as_table_like() {
+                if let Some(command) = fields.get("command").and_then(Item::as_str) {
+                    entry.insert("command".to_string(), json!(command));
+                }
+                if let Some(args) = fields.get("args").and_then(Item::as_array) {
+                    let args = args.iter().filter_map(|arg| arg.as_str()).map(|arg| json!(arg));
+                    entry.insert("args".to_string(), Value::Array(args.collect()));
+                }
+            }
+            servers.insert(name.to_string(), Value::Object(entry));
+        }
+    }
+    json!({ "mcpServers": servers })
+}
+
+/// What merging the server entry into a configuration produced.
+struct Merged {
+    server_key: String,
+    replaced: bool,
+    /// The whole file, ready to write.
+    text: String,
+}
+
+/// Merge the server entry into a configuration's text, keeping everything else.
+///
+/// `existing` is `None` when the file does not exist yet.
+fn merge(
+    format: Format,
+    existing: Option<&str>,
+    vault: &str,
+    command: &Path,
+) -> Result<Merged, DomainError> {
+    // A file that exists but does not parse is someone's working
+    // configuration. Overwriting it would destroy settings this application
+    // knows nothing about, so it stops instead.
+    let unreadable = |kind: &str| {
+        DomainError::new(
+            "INVALID_INPUT",
+            format!("that configuration file is not valid {kind}; open it and fix it first"),
+        )
+    };
+
+    match format {
+        Format::Json => {
+            let existing = match existing {
+                Some(text) => parse_json(text).ok_or_else(|| unreadable("JSON"))?,
+                None => json!({}),
+            };
+            let key = server_key(&existing, vault);
+            let mut document = match existing {
+                Value::Object(map) => map,
+                _ => Map::new(),
+            };
+
+            let servers = document
+                .entry("mcpServers".to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            let Some(servers) = servers.as_object_mut() else {
+                return Err(DomainError::new(
+                    "INVALID_INPUT",
+                    "that configuration file has an \"mcpServers\" value that is not an object",
+                ));
+            };
+
+            let replaced = servers.contains_key(&key);
+            servers.insert(key.clone(), server_entry(command, vault));
+
+            let mut text = serde_json::to_string_pretty(&Value::Object(document)).map_err(|_| {
+                DomainError::new("INTERNAL_ERROR", "could not render the configuration")
+            })?;
+            text.push('\n');
+            Ok(Merged { server_key: key, replaced, text })
+        }
+        Format::Toml => {
+            let mut document = existing
+                .unwrap_or("")
+                .parse::<DocumentMut>()
+                .map_err(|_| unreadable("TOML"))?;
+            let key = server_key(&toml_servers(&document), vault);
+
+            let servers = document.entry(TOML_SERVERS).or_insert_with(|| {
+                // Implicit, so a new file reads `[mcp_servers.heimdall]` with
+                // no empty `[mcp_servers]` header above it.
+                let mut table = Table::new();
+                table.set_implicit(true);
+                Item::Table(table)
+            });
+            let Some(servers) = servers.as_table_like_mut() else {
+                return Err(DomainError::new(
+                    "INVALID_INPUT",
+                    format!(
+                        "that configuration file has a \"{TOML_SERVERS}\" value that is not a table"
+                    ),
+                ));
+            };
+
+            let replaced = servers.contains_key(&key);
+            let mut entry = Table::new();
+            entry.insert("command", toml_edit::value(command.to_string_lossy().as_ref()));
+            let args: Array = ["mcp", "--vault", vault].into_iter().collect();
+            entry.insert("args", toml_edit::value(args));
+            servers.insert(&key, Item::Table(entry));
+
+            Ok(Merged { server_key: key, replaced, text: document.to_string() })
+        }
+    }
 }
 
 /// Merge the server entry into one known client's configuration.
@@ -198,56 +349,35 @@ pub fn install(
         ));
     }
 
-    let Some((_, _, segments)) = KNOWN_CLIENTS.iter().find(|(id, _, _)| *id == client_id) else {
+    let Some(client) = KNOWN_CLIENTS.iter().find(|client| client.id == client_id) else {
         return Err(DomainError::new(
             "INVALID_INPUT",
             format!("\"{client_id}\" is not a client this application can configure"),
         ));
     };
-    let path = config_path(segments).ok_or_else(|| {
+    let path = config_path(client.segments).ok_or_else(|| {
         DomainError::new("IO_ERROR", "could not locate this user's home directory")
     })?;
 
-    // A file that exists but is not JSON is someone's working configuration.
-    // Overwriting it would destroy settings this application knows nothing
-    // about, so it stops instead.
     let existing = if path.is_file() {
-        read_json(&path).ok_or_else(|| {
+        Some(std::fs::read_to_string(&path).map_err(|err| {
             DomainError::new(
-                "INVALID_INPUT",
-                "that configuration file is not valid JSON; open it and fix it first",
+                "IO_ERROR",
+                format!("could not read the existing configuration: {}", err.kind()),
             )
-        })?
+        })?)
     } else {
-        json!({})
+        None
     };
-
-    let key = server_key(&existing, vault);
-    let mut document = match existing {
-        Value::Object(map) => map,
-        _ => Map::new(),
-    };
-
-    let servers = document
-        .entry("mcpServers".to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    let Some(servers) = servers.as_object_mut() else {
-        return Err(DomainError::new(
-            "INVALID_INPUT",
-            "that configuration file has an \"mcpServers\" value that is not an object",
-        ));
-    };
-
-    let replaced = servers.contains_key(&key);
-    servers.insert(key.clone(), server_entry(command, vault));
+    let merged = merge(client.format, existing.as_deref(), vault, command)?;
 
     let backup_path = back_up(&path)?;
-    write_atomically(&path, &Value::Object(document))?;
+    write_atomically(&path, &merged.text)?;
 
     Ok(InstallOutcome {
         path: path.to_string_lossy().to_string(),
-        server_key: key,
-        replaced,
+        server_key: merged.server_key,
+        replaced: merged.replaced,
         backup_path,
     })
 }
@@ -257,7 +387,9 @@ fn back_up(path: &Path) -> Result<Option<String>, DomainError> {
     if !path.is_file() {
         return Ok(None);
     }
-    let backup = path.with_extension("heimdall-backup.json");
+    // Keeps the file's own extension, so the copy still opens as what it is.
+    let extension = path.extension().map(|ext| ext.to_string_lossy()).unwrap_or_default();
+    let backup = path.with_extension(format!("heimdall-backup.{extension}"));
     std::fs::copy(path, &backup).map_err(|err| {
         DomainError::new(
             "IO_ERROR",
@@ -269,7 +401,7 @@ fn back_up(path: &Path) -> Result<Option<String>, DomainError> {
 
 /// Write through a temporary sibling so an interrupted save cannot leave a
 /// client with a half-written configuration.
-fn write_atomically(path: &Path, document: &Value) -> Result<(), DomainError> {
+fn write_atomically(path: &Path, text: &str) -> Result<(), DomainError> {
     let parent = path.parent().ok_or_else(|| {
         DomainError::new("IO_ERROR", "that configuration path has no parent directory")
     })?;
@@ -279,10 +411,6 @@ fn write_atomically(path: &Path, document: &Value) -> Result<(), DomainError> {
             format!("could not create the configuration directory: {}", err.kind()),
         )
     })?;
-
-    let mut text = serde_json::to_string_pretty(document)
-        .map_err(|_| DomainError::new("INTERNAL_ERROR", "could not render the configuration"))?;
-    text.push('\n');
 
     let temp = path.with_extension("heimdall-tmp");
     std::fs::write(&temp, text).map_err(|err| {
@@ -363,13 +491,13 @@ mod tests {
         // The path a development build would write disappears on a rebuild, and
         // the client it was written for then reports a timeout rather than a
         // missing file — so the refusal has to explain itself (SPEC §15).
-        let backup = config_path(KNOWN_CLIENTS[0].2)
+        let backup = config_path(KNOWN_CLIENTS[0].segments)
             .expect("a home directory")
             .with_extension("heimdall-backup.json");
         let before = backup.is_file();
 
         let error = install(
-            KNOWN_CLIENTS[0].0,
+            KNOWN_CLIENTS[0].id,
             "/v",
             Path::new("/x/target/debug/heimdall"),
             SidecarOrigin::Development,
@@ -412,19 +540,11 @@ mod tests {
         .unwrap();
 
         // Exercise the merge directly; `install` resolves its own fixed paths.
-        let existing = read_json(&path).unwrap();
-        let key = server_key(&existing, "/v");
-        let mut document = existing.as_object().unwrap().clone();
-        let servers = document
-            .entry("mcpServers".to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-        servers
-            .as_object_mut()
-            .unwrap()
-            .insert(key, server_entry(Path::new("/x/heimdall"), "/v"));
-        write_atomically(&path, &Value::Object(document)).unwrap();
+        let existing = std::fs::read_to_string(&path).unwrap();
+        let merged = merge(Format::Json, Some(&existing), "/v", Path::new("/x/heimdall")).unwrap();
+        write_atomically(&path, &merged.text).unwrap();
 
-        let written = read_json(&path).unwrap();
+        let written = parse_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written["theme"], "dark");
         assert_eq!(written["mcpServers"]["other"]["command"], "other-server");
         assert_eq!(written["mcpServers"]["heimdall"]["args"][2], "/v");
@@ -434,7 +554,7 @@ mod tests {
     fn a_write_leaves_no_temporary_file_behind() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        write_atomically(&path, &json!({ "a": 1 })).unwrap();
+        write_atomically(&path, "{ \"a\": 1 }\n").unwrap();
 
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -456,6 +576,97 @@ mod tests {
 
         // Nothing to back up when the file does not exist yet.
         assert!(back_up(&dir.path().join("missing.json")).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_toml_merge_keeps_every_other_server_setting_and_comment() {
+        let existing = r#"# my settings
+model = "gpt-5"
+
+[mcp_servers.other]
+command = "other-server" # keep me
+args = []
+"#;
+        let merged = merge(Format::Toml, Some(existing), "/v", Path::new("/x/heimdall")).unwrap();
+        assert_eq!(merged.server_key, "heimdall");
+        assert!(!merged.replaced);
+
+        assert!(merged.text.starts_with(existing), "{}", merged.text);
+        let document: DocumentMut = merged.text.parse().unwrap();
+        assert_eq!(document["model"].as_str(), Some("gpt-5"));
+        assert_eq!(document["mcp_servers"]["heimdall"]["command"].as_str(), Some("/x/heimdall"));
+        let servers = toml_servers(&document);
+        assert_eq!(servers["mcpServers"]["heimdall"]["args"], json!(["mcp", "--vault", "/v"]));
+        assert_eq!(servers["mcpServers"]["other"]["command"], "other-server");
+    }
+
+    #[test]
+    fn a_new_toml_file_gets_only_the_server_table() {
+        let merged = merge(Format::Toml, None, "/v", Path::new("/x/heimdall")).unwrap();
+        assert_eq!(
+            merged.text,
+            "[mcp_servers.heimdall]\ncommand = \"/x/heimdall\"\nargs = [\"mcp\", \"--vault\", \"/v\"]\n"
+        );
+    }
+
+    #[test]
+    fn reinstalling_into_toml_replaces_the_entry_for_the_same_vault() {
+        let first = merge(Format::Toml, None, "/v", Path::new("/old/heimdall")).unwrap();
+        let second =
+            merge(Format::Toml, Some(&first.text), "/v", Path::new("/new/heimdall")).unwrap();
+        assert_eq!(second.server_key, "heimdall");
+        assert!(second.replaced);
+        assert!(second.text.contains("/new/heimdall") && !second.text.contains("/old/heimdall"));
+    }
+
+    #[test]
+    fn a_second_vault_in_toml_gets_its_own_entry() {
+        let first = merge(Format::Toml, None, "/Users/n/Personal", Path::new("/x/heimdall")).unwrap();
+        let second = merge(
+            Format::Toml,
+            Some(&first.text),
+            "/Users/n/Work Notes",
+            Path::new("/x/heimdall"),
+        )
+        .unwrap();
+        assert_eq!(second.server_key, "heimdall-work-notes");
+        let servers = servers_of(Format::Toml, &second.text).unwrap();
+        assert_eq!(servers["mcpServers"]["heimdall"]["args"][2], "/Users/n/Personal");
+        assert_eq!(servers["mcpServers"]["heimdall-work-notes"]["args"][2], "/Users/n/Work Notes");
+    }
+
+    #[test]
+    fn a_configuration_that_does_not_parse_is_refused() {
+        let error = merge(Format::Toml, Some("[mcp_servers"), "/v", Path::new("/x/heimdall"))
+            .err()
+            .expect("a refusal");
+        assert_eq!(error.code, "INVALID_INPUT");
+        assert!(error.message.contains("TOML"), "{}", error.message);
+
+        let error = merge(Format::Toml, Some("mcp_servers = 3\n"), "/v", Path::new("/x/heimdall"))
+            .err()
+            .expect("a refusal");
+        assert_eq!(error.code, "INVALID_INPUT");
+
+        let error = merge(Format::Json, Some("{"), "/v", Path::new("/x/heimdall"))
+            .err()
+            .expect("a refusal");
+        assert!(error.message.contains("JSON"), "{}", error.message);
+    }
+
+    #[test]
+    fn a_backup_keeps_the_files_own_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "model = \"x\"\n").unwrap();
+        let backup = back_up(&path).unwrap().expect("a backup path");
+        assert!(backup.ends_with("config.heimdall-backup.toml"), "{backup}");
+    }
+
+    #[test]
+    fn the_clients_offered_are_claude_desktop_and_chatgpt() {
+        let ids: Vec<_> = KNOWN_CLIENTS.iter().map(|client| client.id).collect();
+        assert_eq!(ids, ["claude-desktop", "chatgpt"]);
     }
 
     #[test]

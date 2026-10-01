@@ -332,6 +332,13 @@ describe("the settings sheet", () => {
     const rule = rules(declarations).find((candidate) => candidate.selector === ".modal:focus");
     expect(rule?.body).toMatch(/outline:\s*none/);
   });
+
+  it("keeps one size from tab to tab", () => {
+    // Sized to its content, the sheet jumped every time a tab changed.
+    const sheet = rules(declarations).find((rule) => rule.selector === ".modal");
+    expect(sheet?.body).toMatch(/(^|[\s;])height:\s*86vh;/);
+    expect(sheet?.body).not.toMatch(/max-height/);
+  });
 });
 
 describe("palette", () => {

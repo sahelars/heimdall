@@ -907,7 +907,11 @@ pre {
   color: var(--fg);
   padding: 0;
   width: min(780px, 92vw);
-  max-height: 86vh;
+  /*
+   * A fixed height, not a cap: sized to its content, the sheet jumped every
+   * time a tab changed. `vh` still shrinks it with the window.
+   */
+  height: 86vh;
   overflow: hidden;
 }
 
@@ -928,7 +932,7 @@ pre {
 .modal__frame {
   display: flex;
   flex-direction: column;
-  max-height: 86vh;
+  height: 100%;
 }
 
 /*
@@ -947,6 +951,8 @@ pre {
 }
 
 .modal__body {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: var(--pad);
   display: flex;

@@ -95,7 +95,7 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
 
       <Panel
         title="Install automatically"
-        description="Writes the entry above into a detected client's configuration. Existing servers and settings are kept, and the previous file is backed up first."
+        description="Writes the entry above into a client's configuration, in that client's own format. Existing servers and settings are kept, and the previous file is backed up first."
       >
         {developmentBuild ? (
           <Notice title="Not available in a development build">
