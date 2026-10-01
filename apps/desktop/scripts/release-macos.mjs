@@ -79,8 +79,8 @@ function build() {
   } catch {
     fail(
       "npm run tauri:build did not succeed (see above). If it failed creating Assets.car, " +
-        "run the release again, after `killall ibtoold` if it fails twice: actool's daemon " +
-        "intermittently crashes on Icon Composer icons.",
+        "check that scripts/actool/actool is still executable and on PATH in `tauri:build`, " +
+        "and that the build runs outside any sandbox.",
     );
   }
 }
