@@ -23,7 +23,7 @@ pub use link_graph::{
     UnresolvedLink,
 };
 pub use listing::{DocumentEntry, Listing};
-pub use lock::{lock, unlock, LockRequest, LockResponse};
+pub use lock::{lock, unlock, LockRequest, LockResponse, Presence, Protection};
 pub use move_path::{move_path, MovePathRequest, MovePathResponse};
 pub use read::{read, ReadRequest, ReadResponse};
 pub use relink::{

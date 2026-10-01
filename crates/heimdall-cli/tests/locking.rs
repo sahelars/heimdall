@@ -114,3 +114,50 @@ fn a_lock_taken_by_one_process_binds_every_other() {
         .unwrap();
     assert_eq!(data(&accepted)["created"], false);
 }
+
+// ---------------------------------------------------------------------------
+// Unlocking needs a person (SPEC §6)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_unlock_nobody_confirmed_is_refused_and_changes_nothing() {
+    let (_tmp, vault) = new_vault();
+    data(&run(&["lock", "projects", "--vault", &vault]));
+
+    let output = common::command()
+        .env("HEIMDALL_TEST_PRESENCE", "cancel")
+        .args(["unlock", "projects", "--vault", &vault])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let envelope = envelope(&output);
+    assert_eq!(envelope["error"]["code"], "NOT_CONFIRMED", "{envelope}");
+    assert_eq!(envelope["error"]["details"]["reason"], "cancelled");
+
+    let read = data(&run(&["read", NOTE, "--vault", &vault]));
+    assert_eq!(read["locked"], true);
+    assert_eq!(read["locked_at"], "projects");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_locked_note_is_refused_by_the_operating_system_too() {
+    let (_tmp, vault) = new_vault();
+    let locked = data(&run(&["lock", NOTE, "--vault", &vault]));
+    assert_eq!(locked["protection"], "complete");
+
+    // What an agent's shell or patch tool would do.
+    let target = format!("{vault}/{NOTE}");
+    assert!(std::fs::write(&target, b"edited by a shell\n").is_err());
+    assert!(std::fs::remove_file(&target).is_err());
+
+    data(&run(&["unlock", NOTE, "--vault", &vault]));
+    std::fs::write(&target, b"edited after unlocking\n").unwrap();
+}
+
+#[test]
+fn the_version_says_whether_a_person_must_confirm() {
+    let version = data(&run(&["--version", "--json"]));
+    let expected = if cfg!(debug_assertions) { "scripted-in-debug" } else { "required" };
+    assert_eq!(version["presence"], expected);
+}

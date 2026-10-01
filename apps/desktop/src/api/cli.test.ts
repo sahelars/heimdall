@@ -7,25 +7,27 @@
 
 import { describe, expect, it } from "vitest";
 
-import { chatgptConfigSnippet, clientConfigSnippet, mcpCommand, vaultName } from "./cli";
+import {
+  chatgptConfigSnippet,
+  clientConfigSnippet,
+  mcpCommand,
+  protectedLocation,
+  vaultName,
+} from "./cli";
 
 const BUNDLED = "/Applications/Heimdall.app/Contents/MacOS/heimdall";
 
 describe("mcpCommand", () => {
-  it("shows the exact command, pointing at the bundled tool", () => {
-    expect(mcpCommand(BUNDLED, "/Users/n/Notes")).toBe(
-      `${BUNDLED} mcp --vault /Users/n/Notes`,
-    );
+  it("shows the exact command, pointing at the bundled tool, with no vault in it", () => {
+    expect(mcpCommand(BUNDLED)).toBe(`${BUNDLED} mcp`);
   });
 
-  it("quotes a vault path a shell would otherwise split", () => {
-    expect(mcpCommand(BUNDLED, "/Users/n/My Vault")).toBe(
-      `${BUNDLED} mcp --vault "/Users/n/My Vault"`,
-    );
+  it("quotes a tool path a shell would otherwise split", () => {
+    expect(mcpCommand("/Applications/My Apps/heimdall")).toBe('"/Applications/My Apps/heimdall" mcp');
   });
 
   it("escapes a path that would otherwise break out of its quotes", () => {
-    const command = mcpCommand(BUNDLED, '/Users/n/"; rm -rf ~; echo "');
+    const command = mcpCommand('/x/"; rm -rf ~; echo "/heimdall');
     // Every embedded quote is escaped, so the value cannot end the argument.
     expect(command).not.toMatch(/[^\\]"; rm/);
     expect(command).toContain('\\"');
@@ -33,53 +35,51 @@ describe("mcpCommand", () => {
 });
 
 describe("clientConfigSnippet", () => {
-  it("produces a valid mcpServers entry for the vault", () => {
-    const snippet = clientConfigSnippet(BUNDLED, "/Users/n/Notes");
-    const parsed = JSON.parse(snippet);
-
-    expect(parsed.mcpServers.heimdall).toEqual({
-      command: BUNDLED,
-      args: ["mcp", "--vault", "/Users/n/Notes"],
-    });
+  it("produces one mcpServers entry for every shared vault", () => {
+    const parsed = JSON.parse(clientConfigSnippet(BUNDLED));
+    expect(parsed.mcpServers).toEqual({ heimdall: { command: BUNDLED, args: ["mcp"] } });
   });
 
-  it("never puts a vault path anywhere a tool call could read it", () => {
-    // The vault appears once, as a server argument — the one place §7 allows.
-    const parsed = JSON.parse(clientConfigSnippet(BUNDLED, "/v"));
-    expect(parsed.mcpServers.heimdall.args).toEqual(["mcp", "--vault", "/v"]);
-    expect(Object.keys(parsed.mcpServers.heimdall)).toEqual(["command", "args"]);
+  it("never names a vault: clients pick one by name on each call", () => {
+    const snippet = clientConfigSnippet(BUNDLED);
+    expect(snippet).not.toContain("--vault");
+    expect(Object.keys(JSON.parse(snippet).mcpServers.heimdall)).toEqual(["command", "args"]);
   });
 
-  it("uses the entry name a second vault would need", () => {
-    const parsed = JSON.parse(clientConfigSnippet(BUNDLED, "/Users/n/Work", "heimdall-work"));
-    expect(Object.keys(parsed.mcpServers)).toEqual(["heimdall-work"]);
-  });
-
-  it("stays valid JSON for a path containing quotes and backslashes", () => {
-    const awkward = '/Users/n/He said "hi"\\notes';
-    const parsed = JSON.parse(clientConfigSnippet(BUNDLED, awkward));
-    expect(parsed.mcpServers.heimdall.args[2]).toBe(awkward);
+  it("stays valid JSON for a tool path containing quotes and backslashes", () => {
+    const awkward = '/Users/n/He said "hi"\\heimdall';
+    expect(JSON.parse(clientConfigSnippet(awkward)).mcpServers.heimdall.command).toBe(awkward);
   });
 });
 
 describe("chatgptConfigSnippet", () => {
   it("produces the mcp_servers table ChatGPT's config.toml reads", () => {
     // Byte for byte what "Add entry" writes into a file that has none yet.
-    expect(chatgptConfigSnippet(BUNDLED, "/Users/n/Notes")).toBe(
-      `[mcp_servers.heimdall]\ncommand = "${BUNDLED}"\nargs = ["mcp", "--vault", "/Users/n/Notes"]\n`,
+    expect(chatgptConfigSnippet(BUNDLED)).toBe(
+      `[mcp_servers.heimdall]\ncommand = "${BUNDLED}"\nargs = ["mcp"]\n`,
     );
   });
 
-  it("uses the entry name a second vault would need", () => {
-    expect(chatgptConfigSnippet(BUNDLED, "/v", "heimdall-work")).toMatch(
-      /^\[mcp_servers\.heimdall-work\]\n/,
-    );
+  it("escapes a tool path containing spaces, quotes and backslashes", () => {
+    const awkward = '/Users/n/He said "hi"\\heimdall';
+    expect(chatgptConfigSnippet(awkward)).toContain('"/Users/n/He said \\"hi\\"\\\\heimdall"');
+  });
+});
+
+describe("protectedLocation", () => {
+  it("names the folders macOS keeps other apps out of", () => {
+    expect(protectedLocation("/Users/n/Documents/Heimdall-Vault")).toBe("Documents");
+    expect(protectedLocation("/Users/n/Desktop/notes")).toBe("Desktop");
+    expect(protectedLocation("/Users/n/Downloads")).toBe("Downloads");
+    expect(protectedLocation("/Users/n/Library/Mobile Documents/com~apple~CloudDocs/v")).toBe("iCloud Drive");
+    expect(protectedLocation("/Users/n/Library/CloudStorage/Dropbox/v")).toBe("cloud storage");
+    expect(protectedLocation("/Volumes/USB/v")).toBe("an external or network volume");
   });
 
-  it("escapes a path containing spaces, quotes and backslashes", () => {
-    const awkward = '/Users/n/He said "hi"\\notes';
-    const snippet = chatgptConfigSnippet(BUNDLED, awkward);
-    expect(snippet).toContain('"/Users/n/He said \\"hi\\"\\\\notes"]');
+  it("leaves everywhere else alone", () => {
+    expect(protectedLocation("/Users/n/Notes")).toBeNull();
+    expect(protectedLocation("/Users/n/DocumentsArchive/v")).toBeNull();
+    expect(protectedLocation("/Users/n/Heimdall/Work")).toBeNull();
   });
 });
 

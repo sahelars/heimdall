@@ -181,53 +181,134 @@ describe("Setup", () => {
 });
 
 describe("Server", () => {
-  it("shows the exact command and a config snippet pointing at the bundled tool", async () => {
-    invoke.mockResolvedValue([]);
-    render(<Server vault="/Users/n/My Vault" status={STATUS} />);
+  const CLAUDE = {
+    id: "claude-desktop",
+    name: "Claude Desktop",
+    path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
+    present: true,
+    installed: false,
+    stale: false,
+    legacy: [],
+  };
+  const CHATGPT = {
+    id: "chatgpt",
+    name: "ChatGPT",
+    path: "/Users/n/.codex/config.toml",
+    present: true,
+    installed: false,
+    stale: false,
+    legacy: [],
+  };
 
-    expect(
-      screen.getByText(`${STATUS.path} mcp --vault "/Users/n/My Vault"`),
-    ).toBeInTheDocument();
-
-    const snippet = screen.getByText(/"mcpServers"/);
-    const parsed = JSON.parse(snippet.textContent!);
-    expect(parsed.mcpServers.heimdall.command).toBe(STATUS.path);
-    expect(parsed.mcpServers.heimdall.args).toEqual(["mcp", "--vault", "/Users/n/My Vault"]);
-  });
-
-  it("reports a successful handshake with what the server said", async () => {
-    invoke.mockImplementation((command: string) => {
-      if (command === "list_client_configs") return Promise.resolve([]);
-      if (command === "health_check") {
-        return Promise.resolve({
-          ok: true,
-          serverName: "heimdall",
-          serverVersion: "0.1.0",
-          protocolVersion: "2025-11-25",
-        });
+  /** Answer the Tauri commands the Server screen makes, with these fixtures. */
+  function serve({
+    clients = [] as unknown[],
+    vaults = [] as unknown[],
+    health = null as unknown,
+    installed = null as unknown,
+    onCli = (_command: string, _request: Record<string, unknown>) => undefined as unknown,
+  } = {}) {
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "list_client_configs") return Promise.resolve(clients);
+      if (command === "health_check") return Promise.resolve(health);
+      if (command === "install_client_config") return Promise.resolve(installed);
+      if (command === "invoke_cli") {
+        const cli = args?.command as string;
+        const request = (args?.request ?? {}) as Record<string, unknown>;
+        const answer = onCli(cli, request);
+        if (answer !== undefined) return Promise.resolve(answer);
+        if (cli === "vaults") return Promise.resolve({ ok: true, data: { vaults } });
+        return Promise.resolve({ ok: true, data: {} });
       }
       return Promise.resolve(null);
     });
+  }
+
+  it("shows one command and one entry, with no vault in either", async () => {
+    serve();
+    render(<Server vault="/Users/n/My Vault" status={STATUS} />);
+
+    expect(screen.getByText(`${STATUS.path} mcp`)).toBeInTheDocument();
+    const snippet = screen.getByText(/"mcpServers"/);
+    const parsed = JSON.parse(snippet.textContent!);
+    expect(parsed.mcpServers).toEqual({ heimdall: { command: STATUS.path, args: ["mcp"] } });
+    expect(screen.getByText(/args = \["mcp"\]/)).toBeInTheDocument();
+  });
+
+  it("lists vaults with their shared names and shares one only when asked", async () => {
+    const shareCalls: Record<string, unknown>[] = [];
+    serve({
+      vaults: [
+        { path: "/Users/n/Work", folder: "Work", exists: true, shared: true, name: "Work" },
+        { path: "/Users/n/Private", folder: "Private", exists: true, shared: false, name: null },
+      ],
+      onCli: (command, request) => {
+        if (command === "share") shareCalls.push(request);
+        return undefined;
+      },
+    });
+    render(<Server vault="/Users/n/Work" status={STATUS} />);
+
+    expect(await screen.findByText("Work — shared")).toBeInTheDocument();
+    expect(screen.getByText("Private — not shared")).toBeInTheDocument();
+    expect(shareCalls).toHaveLength(0);
+
+    await userEvent.click(screen.getByRole("button", { name: "Share" }));
+    await waitFor(() => expect(shareCalls).toEqual([{ vault: "/Users/n/Private" }]));
+  });
+
+  it("offers the open vault for sharing before anything has registered it", async () => {
+    serve({ vaults: [] });
+    render(<Server vault="/Users/n/Fresh" status={STATUS} />);
+    expect(await screen.findByText("Fresh — not shared")).toBeInTheDocument();
+  });
+
+  it("warns that macOS may keep a client out of a vault in Documents", async () => {
+    serve({
+      vaults: [
+        {
+          path: "/Users/n/Documents/Heimdall-Vault",
+          folder: "Heimdall-Vault",
+          exists: true,
+          shared: true,
+          name: "Heimdall-Vault",
+        },
+      ],
+    });
+    render(<Server vault="/Users/n/Documents/Heimdall-Vault" status={STATUS} />);
+
+    expect(await screen.findByText("macOS may keep AI clients out")).toBeInTheDocument();
+    expect(screen.getByText(/is in Documents/)).toBeInTheDocument();
+    expect(screen.getByText(/Privacy & Security/)).toBeInTheDocument();
+  });
+
+  it("reports a successful handshake with what the server said and why it cannot prove more", async () => {
+    serve({
+      health: {
+        ok: true,
+        serverName: "heimdall",
+        serverVersion: "0.1.0",
+        protocolVersion: "2025-11-25",
+      },
+    });
     render(<Server vault="/v" status={STATUS} />);
 
+    expect(screen.getByText(/runs with Heimdall's own macOS permissions/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Run health check" }));
 
     await screen.findByText("Handshake succeeded");
     expect(screen.getByText("heimdall 0.1.0")).toBeInTheDocument();
     expect(screen.getByText("2025-11-25")).toBeInTheDocument();
+    expect(invoke).toHaveBeenCalledWith("health_check");
   });
 
   it("keeps a failed handshake actionable", async () => {
-    invoke.mockImplementation((command: string) => {
-      if (command === "list_client_configs") return Promise.resolve([]);
-      if (command === "health_check") {
-        return Promise.resolve({
-          ok: false,
-          error: { code: "IO_ERROR", message: "the server did not answer within 10 seconds" },
-          stderr: "heimdall mcp: NOT_FOUND: vault directory does not exist",
-        });
-      }
-      return Promise.resolve(null);
+    serve({
+      health: {
+        ok: false,
+        error: { code: "IO_ERROR", message: "the server did not answer within 10 seconds" },
+        stderr: "heimdall mcp: could not start",
+      },
     });
     render(<Server vault="/missing" status={STATUS} />);
 
@@ -237,28 +318,13 @@ describe("Server", () => {
     expect(alert).toHaveTextContent("IO_ERROR");
     expect(alert).toHaveTextContent("did not answer");
     // Captured stderr is shown, because that is where the real reason is.
-    expect(alert).toHaveTextContent("vault directory does not exist");
+    expect(alert).toHaveTextContent("could not start");
   });
 
   it("refuses to put a development build's path into a client's configuration", async () => {
     // The path would break on the next rebuild, and the client's only symptom
     // would be a timeout — so the reason has to arrive before the click.
-    invoke.mockImplementation((command: string) => {
-      if (command === "list_client_configs") {
-        return Promise.resolve([
-          {
-            id: "claude-desktop",
-            name: "Claude Desktop",
-            path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
-            present: true,
-            installed: false,
-            stale: false,
-            serverKey: "heimdall",
-          },
-        ]);
-      }
-      return Promise.resolve(null);
-    });
+    serve({ clients: [CLAUDE] });
     render(<Server vault="/v" status={DEV_STATUS} />);
 
     expect(await screen.findByText("Not available in a development build")).toBeInTheDocument();
@@ -267,139 +333,74 @@ describe("Server", () => {
   });
 
   it("says when the entry already there names a command that has gone", async () => {
-    invoke.mockImplementation((command: string) => {
-      if (command === "list_client_configs") {
-        return Promise.resolve([
-          {
-            id: "claude-desktop",
-            name: "Claude Desktop",
-            path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
-            present: true,
-            installed: true,
-            stale: true,
-            serverKey: "heimdall",
-          },
-        ]);
-      }
-      return Promise.resolve(null);
-    });
+    serve({ clients: [{ ...CLAUDE, installed: true, stale: true }] });
     render(<Server vault="/v" status={STATUS} />);
 
     expect(await screen.findByText(/its command is gone/)).toBeInTheDocument();
   });
 
-  it("writes a client entry only when asked, and says what it did", async () => {
-    invoke.mockImplementation((command: string) => {
-      if (command === "list_client_configs") {
-        return Promise.resolve([
-          {
-            id: "claude-desktop",
-            name: "Claude Desktop",
-            path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
-            present: true,
-            installed: false,
-            stale: false,
-            serverKey: "heimdall",
-          },
-        ]);
-      }
-      if (command === "install_client_config") {
-        return Promise.resolve({
-          path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
-          serverKey: "heimdall",
-          replaced: false,
-          backupPath: "/Users/n/Library/Application Support/Claude/claude_desktop_config.heimdall-backup.json",
-        });
-      }
-      return Promise.resolve(null);
+  it("names the per-vault entries an update replaces", async () => {
+    serve({
+      clients: [
+        {
+          ...CHATGPT,
+          legacy: [
+            { key: "heimdall", vault: "/Users/n/Documents/Vault-test" },
+            { key: "heimdall-heimdall-vault", vault: "/Users/n/Documents/Heimdall-Vault" },
+          ],
+        },
+      ],
     });
     render(<Server vault="/v" status={STATUS} />);
 
-    await screen.findByText("/Users/n/Library/Application Support/Claude/claude_desktop_config.json");
+    expect(
+      await screen.findByText(/Replaces 2 older per-vault entries: heimdall, heimdall-heimdall-vault/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Update entry" })).toBeEnabled();
+  });
+
+  it("will not overwrite a heimdall entry that runs something else", async () => {
+    serve({ clients: [{ ...CLAUDE, conflict: "\"heimdall\" in this file runs something other than Heimdall" }] });
+    render(<Server vault="/v" status={STATUS} />);
+
+    expect(await screen.findByText(/runs something other than Heimdall/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add entry" })).toBeDisabled();
+  });
+
+  it("writes a client entry only when asked, and says what it did", async () => {
+    serve({
+      clients: [CLAUDE],
+      installed: {
+        path: CLAUDE.path,
+        serverKey: "heimdall",
+        replaced: true,
+        removed: ["heimdall-work-notes"],
+        backupPath: "/Users/n/Library/Application Support/Claude/claude_desktop_config.heimdall-backup.json",
+      },
+    });
+    render(<Server vault="/v" status={STATUS} />);
+
+    await screen.findByText(CLAUDE.path);
     // Nothing is written until the button is pressed.
     expect(invoke).not.toHaveBeenCalledWith("install_client_config", expect.anything());
 
     await userEvent.click(screen.getByRole("button", { name: "Add entry" }));
 
     await screen.findByText("Configuration written");
-    expect(invoke).toHaveBeenCalledWith("install_client_config", {
-      clientId: "claude-desktop",
-      vault: "/v",
-    });
+    expect(invoke).toHaveBeenCalledWith("install_client_config", { clientId: "claude-desktop" });
+    expect(screen.getByText("heimdall-work-notes")).toBeInTheDocument();
     expect(screen.getByText(/heimdall-backup\.json/)).toBeInTheDocument();
   });
 
-  it("shows each client's entry in its own format and under its own name", async () => {
-    invoke.mockImplementation((command: string) => {
-      if (command === "list_client_configs") {
-        return Promise.resolve([
-          {
-            id: "claude-desktop",
-            name: "Claude Desktop",
-            path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
-            present: true,
-            installed: false,
-            stale: false,
-            serverKey: "heimdall",
-          },
-          {
-            id: "chatgpt",
-            name: "ChatGPT",
-            path: "/Users/n/.codex/config.toml",
-            present: true,
-            installed: false,
-            stale: false,
-            serverKey: "heimdall-v",
-          },
-        ]);
-      }
-      return Promise.resolve(null);
-    });
-    const { container } = render(<Server vault="/v" status={STATUS} />);
-
-    await screen.findByText("/Users/n/.codex/config.toml");
-    const snippets = [...container.querySelectorAll("pre.snippet")].map((pre) => pre.textContent);
-    expect(snippets.some((text) => text?.includes('"mcpServers"') && text.includes('"heimdall"'))).toBe(true);
-    expect(snippets.some((text) => text?.startsWith("[mcp_servers.heimdall-v]"))).toBe(true);
-  });
-
-  it("offers ChatGPT alongside Claude Desktop", async () => {
-    invoke.mockImplementation((command: string) => {
-      if (command === "list_client_configs") {
-        return Promise.resolve([
-          {
-            id: "claude-desktop",
-            name: "Claude Desktop",
-            path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
-            present: true,
-            installed: false,
-            stale: false,
-            serverKey: "heimdall",
-          },
-          {
-            id: "chatgpt",
-            name: "ChatGPT",
-            path: "/Users/n/.codex/config.toml",
-            present: false,
-            installed: false,
-            stale: false,
-            serverKey: "heimdall",
-          },
-        ]);
-      }
-      return Promise.resolve(null);
-    });
+  it("offers ChatGPT alongside Claude Desktop, and says which ChatGPT modes can use it", async () => {
+    serve({ clients: [CLAUDE, { ...CHATGPT, present: false }] });
     render(<Server vault="/v" status={STATUS} />);
 
     expect(await screen.findByText("ChatGPT — not installed")).toBeInTheDocument();
     expect(screen.getByText("/Users/n/.codex/config.toml")).toBeInTheDocument();
+    expect(screen.getByText(/Work or Codex mode only/)).toBeInTheDocument();
+    expect(screen.getByText(/Restart ChatGPT after adding/)).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Add entry" })).toHaveLength(2);
-  });
-
-  it("asks for a vault before offering to configure anything", () => {
-    render(<Server vault="" status={STATUS} />);
-    expect(screen.getByText("No vault selected")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Run health check" })).toBeNull();
   });
 });
 

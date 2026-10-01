@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commands::types::DocumentKind;
 use crate::errors::{Error, ErrorCode, Result};
-use crate::notelocks::LockRules;
+use crate::notelocks::Locks;
 use crate::paths::{self, RelPath};
 use crate::revisions::Revision;
 use crate::storage::Vault;
@@ -98,15 +98,16 @@ pub fn delete_path(vault: &Vault, request: DeletePathRequest) -> Result<DeletePa
         // The write lock makes "not taken" and "take it" one decision, so two
         // deletes of same-named notes cannot pick the same trash slot.
         let outcome = vault.with_write_lock(&candidate, || {
-            let mut rules = LockRules::load(vault)?;
-            rules.deny_subtree(&path)?;
-            rules.deny_change_in(&path.parent(), &path)?;
+            let mut locks = Locks::load(vault)?;
+            locks.deny_subtree(&path)?;
+            locks.deny_change_in(&path.parent(), &path)?;
 
+            let real = locks.real(&path)?;
             vault.rename_no_replace(&path, &candidate)?;
-            let before = rules.clone();
-            rules.drop_within(&path);
-            if rules != before {
-                rules.save(vault)?;
+            let before = locks.rules().clone();
+            locks.rules_mut().drop_within(&real);
+            if *locks.rules() != before {
+                locks.save()?;
             }
             Ok(())
         });

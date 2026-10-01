@@ -26,6 +26,7 @@ fn create(vault: &Vault, path: &str, content: &str) -> Revision {
     write(
         vault,
         WriteRequest {
+            vault: None,
             path: path.to_string(),
             content: content.to_string(),
             expected_revision: Some(None),
@@ -39,6 +40,7 @@ fn read_back(vault: &Vault, path: &str) -> String {
     read(
         vault,
         ReadRequest {
+            vault: None,
             path: Some(path.to_string()),
             ..Default::default()
         },
@@ -54,6 +56,7 @@ fn listing(vault: &Vault) -> Vec<String> {
     read(
         vault,
         ReadRequest {
+            vault: None,
             recursive: true,
             max_depth: Some(16),
             limit: Some(200),
@@ -84,6 +87,7 @@ fn saving_requires_the_revision_the_note_was_read_at() {
     let saved = write(
         &vault,
         WriteRequest {
+            vault: None,
             path: "ideas/note.md".into(),
             content: "two\n".into(),
             expected_revision: Some(Some(revision.clone())),
@@ -97,6 +101,7 @@ fn saving_requires_the_revision_the_note_was_read_at() {
     let stale = write(
         &vault,
         WriteRequest {
+            vault: None,
             path: "ideas/note.md".into(),
             content: "three\n".into(),
             expected_revision: Some(Some(revision)),
@@ -116,6 +121,7 @@ fn omitting_the_revision_creates_but_never_replaces() {
         write(
             &vault,
             WriteRequest {
+                vault: None,
                 path: "ideas/note.md".into(),
                 content: content.into(),
                 expected_revision: None,
@@ -141,6 +147,7 @@ fn creating_over_an_existing_note_is_a_conflict_not_an_overwrite() {
     let error = write(
         &vault,
         WriteRequest {
+            vault: None,
             path: "ideas/note.md".into(),
             content: "replacement\n".into(),
             expected_revision: Some(None),
@@ -161,6 +168,7 @@ fn document_writes_cannot_reach_hidden_folders() {
         let error = write(
             &vault,
             WriteRequest {
+                vault: None,
                 path: path.to_string(),
                 content: "nope\n".into(),
                 expected_revision: Some(None),
@@ -177,6 +185,7 @@ fn a_write_into_a_missing_folder_names_the_folder_rather_than_creating_it() {
     let error = write(
         &vault,
         WriteRequest {
+            vault: None,
             path: "not_yet/note.md".into(),
             content: "body\n".into(),
             expected_revision: Some(None),
@@ -365,6 +374,7 @@ fn a_stale_revision_refuses_the_delete() {
     write(
         &vault,
         WriteRequest {
+            vault: None,
             path: "ideas/note.md".into(),
             content: "two\n".into(),
             expected_revision: Some(Some(first.clone())),

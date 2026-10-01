@@ -20,5 +20,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
 
+# The immutable file flag a lock sets on macOS (`fchflags`, `UF_IMMUTABLE`).
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile.workspace = true

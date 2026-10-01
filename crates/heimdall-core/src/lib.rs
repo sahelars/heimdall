@@ -8,6 +8,7 @@
 /// The version of this crate, reported by `heimdall --version --json`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod agents;
 pub mod appdata;
 pub mod commands;
 pub mod errors;

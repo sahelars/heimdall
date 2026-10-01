@@ -22,7 +22,7 @@ use crate::commands::links;
 use crate::commands::resolve::{self, Index};
 use crate::errors::Result;
 use crate::limits;
-use crate::notelocks::LockRules;
+use crate::notelocks::Locks;
 use crate::paths::RelPath;
 use crate::storage::Vault;
 
@@ -86,7 +86,7 @@ pub struct LinkGraphResponse {
 
 pub fn link_graph(vault: &Vault, request: LinkGraphRequest) -> Result<LinkGraphResponse> {
     let max_depth = limits::resolve_graph_depth(request.max_depth)?;
-    let rules = LockRules::load(vault)?;
+    let rules = Locks::load(vault)?;
 
     let mut found = Vec::new();
     let mut omitted = 0usize;
@@ -109,7 +109,7 @@ pub fn link_graph(vault: &Vault, request: LinkGraphRequest) -> Result<LinkGraphR
         .map(|note| GraphNode {
             path: note.path.to_string(),
             title: title_of(&note.path),
-            locked: rules.is_locked(&note.path),
+            locked: rules.is_locked_by_rule(&note.path),
             size_bytes: note.size_bytes,
             modified_at: note.modified_at.clone(),
             scanned: false,

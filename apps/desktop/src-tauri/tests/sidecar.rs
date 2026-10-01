@@ -33,6 +33,9 @@ fn isolate_data_dir() {
             "HEIMDALL_DATA_DIR",
             std::env::temp_dir().join("heimdall-test-data"),
         );
+        // Answers the unlock prompt. Only a debug sidecar listens, and only
+        // for a vault under the temp directory, which every vault here is.
+        std::env::set_var("HEIMDALL_TEST_PRESENCE", "confirm");
     });
 }
 
@@ -225,7 +228,7 @@ fn an_unknown_command_never_reaches_a_process() {
 }
 
 #[test]
-fn the_health_check_completes_a_real_mcp_handshake() {
+fn the_health_check_completes_a_real_mcp_handshake_for_the_shared_vaults() {
     staged();
     let dir = temp_root();
     cli_bridge::run(
@@ -234,31 +237,45 @@ fn the_health_check_completes_a_real_mcp_handshake() {
         None,
     );
     let vault = dir.path().join("demo").to_str().unwrap().to_string();
+    // Unique, because the test data directory outlives this run.
+    let name = format!("health-{}", std::process::id());
+    let shared = cli_bridge::run("share", &json!({ "vault": vault, "name": name }), None);
+    assert!(shared.ok, "{shared:?}");
 
-    let health = cli_bridge::health_check(&vault);
+    let health = cli_bridge::health_check();
 
     assert!(health.ok, "{health:?}");
     assert_eq!(health.server_name.as_deref(), Some("heimdall"));
     assert_eq!(health.protocol_version.as_deref(), Some("2025-11-25"));
-    assert!(health
-        .instructions
-        .unwrap_or_default()
-        .contains("`read`"));
+    let instructions = health.instructions.unwrap_or_default();
+    assert!(instructions.contains("`read`"), "{instructions}");
+    // The shared vault is named to the client, and its path never is.
+    assert!(instructions.contains(&name), "{instructions}");
+    assert!(!instructions.contains(&vault), "{instructions}");
+
+    let unshared = cli_bridge::run("unshare", &json!({ "vault": vault }), None);
+    assert!(unshared.ok, "{unshared:?}");
 }
 
 #[test]
-fn the_health_check_reports_a_vault_that_cannot_be_served() {
+fn the_vaults_command_lists_what_is_shared() {
     staged();
-    let health = cli_bridge::health_check("/nonexistent-heimdall-vault");
+    let dir = temp_root();
+    cli_bridge::run("create", &json!({ "name": "demo", "root": root_of(&dir) }), None);
+    let vault = dir.path().join("demo").to_str().unwrap().to_string();
+    let name = format!("listed-{}", std::process::id());
+    assert!(cli_bridge::run("share", &json!({ "vault": vault, "name": name }), None).ok);
 
-    assert!(!health.ok);
-    assert!(health.error.is_some());
-    // The reason is on stderr, where the server puts its diagnostics.
-    assert!(
-        health.stderr.contains("NOT_FOUND"),
-        "stderr was {:?}",
-        health.stderr
-    );
+    let listed = cli_bridge::run("vaults", &json!({}), None);
+    assert!(listed.ok, "{listed:?}");
+    let vaults = listed.data.unwrap()["vaults"].as_array().unwrap().clone();
+    let entry = vaults
+        .iter()
+        .find(|entry| entry["name"] == name.as_str())
+        .expect("the shared vault is listed");
+    assert_eq!(entry["shared"], true);
+
+    assert!(cli_bridge::run("unshare", &json!({ "vault": vault }), None).ok);
 }
 
 /// A created vault and its path, for the editor tests below.

@@ -24,7 +24,8 @@ async fn connect(vault: &str) -> RunningService<RoleClient, ()> {
                 .arg("mcp")
                 .arg("--vault")
                 .arg(vault)
-                .env("HEIMDALL_DATA_DIR", common::data_dir());
+                .env("HEIMDALL_DATA_DIR", common::data_dir())
+                .env("HEIMDALL_TEST_PRESENCE", "confirm");
         },
     ))
     .expect("spawn heimdall mcp");
@@ -380,39 +381,114 @@ async fn arguments_that_violate_a_tool_schema_still_carry_a_domain_code() {
 // Vault boundary
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn no_tool_call_can_name_or_switch_the_vault() {
-    let (_tmp, vault) = new_vault();
-    let (_other_tmp, other_vault) = new_vault();
-    let client = connect(&vault).await;
+/// Connect a real client to a server for the vaults shared in `data_dir`.
+async fn connect_shared(data_dir: &std::path::Path) -> RunningService<RoleClient, ()> {
+    let transport = TokioChildProcess::new(tokio::process::Command::new(binary()).configure(
+        |command| {
+            command.arg("mcp").env("HEIMDALL_DATA_DIR", data_dir);
+        },
+    ))
+    .expect("spawn heimdall mcp");
+    ().serve(transport).await.expect("MCP handshake")
+}
 
-    // No tool advertises a vault input...
+/// Run the shell against a data directory of the test's own, so the set of
+/// shared vaults is exactly what the test made it.
+fn run_in(data_dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new(binary())
+        .env("HEIMDALL_DATA_DIR", data_dir)
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_call_selects_only_a_shared_vault_and_only_by_name() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let (_work_tmp, work) = new_vault();
+    let (_home_tmp, home) = new_vault();
+    let (_private_tmp, private) = new_vault();
+    for (vault, name) in [(&work, "Work"), (&home, "Home"), (&private, "Private")] {
+        let output = run_in(data_dir.path(), &["share", "--vault", vault, "--name", name]);
+        assert!(output.status.success(), "{output:?}");
+    }
+    assert!(run_in(data_dir.path(), &["unshare", "--vault", &private]).status.success());
+    let client = connect_shared(data_dir.path()).await;
+
+    // The one vault input is a name; nothing in a schema takes a location.
     for tool in client.list_all_tools().await.unwrap() {
-        let schema = serde_json::to_string(&tool.input_schema).unwrap();
-        for forbidden in ["\"vault\"", "\"root\"", "\"vault_path\"", "\"vault_id\""] {
-            assert!(
-                !schema.contains(forbidden),
-                "{} advertises {forbidden}",
-                tool.name
-            );
+        let schema = serde_json::to_value(&*tool.input_schema).unwrap();
+        assert_eq!(schema["properties"]["vault"]["type"], json!(["string", "null"]));
+        let text = schema.to_string();
+        for forbidden in ["\"root\"", "\"vault_path\"", "\"vault_id\""] {
+            assert!(!text.contains(forbidden), "{} advertises {forbidden}", tool.name);
         }
     }
+    let instructions = client.peer_info().unwrap().instructions.clone().unwrap();
+    assert!(instructions.contains("\"Home\", \"Work\""), "{instructions}");
+    assert!(!instructions.contains("Private"), "{instructions}");
 
-    // ...and supplying one anyway is refused rather than honored.
-    let refused = failure(&client, "read", json!({ "vault": other_vault.as_str() })).await;
-    assert_eq!(refused["code"], "INVALID_INPUT");
+    // With two shared, leaving the vault out is refused with the names.
+    let unnamed = failure(&client, "write", json!({ "path": "ideas/x.md", "content": "x\n" })).await;
+    assert_eq!(unnamed["code"], "INVALID_INPUT");
+    assert_eq!(unnamed["details"]["vaults"], json!(["Home", "Work"]));
 
-    // An absolute path is read as a path inside the served vault, never as a
+    // An unshared vault, a made-up name, and a path are all just names nobody
+    // shared — the same answer, which says nothing about what else exists.
+    let unshared = failure(&client, "read", json!({ "vault": "Private" })).await;
+    let invented = failure(&client, "read", json!({ "vault": "Nowhere" })).await;
+    let by_path = failure(&client, "read", json!({ "vault": private.as_str() })).await;
+    for refused in [&unshared, &invented, &by_path] {
+        assert_eq!(refused["code"], "NOT_FOUND", "{refused}");
+        assert_eq!(refused["details"]["vaults"], json!(["Home", "Work"]));
+    }
+
+    // A name is matched ignoring case, and the result says which vault it was.
+    let written = structured(
+        &client,
+        "write",
+        json!({ "vault": "work", "path": "ideas/served.md", "content": "x\n" }),
+    )
+    .await;
+    assert_eq!(written["vault"], "Work");
+    assert_eq!(error_code(&run(&["read", "ideas/served.md", "--vault", &home])), "NOT_FOUND");
+    assert_eq!(data(&run(&["read", "ideas/served.md", "--vault", &work]))["document"]["content"], "x\n");
+
+    // An absolute path is read as a path inside the named vault, never as a
     // way out of it.
-    let absolute = format!("{other_vault}/ideas/hello_world.md");
-    let outside = failure(&client, "read", json!({ "path": absolute })).await;
+    let absolute = format!("{home}/ideas/hello_world.md");
+    let outside = failure(&client, "read", json!({ "vault": "Work", "path": absolute })).await;
     assert_eq!(outside["code"], "NOT_FOUND");
 
-    // A write over MCP lands on the served vault, not the other one.
-    structured(&client, "write", json!({ "path": "ideas/served.md", "content": "x\n" })).await;
-    assert_eq!(error_code(&run(&["read", "ideas/served.md", "--vault", &other_vault])), "NOT_FOUND");
-    assert_eq!(data(&run(&["read", "ideas/served.md", "--vault", &vault]))["document"]["content"], "x\n");
+    client.cancel().await.unwrap();
+}
 
+#[tokio::test]
+async fn sharing_and_unsharing_take_effect_on_the_next_call() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let (_tmp, vault) = new_vault();
+    let client = connect_shared(data_dir.path()).await;
+
+    // Nothing shared yet: the server is up, and says so per call.
+    assert_eq!(failure(&client, "read", json!({})).await["code"], "NOT_FOUND");
+
+    assert!(run_in(data_dir.path(), &["share", "--vault", &vault]).status.success());
+    let root = structured(&client, "read", json!({})).await;
+    assert_eq!(root["vault"], "demo");
+
+    assert!(run_in(data_dir.path(), &["unshare", "--vault", &vault]).status.success());
+    assert_eq!(failure(&client, "read", json!({ "vault": "demo" })).await["code"], "NOT_FOUND");
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_fixed_server_answers_only_to_its_own_name() {
+    let (_tmp, vault) = new_vault();
+    let client = connect(&vault).await;
+    assert_eq!(structured(&client, "read", json!({ "vault": "demo" })).await["vault"], "demo");
+    let other = failure(&client, "read", json!({ "vault": "elsewhere" })).await;
+    assert_eq!(other["code"], "NOT_FOUND");
     client.cancel().await.unwrap();
 }
 
@@ -437,19 +513,28 @@ async fn hidden_folders_and_the_trash_stay_unreachable() {
 }
 
 #[tokio::test]
-async fn a_vault_path_that_does_not_exist_fails_at_startup_on_stderr() {
-    // A missing vault is a configuration error, not something a tool call can
-    // report, and it must not put a shell envelope on the protocol stream.
-    let output = run(&["mcp", "--vault", "/nonexistent-heimdall-vault"]);
+async fn a_vault_that_cannot_be_opened_is_reported_per_call_and_the_server_stays_up() {
+    // A server that exited here would leave the client listing no tools and
+    // the user with no idea why — what happened when macOS kept the sidecar
+    // out of ~/Documents. The reason has to reach the user through a call.
+    let client = connect("/nonexistent-heimdall-vault").await;
 
-    assert_eq!(output.status.code(), Some(1));
-    assert!(
-        output.stdout.is_empty(),
-        "stdout must stay protocol-only: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("NOT_FOUND"), "{stderr}");
+    let mut names: Vec<_> = client
+        .list_all_tools()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["read", "write"]);
+
+    let refused = failure(&client, "read", json!({})).await;
+    assert_eq!(refused["code"], "NOT_FOUND", "{refused}");
+    let instructions = client.peer_info().unwrap().instructions.clone().unwrap();
+    assert!(instructions.contains("could not open it"), "{instructions}");
+
+    client.cancel().await.unwrap();
 }
 
 #[tokio::test]

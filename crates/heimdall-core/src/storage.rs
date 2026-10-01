@@ -67,7 +67,7 @@ pub struct Vault {
 impl Vault {
     /// Open an existing directory as a vault capability.
     pub fn open(root: &Utf8Path) -> Result<Self> {
-        Self::open_inner(root, appdata::data_dir())
+        Self::open_inner(root, appdata::data_dir()?)
     }
 
     /// Open a vault whose application data lives somewhere chosen by the caller.
@@ -88,6 +88,7 @@ impl Vault {
                 std::io::ErrorKind::NotADirectory => {
                     Error::invalid_input("vault path is not a directory")
                 }
+                std::io::ErrorKind::PermissionDenied => Error::os_permission("open vault", &err),
                 _ => Error::from_io("open vault", &err),
             }
         })?;
@@ -112,6 +113,44 @@ impl Vault {
         &self.root
     }
 
+    /// The vault's folder name, for a person reading a prompt or a message.
+    pub fn name(&self) -> &str {
+        self.root.file_name().unwrap_or("vault")
+    }
+
+    /// Every Markdown note at or beneath `dir`, spelled as stored.
+    ///
+    /// For flagging notes, so it never follows a symlink — a link inside the
+    /// vault names a note this walk reaches by its real path anyway, and one
+    /// pointing out of it names a file that is not the vault's to protect —
+    /// and never enters a hidden folder, which belongs to another tool.
+    pub fn notes_beneath(&self, dir: &RelPath) -> Vec<RelPath> {
+        let mut notes = Vec::new();
+        let mut pending = vec![dir.clone()];
+        while let Some(current) = pending.pop() {
+            let Ok(entries) = self.dir.read_dir(resolve(&current)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(name) = entry.file_name().into_string() else {
+                    continue;
+                };
+                if !crate::paths::is_listable(&name) {
+                    continue;
+                }
+                let Ok(kind) = entry.file_type() else { continue };
+                let path = current.join(&name);
+                if kind.is_dir() {
+                    pending.push(path);
+                } else if kind.is_file() && path.is_markdown() {
+                    notes.push(path);
+                }
+            }
+        }
+        notes.sort();
+        notes
+    }
+
     /// Where this vault's application data lives.
     pub fn data_dir(&self) -> &Utf8Path {
         &self.data_dir
@@ -129,6 +168,86 @@ impl Vault {
     /// escapes the vault rather than that it does not exist.
     pub fn entry_exists(&self, path: &RelPath) -> bool {
         self.dir.symlink_metadata(resolve(path)).is_ok()
+    }
+
+    /// The path as it is spelled on disk, with every symlink inside the vault
+    /// resolved.
+    ///
+    /// A lock is a rule about a file, but a caller names a file with a string,
+    /// and on macOS many strings name the same file: APFS ignores case and
+    /// Unicode normalization, so `Projects/Plan.md` opens `projects/plan.md`,
+    /// and a symlinked folder inside the vault is a second name for the folder
+    /// it points at. Comparing rules against only what the caller typed would
+    /// let any of those spellings walk past a lock. `realpath(3)` reports each
+    /// component as it is stored, which is the one spelling every caller can be
+    /// held to.
+    ///
+    /// The part of the path that does not exist yet — a note about to be
+    /// created — is appended as typed beneath the deepest part that does. A
+    /// path that resolves outside the vault is `PATH_OUTSIDE_VAULT`, the same
+    /// answer the capability gives when it is used.
+    ///
+    /// This only computes a name to check rules against. Nothing is opened or
+    /// changed through the ambient path; every access still goes through the
+    /// capability.
+    pub fn real_path(&self, path: &RelPath) -> Result<RelPath> {
+        let mut existing = path.clone();
+        let mut tail: Vec<String> = Vec::new();
+        loop {
+            if existing.is_root() {
+                break;
+            }
+            match std::fs::canonicalize(self.root.join(existing.as_str()).as_std_path()) {
+                Ok(resolved) => {
+                    let Ok(resolved) = Utf8PathBuf::from_path_buf(resolved) else {
+                        return Err(Error::invalid_input(format!(
+                            "\"{path}\" does not resolve to a UTF-8 path"
+                        ))
+                        .with_detail("path", path.as_str()));
+                    };
+                    let Ok(relative) = resolved.strip_prefix(&self.root) else {
+                        return Err(Error::path_outside_vault(format!(
+                            "\"{path}\" resolves outside the vault"
+                        ))
+                        .with_detail("path", path.as_str()));
+                    };
+                    let mut real = RelPath::parse(relative.as_str())?;
+                    for name in tail.iter().rev() {
+                        real = real.join(name);
+                    }
+                    return Ok(real);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    let name = existing.file_name().unwrap_or_default().to_string();
+                    tail.push(name);
+                    existing = existing.parent();
+                }
+                Err(err) => return Err(Error::from_io_path(&format!("resolve {path}"), &err)),
+            }
+        }
+        // Nothing of it exists; the vault root is its own real spelling.
+        let mut real = RelPath::root();
+        for name in tail.iter().rev() {
+            real = real.join(name);
+        }
+        Ok(real)
+    }
+
+    /// Whether a file carries the filesystem's immutable flag — the one a
+    /// Heimdall lock sets on a note, and the one Finder's "Locked" sets.
+    ///
+    /// `false` for a folder, for anything that cannot be opened, and on
+    /// platforms with no such flag.
+    pub fn is_immutable(&self, path: &RelPath) -> bool {
+        osflags::is_immutable(&self.dir, resolve(path))
+    }
+
+    /// Set or clear the immutable flag on one file. Returns whether the flag
+    /// changed. Only `lock` and `unlock` call this (SPEC §6): Heimdall never
+    /// lifts a flag on its own initiative.
+    pub fn set_immutable(&self, path: &RelPath, immutable: bool) -> Result<bool> {
+        osflags::set_immutable(&self.dir, resolve(path), immutable)
+            .map_err(|err| Error::from_io_path(&format!("protect {path}"), &err))
     }
 
     pub fn is_file(&self, path: &RelPath) -> bool {
@@ -500,6 +619,69 @@ fn acquire(file: &std::fs::File, target: &RelPath, wait_limit: Duration) -> Resu
             }
             Err(err) => return Err(Error::from_io(&format!("lock {target}"), &err)),
         }
+    }
+}
+
+/// Whether this build can make a note immutable at the filesystem level.
+///
+/// macOS has a per-file flag the owner sets without privileges and every
+/// writer — editors, shells, `rename(2)`, `unlink(2)` — must respect.
+/// Elsewhere the equivalents need administrator rights or do not stop a
+/// rename, so a lock there binds Heimdall's own writers only, and `lock` says
+/// so (`protection: unsupported`).
+pub const FILE_PROTECTION: bool = cfg!(target_os = "macos");
+
+#[cfg(target_os = "macos")]
+mod osflags {
+    use std::os::fd::AsRawFd;
+    use std::os::macos::fs::MetadataExt;
+
+    use cap_std::fs::Dir;
+
+    pub(super) fn is_immutable(dir: &Dir, path: &str) -> bool {
+        let Ok(file) = dir.open(path) else {
+            return false;
+        };
+        let file = file.into_std();
+        file.metadata()
+            .is_ok_and(|meta| meta.is_file() && meta.st_flags() & libc::UF_IMMUTABLE != 0)
+    }
+
+    pub(super) fn set_immutable(dir: &Dir, path: &str, immutable: bool) -> std::io::Result<bool> {
+        // Opened read-only: changing a file's flags needs ownership, not
+        // write access, and a locked file cannot be opened for writing.
+        let file = dir.open(path)?.into_std();
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Ok(false);
+        }
+        let flags = meta.st_flags();
+        let wanted = if immutable {
+            flags | libc::UF_IMMUTABLE
+        } else {
+            flags & !libc::UF_IMMUTABLE
+        };
+        if wanted == flags {
+            return Ok(false);
+        }
+        // SAFETY: `file` owns a valid descriptor for the duration of the call.
+        if unsafe { libc::fchflags(file.as_raw_fd(), wanted) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(true)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod osflags {
+    use cap_std::fs::Dir;
+
+    pub(super) fn is_immutable(_dir: &Dir, _path: &str) -> bool {
+        false
+    }
+
+    pub(super) fn set_immutable(_dir: &Dir, _path: &str, _immutable: bool) -> std::io::Result<bool> {
+        Ok(false)
     }
 }
 

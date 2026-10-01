@@ -15,6 +15,7 @@ export type DomainCode =
   | "NOT_INITIALIZED"
   | "REVISION_CONFLICT"
   | "LOCKED"
+  | "NOT_CONFIRMED"
   | "IO_ERROR"
   | "INTERNAL_ERROR";
 
@@ -57,22 +58,49 @@ export interface HealthCheck {
   stderr?: string;
 }
 
+/** An older Heimdall entry that served one vault, which installing replaces. */
+export interface LegacyEntry {
+  key: string;
+  vault: string;
+}
+
 export interface KnownClient {
   id: string;
   name: string;
   path: string;
   present: boolean;
+  /** Whether it has the one `heimdall` entry, serving the shared vaults. */
   installed: boolean;
   /** Whether the entry already there names a command that has gone. */
   stale: boolean;
-  serverKey: string;
+  /** Per-vault entries from older builds; their vaults are shared first. */
+  legacy: LegacyEntry[];
+  /** Set when `heimdall` there runs something else, which is never overwritten. */
+  conflict?: string;
 }
 
 export interface InstallOutcome {
   path: string;
   serverKey: string;
   replaced: boolean;
+  /** Older per-vault entries removed in favour of the one entry. */
+  removed: string[];
   backupPath?: string;
+}
+
+/** One vault Heimdall knows, from `heimdall vaults`. */
+export interface KnownVault {
+  path: string;
+  folder: string;
+  exists: boolean;
+  /** Whether AI clients can reach it. */
+  shared: boolean;
+  /** The name tool calls use for it, when shared. */
+  name: string | null;
+}
+
+export interface VaultsData {
+  vaults: KnownVault[];
 }
 
 /**
@@ -131,6 +159,8 @@ export interface Listing {
  * applies, with `""` meaning the vault root.
  */
 export interface ReadData {
+  /** The vault's name: its shared name, or its folder when it is not shared. */
+  vault?: string;
   path: string;
   kind: DocumentKind;
   locked: boolean;

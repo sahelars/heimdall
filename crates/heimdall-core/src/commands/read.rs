@@ -8,18 +8,24 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::agents;
 use crate::commands::listing::{self, Listing, ListingOptions};
 use crate::commands::read_range::read_range;
 use crate::commands::types::{DocumentKind, ReadResult};
 use crate::errors::{Error, Result};
 use crate::limits;
-use crate::notelocks::LockRules;
+use crate::notelocks::Locks;
 use crate::paths::RelPath;
 use crate::storage::Vault;
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadRequest {
+    /// The shared vault to read, by its name — never a filesystem path. It
+    /// may be left out only when exactly one vault is shared; otherwise the
+    /// call is refused with the list of names.
+    pub vault: Option<String>,
+
     /// A folder or a Markdown note, relative to the vault root. Omit it to read
     /// the vault root.
     pub path: Option<String>,
@@ -46,6 +52,8 @@ pub struct ReadRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReadResponse {
+    /// The name of the vault that was read.
+    pub vault: String,
     /// The vault-relative path that was read; empty for the vault root.
     pub path: String,
     /// `directory` for a folder, `document` for a note.
@@ -65,6 +73,7 @@ pub struct ReadResponse {
 }
 
 pub fn read(vault: &Vault, request: ReadRequest) -> Result<ReadResponse> {
+    let name = agents::confirm_name(vault, request.vault.as_deref())?;
     let path = match &request.path {
         Some(raw) => RelPath::parse(raw)?,
         None => RelPath::root(),
@@ -82,8 +91,8 @@ pub fn read(vault: &Vault, request: ReadRequest) -> Result<ReadResponse> {
     // vault content, and no listing ever shows them.
     path.deny_hidden()?;
 
-    let rules = LockRules::load(vault)?;
-    let locked_at = rules.locked_at(&path);
+    let locks = Locks::load(vault)?;
+    let locked_at = locks.locked_at(&path)?;
 
     let (kind, listing, document) = if vault.is_dir(&path) {
         reject_note_options(&request)?;
@@ -96,7 +105,7 @@ pub fn read(vault: &Vault, request: ReadRequest) -> Result<ReadResponse> {
                 cursor: request.cursor.as_deref(),
                 limit: request.limit,
             },
-            &rules,
+            &locks,
         )?;
         (DocumentKind::Directory, Some(listing), None)
     } else {
@@ -118,6 +127,7 @@ pub fn read(vault: &Vault, request: ReadRequest) -> Result<ReadResponse> {
     };
 
     Ok(ReadResponse {
+        vault: name,
         path: path.to_string(),
         kind,
         locked: locked_at.is_some(),
@@ -164,6 +174,7 @@ fn reject_folder_options(request: &ReadRequest) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::notelocks::LockRules;
     use super::*;
     use crate::errors::ErrorCode;
     use camino::Utf8PathBuf;
@@ -183,6 +194,7 @@ mod tests {
 
     fn at(path: &str) -> ReadRequest {
         ReadRequest {
+            vault: None,
             path: Some(path.to_string()),
             ..Default::default()
         }
@@ -222,6 +234,7 @@ mod tests {
         let response = read(
             &vault,
             ReadRequest {
+                vault: None,
                 start_line: Some(3),
                 max_lines: Some(1),
                 ..at("a.md")
@@ -241,6 +254,7 @@ mod tests {
         let err = read(
             &vault,
             ReadRequest {
+                vault: None,
                 max_total_bytes: Some(8),
                 ..at("a.md")
             },
@@ -257,6 +271,7 @@ mod tests {
         let err = read(
             &vault,
             ReadRequest {
+                vault: None,
                 max_lines: Some(5),
                 ..at("projects")
             },
@@ -268,6 +283,7 @@ mod tests {
         let err = read(
             &vault,
             ReadRequest {
+                vault: None,
                 recursive: true,
                 ..at("projects/a.md")
             },

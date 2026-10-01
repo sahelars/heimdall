@@ -21,6 +21,7 @@ pub enum ErrorCode {
     NotInitialized,
     RevisionConflict,
     Locked,
+    NotConfirmed,
     IoError,
     InternalError,
 }
@@ -36,6 +37,7 @@ impl ErrorCode {
             Self::NotInitialized => "NOT_INITIALIZED",
             Self::RevisionConflict => "REVISION_CONFLICT",
             Self::Locked => "LOCKED",
+            Self::NotConfirmed => "NOT_CONFIRMED",
             Self::IoError => "IO_ERROR",
             Self::InternalError => "INTERNAL_ERROR",
         }
@@ -109,6 +111,13 @@ impl Error {
         Self::new(ErrorCode::Locked, message)
     }
 
+    /// The person at the computer did not confirm an action only they may
+    /// take — they cancelled, could not be asked, or did not answer in time.
+    /// `details.reason` says which: `cancelled`, `unavailable`, or `timeout`.
+    pub fn not_confirmed(message: impl Into<String>, reason: &str) -> Self {
+        Self::new(ErrorCode::NotConfirmed, message).with_detail("reason", reason)
+    }
+
     pub fn io_error(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::IoError, message)
     }
@@ -129,16 +138,42 @@ impl Error {
 
     /// Map an I/O failure from resolving a path through a directory capability.
     ///
-    /// Inside a `cap-std` `Dir`, `PermissionDenied` is how an escape attempt
-    /// surfaces — a symlink pointing out of the vault, or a component the
-    /// capability refuses to traverse — so it becomes `PATH_OUTSIDE_VAULT`.
+    /// Inside a `cap-std` `Dir`, an escape attempt — a symlink pointing out of
+    /// the vault, or a component the capability refuses to traverse — surfaces
+    /// as a synthetic `PermissionDenied` that carries no OS error number, and
+    /// becomes `PATH_OUTSIDE_VAULT`. A `PermissionDenied` that the operating
+    /// system itself raised is something else entirely: a file locked at the
+    /// filesystem level, or a folder macOS privacy settings keep this process
+    /// out of. Calling that an escape would send a person looking for a
+    /// symlink that is not there.
     pub fn from_io_path(context: &str, err: &io::Error) -> Self {
         if err.kind() == io::ErrorKind::PermissionDenied {
+            if err.raw_os_error().is_some() {
+                return Self::os_permission(context, err);
+            }
             return Self::path_outside_vault(format!(
                 "{context}: path escapes the vault or cannot be traversed"
             ));
         }
         Self::from_io(context, err)
+    }
+
+    /// The operating system refused access (`EPERM` or `EACCES`).
+    ///
+    /// On macOS that is usually one of two things, and the message names both
+    /// because the process cannot tell them apart: the file carries the
+    /// immutable flag a Heimdall lock (or Finder's "Locked") sets, or the vault
+    /// is in a folder — Documents, Desktop, Downloads, iCloud Drive — that
+    /// macOS privacy settings keep the launching application out of.
+    pub fn os_permission(context: &str, err: &io::Error) -> Self {
+        Self::io_error(format!(
+            "{context}: {}. The file may be locked, or macOS may be keeping this \
+             application out of the folder: allow it in System Settings > Privacy & \
+             Security (Files and Folders, or Full Disk Access), or keep the vault \
+             outside Documents, Desktop, Downloads, and iCloud Drive",
+            sanitize(err)
+        ))
+        .with_detail("reason", "os_permission")
     }
 }
 
@@ -201,6 +236,26 @@ mod tests {
         );
         // The same error from a data operation stays an I/O error.
         assert_eq!(Error::from_io("write", &err).code, ErrorCode::IoError);
+    }
+
+    #[test]
+    fn an_operating_system_refusal_is_not_called_an_escape() {
+        // EPERM is what an immutable file or a macOS privacy refusal returns;
+        // only cap-std's own escape error, which has no OS error number, means
+        // the path left the vault.
+        for errno in [1, 13] {
+            let err = Error::from_io_path("open", &io::Error::from_raw_os_error(errno));
+            assert_eq!(err.code, ErrorCode::IoError, "errno {errno}");
+            assert_eq!(err.details["reason"], "os_permission");
+            assert!(err.message.contains("Privacy"), "{}", err.message);
+        }
+    }
+
+    #[test]
+    fn not_confirmed_says_why() {
+        let err = Error::not_confirmed("unlock was cancelled", "cancelled");
+        assert_eq!(serde_json::to_value(err.code).unwrap(), "NOT_CONFIRMED");
+        assert_eq!(err.details["reason"], "cancelled");
     }
 
     #[test]

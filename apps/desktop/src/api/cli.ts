@@ -16,6 +16,7 @@ import type {
   InstallOutcome,
   KnownClient,
   ReadData,
+  VaultsData,
 } from "./types";
 
 /** Which CLI is in use, and what it reports about itself. */
@@ -55,62 +56,90 @@ export function inspectVault(vault: string) {
   return invokeCli<ReadData>("read", { vault });
 }
 
-/** Launch the MCP server and complete a real handshake against it. */
-export function healthCheck(vault: string): Promise<HealthCheck> {
-  return invoke<HealthCheck>("health_check", { vault });
+/** Launch the MCP server for the shared vaults and complete a real handshake. */
+export function healthCheck(): Promise<HealthCheck> {
+  return invoke<HealthCheck>("health_check");
 }
 
 /** Which MCP client configurations this application can write to. */
-export function listClientConfigs(vault: string): Promise<KnownClient[]> {
-  return invoke<KnownClient[]>("list_client_configs", { vault });
+export function listClientConfigs(): Promise<KnownClient[]> {
+  return invoke<KnownClient[]>("list_client_configs");
 }
 
-/** Write the server entry into one known client's configuration. */
-export function installClientConfig(
-  clientId: string,
-  vault: string,
-): Promise<InstallOutcome> {
-  return invoke<InstallOutcome>("install_client_config", { clientId, vault });
+/**
+ * Write the one server entry into a known client's configuration, replacing
+ * any per-vault entries an older build wrote (their vaults are shared first).
+ */
+export function installClientConfig(clientId: string): Promise<InstallOutcome> {
+  return invoke<InstallOutcome>("install_client_config", { clientId });
 }
 
-/** The exact command a user would run themselves. */
-export function mcpCommand(cliPath: string, vault: string): string {
-  return `${quote(cliPath)} mcp --vault ${quote(vault)}`;
+/** Every vault Heimdall knows, and which are shared with AI clients. */
+export function listVaults() {
+  return invokeCli<VaultsData>("vaults");
+}
+
+/** Share a vault with AI clients — or rename it, if it already is. */
+export function shareVault(vault: string, name?: string) {
+  return invokeCli<{ name: string; path: string; shared: true }>(
+    "share",
+    name ? { vault, name } : { vault },
+  );
+}
+
+/** Stop sharing a vault with AI clients. */
+export function unshareVault(vault: string) {
+  return invokeCli<{ path: string; shared: false; changed: boolean }>("unshare", { vault });
+}
+
+/** The exact command a client runs: one server for every shared vault. */
+export function mcpCommand(cliPath: string): string {
+  return `${quote(cliPath)} mcp`;
+}
+
+/**
+ * Where macOS privacy protection keeps an app launched by another app out
+ * unless the user allows it: Documents, Desktop, Downloads, iCloud Drive,
+ * other cloud storage, and external or network volumes. Returns a label for
+ * the location, or null.
+ *
+ * Heimdall itself may have access there while an AI client's copy of the
+ * server does not, which is exactly the case a health check run from here
+ * cannot see (SPEC §15).
+ */
+export function protectedLocation(vault: string): string | null {
+  const home = /^\/Users\/[^/]+\/(Documents|Desktop|Downloads|Library\/Mobile Documents|Library\/CloudStorage)(\/|$)/.exec(vault);
+  if (home) {
+    const place = home[1]!;
+    if (place === "Library/Mobile Documents") return "iCloud Drive";
+    if (place === "Library/CloudStorage") return "cloud storage";
+    return place;
+  }
+  if (/^\/Volumes\//.test(vault)) return "an external or network volume";
+  return null;
 }
 
 /**
  * The `mcpServers` snippet to paste into a client's configuration.
  *
- * The command is the bundled sidecar's absolute path, so a client launches the
- * same binary this application uses rather than whatever `heimdall` happens to
- * be on its `PATH` (SPEC §16).
+ * One entry, whatever the number of vaults: the server serves every shared
+ * vault and each call names one. The command is the bundled sidecar's absolute
+ * path, so a client launches the same binary this application uses rather than
+ * whatever `heimdall` happens to be on its `PATH` (SPEC §16).
  */
-export function clientConfigSnippet(
-  cliPath: string,
-  vault: string,
-  serverKey = "heimdall",
-): string {
-  return JSON.stringify(
-    { mcpServers: { [serverKey]: { command: cliPath, args: ["mcp", "--vault", vault] } } },
-    null,
-    2,
-  );
+export function clientConfigSnippet(cliPath: string): string {
+  return JSON.stringify({ mcpServers: { heimdall: { command: cliPath, args: ["mcp"] } } }, null, 2);
 }
 
 /**
- * The `[mcp_servers.<key>]` table to paste into ChatGPT's `~/.codex/config.toml`.
+ * The `[mcp_servers.heimdall]` table to paste into ChatGPT's `~/.codex/config.toml`.
  *
  * Exactly what "Add entry" writes into a file that has none yet, so pasting by
  * hand and installing produce the same configuration. A JSON string is also a
- * valid TOML basic string, and `serverKey` is already reduced to a bare key.
+ * valid TOML basic string.
  */
-export function chatgptConfigSnippet(
-  cliPath: string,
-  vault: string,
-  serverKey = "heimdall",
-): string {
-  const args = ["mcp", "--vault", vault].map((arg) => JSON.stringify(arg)).join(", ");
-  return `[mcp_servers.${serverKey}]\ncommand = ${JSON.stringify(cliPath)}\nargs = [${args}]\n`;
+export function chatgptConfigSnippet(cliPath: string): string {
+  return `[mcp_servers.heimdall]\ncommand = ${JSON.stringify(cliPath)}\nargs = ["mcp"]\n`;
 }
 
 /** Quote only when a shell would otherwise split the value. */

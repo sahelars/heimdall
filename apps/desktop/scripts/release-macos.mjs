@@ -144,6 +144,19 @@ function verify(app, dmg, version) {
   if (reported.cli_version !== version) {
     fail(`the bundled CLI reports ${reported.cli_version}, but the app is ${version}`);
   }
+  // An unlock must always ask a person; a build that could be scripted past
+  // that would make every lock a suggestion (SPEC §6).
+  if (reported.presence !== "required") {
+    fail(`the bundled CLI reports presence "${reported.presence}"; a release must require it`);
+  }
+  // The embedded Info.plist is the CLI's identity for macOS privacy
+  // permissions; without it, a client launching the server is refused access
+  // to Documents, Desktop, Downloads, and iCloud Drive with no prompt (SPEC §16).
+  const signed = run("codesign", ["-dv", "--verbose=2", sidecar]);
+  if (!signed.includes("Identifier=io.slarsen.heimdall.cli")) {
+    fail("the bundled CLI is not signed as io.slarsen.heimdall.cli (is its Info.plist embedded?)");
+  }
+  if (!/Info\.plist entries=\d+/.test(signed)) fail("the bundled CLI's Info.plist is not bound to its signature");
 }
 
 function main() {

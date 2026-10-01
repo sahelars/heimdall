@@ -37,6 +37,7 @@ fn an_interrupted_write_leaves_the_previous_content_readable() {
     let result = read(
         &vault,
         ReadRequest {
+            vault: None,
             path: Some("ideas/hello_world.md".to_string()),
             ..Default::default()
         },
@@ -58,6 +59,7 @@ fn an_orphaned_temp_file_is_never_mistaken_for_content() {
     let response = read(
         &vault,
         ReadRequest {
+            vault: None,
             recursive: true,
             ..Default::default()
         },

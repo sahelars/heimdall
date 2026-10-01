@@ -41,7 +41,7 @@ use crate::commands::links::{self, LinkStyle};
 use crate::commands::resolve::{self, Index};
 use crate::errors::{Error, Result};
 use crate::limits;
-use crate::notelocks::LockRules;
+use crate::notelocks::Locks;
 use crate::paths::RelPath;
 use crate::revisions::Revision;
 use crate::storage::Vault;
@@ -146,7 +146,7 @@ pub fn relink(vault: &Vault, request: RelinkRequest) -> Result<RelinkResponse> {
         let before_index = Index::build(before.iter());
         let after_index = Index::build(found.iter().map(|note| &note.path));
 
-        let rules = LockRules::load(vault)?;
+        let rules = Locks::load(vault)?;
         let mut updated = Vec::new();
         let mut skipped = Vec::new();
         let mut locked = Vec::new();

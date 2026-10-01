@@ -23,6 +23,13 @@
 //! write lock ([`Vault::state_path`]). Every change, and every check a write
 //! makes against them, happens under the vault's write lock, so an unlock
 //! cannot slip between a write's check and its rename.
+//!
+//! [`LockRules`] is the rules alone, as pure data. Every check an operation
+//! makes goes through [`Locks`], which holds the rules *and* the vault, because
+//! a rule is about a file and a caller names a file with a string: the check
+//! is made against the spelling the caller used, the file's real on-disk
+//! spelling ([`Vault::real_path`]), and the immutable flag a lock leaves on the
+//! file itself. Any one of the three locking it is enough.
 
 use std::collections::BTreeMap;
 
@@ -51,15 +58,26 @@ pub struct LockRules {
 
 impl LockRules {
     /// Load a vault's rules. A vault nobody has locked anything in has no file.
+    ///
+    /// Each rule is re-keyed to its path's real spelling, so a rule stored as
+    /// `Projects` — before rules were stored that way — still governs the
+    /// `projects` folder it was set on. Where two rules land on one path, the
+    /// locked one wins.
     pub fn load(vault: &Vault) -> Result<Self> {
         let stored: Option<Stored> = appdata::read_json(&vault.state_path())?;
-        let mut rules = BTreeMap::new();
+        let mut rules: BTreeMap<RelPath, bool> = BTreeMap::new();
         for (raw, locked) in stored.map(|s| s.rules).unwrap_or_default() {
-            // A rule that no longer parses was written by hand; ignoring it is
-            // the only reading that cannot lock something nobody asked for.
-            if let Ok(path) = RelPath::parse(&raw) {
-                rules.insert(path, locked);
-            }
+            let path = match RelPath::parse(&raw) {
+                Ok(path) => vault.real_path(&path).unwrap_or(path),
+                // A rule that no longer parses was edited by hand. An unlock
+                // that cannot be read widens nothing by being ignored; a lock
+                // that cannot be read must still lock something, and the only
+                // thing it can safely mean is everything.
+                Err(_) if locked => RelPath::root(),
+                Err(_) => continue,
+            };
+            let entry = rules.entry(path).or_insert(locked);
+            *entry |= locked;
         }
         Ok(Self { rules })
     }
@@ -188,10 +206,147 @@ impl LockRules {
     }
 }
 
+/// A vault's lock state as every check must see it: the rules, held against
+/// the files they are about.
+///
+/// A path is locked when the nearest rule to the spelling the caller used says
+/// so, when the nearest rule to its real on-disk spelling says so, or when the
+/// file itself carries the immutable flag a lock sets. The last is what keeps
+/// a lock standing if the rules are lost or the application-data directory is
+/// redirected: the flag lives on the note, and Heimdall lifts it only in
+/// `unlock`.
+#[derive(Debug)]
+pub struct Locks<'v> {
+    vault: &'v Vault,
+    rules: LockRules,
+}
+
+impl<'v> Locks<'v> {
+    pub fn load(vault: &'v Vault) -> Result<Self> {
+        Ok(Self {
+            vault,
+            rules: LockRules::load(vault)?,
+        })
+    }
+
+    pub fn rules(&self) -> &LockRules {
+        &self.rules
+    }
+
+    pub fn rules_mut(&mut self) -> &mut LockRules {
+        &mut self.rules
+    }
+
+    /// What locks `path`: the rule responsible, or the file itself when it
+    /// carries the immutable flag with no rule behind it. `None` when it is
+    /// writable.
+    pub fn locked_at(&self, path: &RelPath) -> Result<Option<RelPath>> {
+        if let Some(at) = self.rules.locked_at(path) {
+            return Ok(Some(at));
+        }
+        let real = self.vault.real_path(path)?;
+        if real != *path {
+            if let Some(at) = self.rules.locked_at(&real) {
+                return Ok(Some(at));
+            }
+        }
+        if self.vault.is_immutable(&real) {
+            return Ok(Some(real));
+        }
+        Ok(None)
+    }
+
+    /// Whether `path` is locked. A path whose real spelling cannot be worked
+    /// out is reported locked: this answers "may it be written", and not
+    /// knowing is not "yes".
+    pub fn is_locked(&self, path: &RelPath) -> bool {
+        self.locked_at(path).map_or(true, |at| at.is_some())
+    }
+
+    /// Whether a rule locks `path`, under the spelling given or its real one.
+    ///
+    /// For reporting across many notes at once — a listing, the graph. It
+    /// leaves out the per-file flag check, which costs an `open` per note: a
+    /// flag with no rule behind it only exists when the rules were lost or a
+    /// file was locked in Finder, and the note's own `read`, and every write,
+    /// still see it.
+    pub fn is_locked_by_rule(&self, path: &RelPath) -> bool {
+        if self.rules.is_locked(path) {
+            return true;
+        }
+        match self.vault.real_path(path) {
+            Ok(real) => self.rules.is_locked(&real),
+            Err(_) => true,
+        }
+    }
+
+    /// [`Locks::is_locked_by_rule`] for `name` inside `dir`, given `dir`'s
+    /// real spelling. A directory's entries are already spelled as they are
+    /// stored, so resolving the directory once stands in for resolving every
+    /// entry in it.
+    pub fn is_locked_entry(&self, dir: &RelPath, real_dir: &RelPath, name: &str) -> bool {
+        self.rules.is_locked(&dir.join(name)) || self.rules.is_locked(&real_dir.join(name))
+    }
+
+    /// Refuse a write to `path` when it is locked.
+    pub fn deny_write(&self, path: &RelPath) -> Result<()> {
+        match self.locked_at(path)? {
+            Some(at) => Err(locked_error(path, &at, format!("\"{path}\" is locked"))),
+            None => Ok(()),
+        }
+    }
+
+    /// Refuse to add or remove anything directly inside `folder` when it is
+    /// locked, under either spelling.
+    pub fn deny_change_in(&self, folder: &RelPath, path: &RelPath) -> Result<()> {
+        self.rules.deny_change_in(folder, path)?;
+        let real = self.vault.real_path(folder)?;
+        if real != *folder {
+            self.rules.deny_change_in(&real, path)?;
+        }
+        Ok(())
+    }
+
+    /// Refuse to move or delete `path` when it, or anything inside it, is
+    /// locked, under either spelling.
+    pub fn deny_subtree(&self, path: &RelPath) -> Result<()> {
+        self.rules.deny_subtree(path)?;
+        let real = self.vault.real_path(path)?;
+        if real != *path {
+            self.rules.deny_subtree(&real)?;
+        }
+        if self.vault.is_immutable(&real) {
+            return Err(locked_error(path, &real, format!("\"{path}\" is locked")));
+        }
+        Ok(())
+    }
+
+    /// The real spelling of `path`, which is the spelling rules are stored
+    /// and carried under.
+    pub fn real(&self, path: &RelPath) -> Result<RelPath> {
+        self.vault.real_path(path)
+    }
+
+    pub fn save(&self) -> Result<()> {
+        self.rules.save(self.vault)
+    }
+}
+
+/// What a refusal says. Agents read this text, and it is the last thing one
+/// sees before deciding what to do next, so it says plainly that the answer is
+/// to stop — not to find another way to make the change.
 fn locked_error(path: &RelPath, at: &RelPath, what: String) -> Error {
-    Error::locked(format!("{what}; unlock it before changing it"))
-        .with_detail("path", path.as_str())
-        .with_detail("locked_at", at.as_str())
+    let by = if at.is_root() {
+        "the whole vault is locked".to_string()
+    } else {
+        format!("the lock is on \"{at}\"")
+    };
+    Error::locked(format!(
+        "{what} ({by}). It is read-only by the user's decision: do not change it any other \
+         way. Tell the user it is locked; only they can unlock it, in Heimdall"
+    ))
+    .with_detail("path", path.as_str())
+    .with_detail("locked_at", at.as_str())
 }
 
 #[cfg(test)]

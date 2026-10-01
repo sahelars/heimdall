@@ -27,6 +27,7 @@ fn list(vault: &Vault, cursor: Option<String>) -> Listing {
     read(
         vault,
         ReadRequest {
+            vault: None,
             recursive: true,
             cursor,
             limit: Some(200),

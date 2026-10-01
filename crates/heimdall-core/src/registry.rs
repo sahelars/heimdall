@@ -40,6 +40,11 @@ pub struct Located {
     pub cwd: RelPath,
 }
 
+/// Every registered vault root, sorted.
+pub fn list(data_dir: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
+    Ok(load(&registry_path(data_dir))?.vaults)
+}
+
 /// Record `vault` so the shell can find it from inside. Idempotent.
 pub fn register(vault: &Vault) -> Result<()> {
     let path = registry_path(vault.data_dir());
@@ -171,10 +176,21 @@ fn load(path: &Utf8Path) -> Result<Stored> {
 }
 
 fn with_registry_lock<T>(data_dir: &Utf8Path, body: impl FnOnce() -> Result<T>) -> Result<T> {
-    let lock_path = data_dir.join("locks").join("registry.lock");
-    let context = "lock the vault registry";
+    with_state_lock(data_dir, "registry.lock", "the vault registry", body)
+}
+
+/// Run `body` holding a short, named lock in the application-data directory,
+/// for a read-modify-write of one of Heimdall's own state files.
+pub(crate) fn with_state_lock<T>(
+    data_dir: &Utf8Path,
+    file_name: &str,
+    what: &str,
+    body: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let lock_path = data_dir.join("locks").join(file_name);
+    let context = format!("lock {what}");
     if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| Error::from_io(context, &err))?;
+        std::fs::create_dir_all(parent).map_err(|err| Error::from_io(&context, &err))?;
     }
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -182,7 +198,7 @@ fn with_registry_lock<T>(data_dir: &Utf8Path, body: impl FnOnce() -> Result<T>) 
         .create(true)
         .truncate(false)
         .open(&lock_path)
-        .map_err(|err| Error::from_io(context, &err))?;
+        .map_err(|err| Error::from_io(&context, &err))?;
 
     let deadline = Instant::now() + REGISTRY_WAIT_LIMIT;
     loop {
@@ -190,11 +206,11 @@ fn with_registry_lock<T>(data_dir: &Utf8Path, body: impl FnOnce() -> Result<T>) 
             Ok(true) => break,
             Ok(false) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
             Ok(false) => {
-                return Err(Error::io_error(
-                    "another process has held the vault registry for more than 10 seconds",
-                ))
+                return Err(Error::io_error(format!(
+                    "another process has held {what} for more than 10 seconds"
+                )))
             }
-            Err(err) => return Err(Error::from_io(context, &err)),
+            Err(err) => return Err(Error::from_io(&context, &err)),
         }
     }
     let result = body();

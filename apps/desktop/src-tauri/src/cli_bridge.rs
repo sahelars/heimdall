@@ -37,6 +37,13 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// waiting for it.
 const GRAPH_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How long an `unlock` may take.
+///
+/// An unlock waits for a person to answer Touch ID or a password prompt (SPEC
+/// §6), and the CLI gives them 90 seconds; killing the command first would
+/// cancel a prompt they were about to answer.
+const PRESENCE_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// How long the MCP health check waits for a handshake response.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -87,6 +94,11 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("relink", &["vault", "from", "to", "dry-run"]),
     ("delete-path", &["vault", "path", "expected-revision"]),
     ("link-graph", &["vault", "max-depth"]),
+    // Which vaults AI clients may see: the person's choice, made here or at
+    // the shell, and never by a tool (SPEC §7).
+    ("vaults", &[]),
+    ("share", &["vault", "name"]),
+    ("unshare", &["vault"]),
 ];
 
 /// The subcommands whose `path` is positional rather than a flag.
@@ -99,16 +111,19 @@ const POSITIONAL_PATH: &[&str] = &["read", "write", "lock", "unlock"];
 /// budget rather than the ordinary one.
 const WHOLE_VAULT: &[&str] = &["link-graph", "relink"];
 
-/// The subcommands that change the vault.
+/// The subcommands that change the vault in a way the desktop's own writes
+/// could race.
 ///
 /// Only these need exclusive access. Everything else takes a shared guard, so a
 /// whole-vault `link-graph` — seconds of work on a large vault — never blocks
-/// the editor's autosave behind it.
+/// the editor's autosave behind it. `unlock` changes the vault too, but it
+/// waits on a person for up to a minute and a half, and it cannot cause the
+/// revision race the exclusive guard exists for; the CLI's own write lock
+/// already serialises it against every other writer.
 const MUTATES: &[&str] = &[
     "create",
     "write",
     "lock",
-    "unlock",
     "create-folder",
     "move-path",
     "relink",
@@ -420,6 +435,8 @@ pub fn run(command: &str, request: &Value, stdin: Option<&str>) -> CliResponse {
     // shared side, so reads never queue behind each other.
     let timeout = if WHOLE_VAULT.contains(&command) {
         GRAPH_TIMEOUT
+    } else if command == "unlock" {
+        PRESENCE_TIMEOUT
     } else {
         CALL_TIMEOUT
     };
@@ -676,8 +693,14 @@ impl HealthCheck {
 ///
 /// This answers the question a user actually has — "will my AI client be able to
 /// talk to this?" — by doing what that client does, rather than by checking that
-/// a file exists.
-pub fn health_check(vault: &str) -> HealthCheck {
+/// a file exists: it runs the same `heimdall mcp` a client's entry runs, for
+/// the shared vaults.
+///
+/// What it cannot answer is whether macOS lets *that client* open them. The
+/// server here is started by Heimdall, under Heimdall's own privacy
+/// permissions; one a client starts is judged on its own (SPEC §16). The
+/// Server screen says so beside the result.
+pub fn health_check() -> HealthCheck {
     let binary = sidecar_path();
     if !binary.is_file() {
         return HealthCheck::failed(
@@ -688,7 +711,7 @@ pub fn health_check(vault: &str) -> HealthCheck {
     }
 
     let mut child = match Command::new(&binary)
-        .args(["mcp", "--vault", vault])
+        .arg("mcp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -827,6 +850,31 @@ mod tests {
 
     fn request(value: Value) -> Value {
         value
+    }
+
+    #[test]
+    fn sharing_is_reachable_with_only_its_own_arguments() {
+        assert_eq!(build_args("vaults", &json!({})).unwrap(), ["vaults"]);
+        assert_eq!(
+            build_args("share", &json!({ "vault": "/v", "name": "Work" })).unwrap(),
+            ["share", "--name", "Work", "--vault", "/v"]
+        );
+        assert_eq!(build_args("unshare", &json!({ "vault": "/v" })).unwrap(), ["unshare", "--vault", "/v"]);
+        for (command, key) in [("vaults", "vault"), ("share", "path"), ("unshare", "name")] {
+            let error = build_args(command, &json!({ key: "x" })).unwrap_err();
+            assert_eq!(error.code, "INVALID_INPUT", "{command} accepted {key}");
+        }
+    }
+
+    #[test]
+    fn an_unlock_waits_for_a_person_without_holding_up_the_editor() {
+        // A Touch ID prompt can stay up for a minute and a half; the editor's
+        // autosave must not queue behind it, and the bridge must not kill the
+        // command while the person is still answering.
+        assert!(!mutates("unlock"));
+        assert!(mutates("lock") && mutates("write"));
+        assert!(PRESENCE_TIMEOUT > CALL_TIMEOUT);
+        assert!(PRESENCE_TIMEOUT >= Duration::from_secs(100));
     }
 
     #[test]

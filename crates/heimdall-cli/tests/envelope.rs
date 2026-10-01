@@ -254,3 +254,40 @@ fn walk(root: &std::path::Path) -> Vec<String> {
     found.sort();
     found
 }
+
+#[test]
+fn sharing_names_a_vault_for_ai_clients_and_vaults_lists_it() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let (_tmp, vault) = new_vault();
+    let run_in = |args: &[&str]| {
+        common::command()
+            .env("HEIMDALL_DATA_DIR", data_dir.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let shared = data(&run_in(&["share", "--vault", &vault, "--name", "Work"]));
+    assert_eq!(shared["name"], "Work");
+
+    let listed = data(&run_in(&["vaults"]));
+    let entry = listed["vaults"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["shared"] == true)
+        .cloned()
+        .expect("the shared vault is listed");
+    assert_eq!(entry["name"], "Work");
+    assert_eq!(entry["folder"], "demo");
+    assert_eq!(entry["exists"], true);
+
+    // A read names the vault by its shared name.
+    assert_eq!(data(&run_in(&["read", "--vault", &vault]))["vault"], "Work");
+
+    let unshared = data(&run_in(&["unshare", "--vault", &vault]));
+    assert_eq!(unshared["changed"], true);
+    let listed = data(&run_in(&["vaults"]));
+    assert!(listed["vaults"].as_array().unwrap().iter().all(|v| v["shared"] == false));
+    assert_eq!(data(&run_in(&["read", "--vault", &vault]))["vault"], "demo");
+}

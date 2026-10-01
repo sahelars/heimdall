@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::commands::types::DocumentKind;
 use crate::errors::{Error, Result};
 use crate::limits;
-use crate::notelocks::LockRules;
+use crate::notelocks::Locks;
 use crate::paths::{self, RelPath};
 use crate::storage::Vault;
 use crate::timestamps;
@@ -49,7 +49,7 @@ pub(crate) fn list(
     vault: &Vault,
     root: &RelPath,
     options: ListingOptions<'_>,
-    rules: &LockRules,
+    locks: &Locks<'_>,
 ) -> Result<Listing> {
     let limit = limits::resolve_limit(options.limit)?;
     let max_level = if options.recursive {
@@ -79,7 +79,7 @@ pub(crate) fn list(
 
     let mut walk = Walk {
         vault,
-        rules,
+        locks,
         cursor: cursor.as_deref(),
         max_level,
         examined: 0,
@@ -116,7 +116,7 @@ pub(crate) fn list(
 
 struct Walk<'a> {
     vault: &'a Vault,
-    rules: &'a LockRules,
+    locks: &'a Locks<'a>,
     cursor: Option<&'a str>,
     max_level: usize,
     examined: usize,
@@ -129,6 +129,9 @@ impl Walk<'_> {
         if self.guard_hit {
             return Ok(());
         }
+        // Entries come back spelled as stored, so resolving the folder once
+        // gives every entry its real spelling for the lock check.
+        let real_dir = self.locks.real(dir)?;
         for name in self.vault.child_names(dir)? {
             if !paths::is_listable(&name) {
                 continue;
@@ -159,7 +162,8 @@ impl Walk<'_> {
                     return Ok(());
                 }
                 if past_cursor {
-                    self.push(&path, DocumentKind::Directory, None, &child.meta);
+                    let locked = self.locks.is_locked_entry(dir, &real_dir, &name);
+                    self.push(&path, DocumentKind::Directory, None, &child.meta, locked);
                 }
                 if may_descend {
                     self.visit(&path, level + 1)?;
@@ -173,11 +177,13 @@ impl Walk<'_> {
                 if !self.charge() {
                     return Ok(());
                 }
+                let locked = self.locks.is_locked_entry(dir, &real_dir, &name);
                 self.push(
                     &path,
                     DocumentKind::Document,
                     Some(child.meta.size_bytes),
                     &child.meta,
+                    locked,
                 );
             }
         }
@@ -204,13 +210,14 @@ impl Walk<'_> {
         kind: DocumentKind,
         size_bytes: Option<u64>,
         meta: &crate::storage::FileMeta,
+        locked: bool,
     ) {
         self.found.push(DocumentEntry {
             path: path.to_string(),
             kind,
             size_bytes,
             modified_at: timestamps::to_rfc3339(meta.modified_at),
-            locked: self.rules.is_locked(path),
+            locked,
         });
     }
 
@@ -280,6 +287,7 @@ mod tests {
         let deep = list(
             &vault,
             ReadRequest {
+                vault: None,
                 recursive: true,
                 max_depth: Some(5),
                 ..Default::default()
@@ -290,6 +298,7 @@ mod tests {
         let shallow = list(
             &vault,
             ReadRequest {
+                vault: None,
                 recursive: true,
                 max_depth: Some(2),
                 ..Default::default()
@@ -324,6 +333,7 @@ mod tests {
             let response = list(
                 &vault,
                 ReadRequest {
+                    vault: None,
                     cursor: cursor.clone(),
                     limit: Some(3),
                     ..Default::default()
@@ -352,6 +362,7 @@ mod tests {
         let all = list(
             &vault,
             ReadRequest {
+                vault: None,
                 recursive: true,
                 ..Default::default()
             },
@@ -367,6 +378,7 @@ mod tests {
             let page = list(
                 &vault,
                 ReadRequest {
+                    vault: None,
                     recursive: true,
                     cursor: cursor.clone(),
                     limit: Some(2),
@@ -402,6 +414,7 @@ mod tests {
         let response = list(
             &vault,
             ReadRequest {
+                vault: None,
                 recursive: true,
                 ..Default::default()
             },
@@ -415,6 +428,7 @@ mod tests {
         let err = read_folder(
             &vault,
             ReadRequest {
+                vault: None,
                 cursor: Some("../escape".to_string()),
                 ..Default::default()
             },
@@ -431,6 +445,7 @@ mod tests {
         let missing = read_folder(
             &vault,
             ReadRequest {
+                vault: None,
                 path: Some("nowhere".to_string()),
                 ..Default::default()
             },
@@ -446,6 +461,7 @@ mod tests {
         let err = read_folder(
             &vault,
             ReadRequest {
+                vault: None,
                 max_depth: Some(3),
                 ..Default::default()
             },

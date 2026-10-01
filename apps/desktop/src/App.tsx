@@ -1054,6 +1054,9 @@ export function App() {
     return found;
   }, [listing, rootLocked]);
 
+  /** Set while an unlock is waiting for a person to answer. */
+  const unlockPending = useRef(false);
+
   /**
    * Lock or unlock one path, or the whole vault when `path` is null.
    *
@@ -1065,18 +1068,28 @@ export function App() {
   const toggleLock = useCallback(
     async (path: string | null, locked: boolean) => {
       if (!vault) return;
+      // An unlock waits on Touch ID or the password (SPEC §6); a second click
+      // while the prompt is up must not stack a second prompt behind it.
+      if (unlockPending.current) return;
       setActionError(null);
       if (!(await flush.current())) return;
 
+      if (locked) unlockPending.current = true;
       try {
         if (locked) await unlockPath(vault, path);
         else await lockPath(vault, path);
       } catch (thrown) {
         if (thrown instanceof CliFailure) {
           record(`${locked ? "unlock" : "lock"} ${path ?? "vault"}`, thrown.error);
-          showError(thrown.error);
+          // The person said no; the note simply stays locked. Anything else —
+          // no way to ask, no answer in time — is worth a dialog.
+          const cancelled =
+            thrown.error.code === "NOT_CONFIRMED" && thrown.error.details?.reason === "cancelled";
+          if (!cancelled) showError(thrown.error);
         }
         return;
+      } finally {
+        unlockPending.current = false;
       }
 
       await reload(vault);

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commands::types::DocumentKind;
 use crate::errors::{Error, Result};
-use crate::notelocks::LockRules;
+use crate::notelocks::Locks;
 use crate::paths::RelPath;
 use crate::storage::Vault;
 
@@ -87,16 +87,20 @@ pub fn move_path(vault: &Vault, request: MovePathRequest) -> Result<MovePathResp
     // The write lock is what makes "does not already exist" and "rename onto it"
     // one decision rather than two.
     vault.with_write_lock(&to, || {
-        let mut rules = LockRules::load(vault)?;
-        rules.deny_subtree(&from)?;
-        rules.deny_change_in(&from.parent(), &from)?;
-        rules.deny_change_in(&parent, &to)?;
+        let mut locks = Locks::load(vault)?;
+        locks.deny_subtree(&from)?;
+        locks.deny_change_in(&from.parent(), &from)?;
+        locks.deny_change_in(&parent, &to)?;
 
+        // Rules are kept under real spellings, so they are carried between
+        // real spellings — worked out before the rename, while `from` exists.
+        let real_from = locks.real(&from)?;
+        let real_to = locks.real(&to)?;
         vault.rename_no_replace(&from, &to)?;
-        let before = rules.clone();
-        rules.carry(&from, &to);
-        if rules != before {
-            rules.save(vault)?;
+        let before = locks.rules().clone();
+        locks.rules_mut().carry(&real_from, &real_to);
+        if *locks.rules() != before {
+            locks.save()?;
         }
         Ok(())
     })?;

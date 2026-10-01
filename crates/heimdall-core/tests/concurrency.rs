@@ -126,6 +126,7 @@ fn concurrent_creates_of_one_note_leave_exactly_one_winner() {
                     let outcome = write(
                         vault,
                         WriteRequest {
+                            vault: None,
                             path: "ideas/race.md".to_string(),
                             content: format!("body {index}\n"),
                             expected_revision: None,
@@ -167,6 +168,7 @@ fn a_lock_racing_writers_is_never_half_applied() {
                 let _ = write(
                     vault,
                     WriteRequest {
+                        vault: None,
                         path: format!("ideas/new_{index}.md"),
                         content: "x\n".to_string(),
                         expected_revision: None,
@@ -175,6 +177,7 @@ fn a_lock_racing_writers_is_never_half_applied() {
                 let _ = write(
                     vault,
                     WriteRequest {
+                        vault: None,
                         path: "ideas/hello_world.md".to_string(),
                         content: format!("{index}\n"),
                         expected_revision: Some(Some(revision)),
@@ -187,6 +190,7 @@ fn a_lock_racing_writers_is_never_half_applied() {
     let err = write(
         &vault,
         WriteRequest {
+            vault: None,
             path: "ideas/after.md".to_string(),
             content: "x\n".to_string(),
             expected_revision: None,

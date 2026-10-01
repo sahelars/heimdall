@@ -25,14 +25,38 @@ pub fn data_dir() -> PathBuf {
 }
 
 /// A `heimdall` command that will not write into the real application data.
+///
+/// `HEIMDALL_TEST_PRESENCE` answers the unlock prompt for it. Only a debug
+/// build listens, and only for a vault under the temp directory — which every
+/// vault here is.
 pub fn command() -> std::process::Command {
     let mut command = std::process::Command::new(binary());
     command.env("HEIMDALL_DATA_DIR", data_dir());
+    command.env("HEIMDALL_TEST_PRESENCE", "confirm");
     command
 }
 
+/// A temporary vault directory whose locked notes are made deletable again
+/// on drop; a lock leaves notes immutable, and `TempDir` cannot remove them.
+pub struct TempVault(tempfile::TempDir);
+
+impl TempVault {
+    pub fn path(&self) -> &std::path::Path {
+        self.0.path()
+    }
+}
+
+impl Drop for TempVault {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("chflags")
+            .args(["-R", "nouchg"])
+            .arg(self.0.path())
+            .status();
+    }
+}
+
 /// Create a scaffolded vault and return its directory and path.
-pub fn new_vault() -> (tempfile::TempDir, String) {
+pub fn new_vault() -> (TempVault, String) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_str().unwrap().to_string();
 
@@ -43,7 +67,7 @@ pub fn new_vault() -> (tempfile::TempDir, String) {
     assert!(output.status.success(), "create failed: {output:?}");
 
     let vault = format!("{root}/demo");
-    (dir, vault)
+    (TempVault(dir), vault)
 }
 
 pub fn run(args: &[&str]) -> Output {

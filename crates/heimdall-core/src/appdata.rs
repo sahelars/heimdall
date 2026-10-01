@@ -31,22 +31,38 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// writer locking a different inode — and a purge of the lock rules would
 /// silently unlock every note. `HEIMDALL_DATA_DIR` overrides it for a
 /// sandboxed deployment with no writable home, and for tests.
-pub fn data_dir() -> Utf8PathBuf {
+///
+/// There is no fallback. A guessed location — a temporary directory, say —
+/// holds no lock rules, and a process reading an empty rule set would treat
+/// every locked note as writable. Failing is the only answer that cannot
+/// unlock anything.
+pub fn data_dir() -> Result<Utf8PathBuf> {
     if let Some(raw) = std::env::var_os("HEIMDALL_DATA_DIR") {
-        if let Ok(path) = Utf8PathBuf::from_path_buf(raw.into()) {
-            return path;
+        let path = Utf8PathBuf::from_path_buf(raw.into()).map_err(|_| {
+            Error::invalid_input("HEIMDALL_DATA_DIR is not valid UTF-8")
+        })?;
+        if !path.is_absolute() {
+            return Err(Error::invalid_input(
+                "HEIMDALL_DATA_DIR must be an absolute path",
+            ));
         }
+        return Ok(path);
     }
     // A test run must never write into the developer's real application data.
     // Integration tests pass a directory explicitly; this covers the unit tests
     // in this crate, which open vaults from a dozen different modules.
     if cfg!(test) {
-        return temp_base().join("heimdall-test-data");
+        return Ok(temp_base().join("heimdall-test-data"));
     }
-    let base = dirs::data_local_dir()
+    dirs::data_local_dir()
         .and_then(|path| Utf8PathBuf::from_path_buf(path).ok())
-        .unwrap_or_else(temp_base);
-    base.join("heimdall")
+        .map(|base| base.join("heimdall"))
+        .ok_or_else(|| {
+            Error::io_error(
+                "could not locate this user's application-data directory; \
+                 set HEIMDALL_DATA_DIR to an absolute path",
+            )
+        })
 }
 
 fn temp_base() -> Utf8PathBuf {

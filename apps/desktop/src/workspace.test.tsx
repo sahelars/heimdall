@@ -1024,6 +1024,73 @@ describe("a locked note", () => {
     expect(content()).toBe(before);
   });
 
+  it("keeps a note locked, without a dialog, when the person cancels the unlock prompt", async () => {
+    // Unlocking asks for Touch ID or the password. Clicking the toggle is not
+    // enough on its own — that is the point — and saying no is an answer, not
+    // an error worth a dialog.
+    const locks = new Set<string>(["ideas/test_note.md"]);
+    bridge(undefined, { locks });
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command: string, args: Record<string, unknown>) => {
+      const request = args as { command: string };
+      if (command === "invoke_cli" && request.command === "unlock") {
+        return Promise.resolve({
+          ok: false,
+          error: {
+            code: "NOT_CONFIRMED",
+            message: "the unlock was cancelled",
+            details: { reason: "cancelled" },
+          },
+        });
+      }
+      return original(command, args);
+    });
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await userEvent.click(within(files).getByText("test_note"));
+    const note = screen.getByRole("region", { name: "Note" });
+    await userEvent.click(await within(note).findByRole("button", { name: "Edit" }));
+    const content = () => within(note).getByTestId("source-editor").querySelector(".cm-content");
+    expect(content()).toHaveAttribute("contenteditable", "false");
+
+    await userEvent.click(within(note).getByRole("button", { name: "Unlock note" }));
+    await waitFor(() => expect(commandsCalled()).toContain("unlock"));
+
+    expect(content()).toHaveAttribute("contenteditable", "false");
+    expect(locks.has("ideas/test_note.md")).toBe(true);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(within(note).getByRole("button", { name: "Unlock note" })).toBeInTheDocument();
+  });
+
+  it("explains an unlock that could not be asked for", async () => {
+    const locks = new Set<string>(["ideas/test_note.md"]);
+    bridge(undefined, { locks });
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command: string, args: Record<string, unknown>) => {
+      const request = args as { command: string };
+      if (command === "invoke_cli" && request.command === "unlock") {
+        return Promise.resolve({
+          ok: false,
+          error: {
+            code: "NOT_CONFIRMED",
+            message: "nobody answered the unlock prompt in time",
+            details: { reason: "timeout" },
+          },
+        });
+      }
+      return original(command, args);
+    });
+    render(<App />);
+
+    const files = await screen.findByRole("region", { name: "Files" });
+    await userEvent.click(within(files).getByText("test_note"));
+    const note = screen.getByRole("region", { name: "Note" });
+    await userEvent.click(await within(note).findByRole("button", { name: "Unlock note" }));
+
+    expect(await screen.findByText(/nobody answered the unlock prompt/)).toBeInTheDocument();
+  });
+
   it("reports a write refused as LOCKED in a dialog that names the rule", async () => {
     // Locked underneath the editor, by an agent or another window. A banner
     // would be wiped by the reload that follows; the dialog stays.

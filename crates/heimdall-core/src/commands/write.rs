@@ -15,10 +15,11 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::agents;
 use crate::commands::types::explicit_option;
 use crate::errors::{Error, Result};
 use crate::limits;
-use crate::notelocks::LockRules;
+use crate::notelocks::Locks;
 use crate::paths::RelPath;
 use crate::revisions::Revision;
 use crate::storage::Vault;
@@ -26,6 +27,11 @@ use crate::storage::Vault;
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WriteRequest {
+    /// The shared vault to write into, by its name — never a filesystem path.
+    /// It may be left out only when exactly one vault is shared; otherwise the
+    /// call is refused with the list of names.
+    #[serde(default)]
+    pub vault: Option<String>,
     /// The Markdown note to write, relative to the vault root. It must end in
     /// `.md`, and its folder must already exist.
     pub path: String,
@@ -40,6 +46,8 @@ pub struct WriteRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WriteResponse {
+    /// The name of the vault that was written.
+    pub vault: String,
     pub path: String,
     /// The revision of the bytes now on disk. Pass it as `expected_revision`
     /// to write this note again.
@@ -50,6 +58,7 @@ pub struct WriteResponse {
 }
 
 pub fn write(vault: &Vault, request: WriteRequest) -> Result<WriteResponse> {
+    let name = agents::confirm_name(vault, request.vault.as_deref())?;
     let path = RelPath::parse_markdown(&request.path)?;
     path.deny_hidden()?;
 
@@ -74,7 +83,7 @@ pub fn write(vault: &Vault, request: WriteRequest) -> Result<WriteResponse> {
 
         // Checked under the write lock, so an unlock or a lock cannot land
         // between this decision and the rename below.
-        let rules = LockRules::load(vault)?;
+        let rules = Locks::load(vault)?;
         if exists {
             rules.deny_write(&path)?;
         } else {
@@ -115,6 +124,7 @@ pub fn write(vault: &Vault, request: WriteRequest) -> Result<WriteResponse> {
     })?;
 
     Ok(WriteResponse {
+        vault: name,
         path: path.to_string(),
         new_revision,
         size_bytes: bytes.len(),

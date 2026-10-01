@@ -2,8 +2,9 @@
 //!
 //! Subcommands are kebab-case and mirror the core operations one-to-one, so the
 //! MCP adapter can be checked against this surface for equivalent domain
-//! outcomes. `read`, `write`, `lock`, and `unlock` are the four the MCP server
-//! also offers; the rest are the desktop's client operations.
+//! outcomes. `read` and `write` are the two the MCP server also offers; `lock`
+//! and `unlock` are a person's, and the rest are the desktop's client
+//! operations and the choice of which vaults AI clients may see.
 
 use std::io::Read;
 use std::process::ExitCode;
@@ -12,8 +13,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::json;
 use heimdall_core::commands;
-use heimdall_core::{appdata, limits, registry, Error, RelPath, Result, Revision, Vault};
+use heimdall_core::{agents, appdata, limits, registry, Error, RelPath, Result, Revision, Vault};
 
+use crate::presence::{self, Person};
 use crate::{envelope, mcp};
 
 #[derive(Debug, Parser)]
@@ -43,12 +45,33 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the MCP server for one vault over stdio.
+    /// Run the MCP server over stdio.
+    ///
+    /// Without --vault it serves every vault shared with AI clients (see
+    /// `share`), and each tool call names the vault it means. With --vault it
+    /// serves that one vault only.
     Mcp {
-        /// Path to the vault this server exposes. Required: the vault is fixed
-        /// by configuration and never by a tool call.
+        /// Serve only this vault.
         #[arg(long, value_name = "PATH")]
-        vault: Utf8PathBuf,
+        vault: Option<Utf8PathBuf>,
+    },
+
+    /// List the vaults Heimdall knows, and which are shared with AI clients.
+    Vaults,
+
+    /// Share a vault with AI clients, or rename it if it is already shared.
+    Share {
+        #[command(flatten)]
+        vault: VaultArg,
+        /// The name tool calls use for it. Defaults to the folder name.
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    /// Stop sharing a vault with AI clients.
+    Unshare {
+        #[command(flatten)]
+        vault: VaultArg,
     },
 
     /// Create a new templated vault, or register an existing folder of notes as one.
@@ -118,6 +141,9 @@ enum Command {
     },
 
     /// Unlock a folder or note, making it writable. With no PATH, the current folder.
+    ///
+    /// Asks for Touch ID or your password first: an unlock has to come from a
+    /// person, not from a program acting for one.
     Unlock {
         /// A folder or a Markdown note. Defaults to the current folder.
         path: Option<String>,
@@ -216,7 +242,7 @@ impl FoundVault {
         let (vault, base) = match &self.vault {
             Some(root) => (open_explicit(root)?, RelPath::root()),
             None => {
-                let located = registry::locate(&working_directory()?, &appdata::data_dir())?;
+                let located = registry::locate(&working_directory()?, &appdata::data_dir()?)?;
                 (located.vault, located.cwd)
             }
         };
@@ -256,7 +282,7 @@ pub fn run() -> ExitCode {
         // The MCP server owns stdout for protocol traffic, so its failures are
         // reported on stderr rather than as a shell envelope: a client reading
         // the stream must never find one there.
-        Command::Mcp { vault } => match mcp::serve(&vault) {
+        Command::Mcp { vault } => match mcp::serve(vault.as_deref()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("heimdall mcp: {}: {}", error.code, error.message);
@@ -304,6 +330,7 @@ fn dispatch(command: Command) -> Result<ExitCode> {
             envelope::ok(&commands::read(
                 &vault,
                 commands::ReadRequest {
+                    vault: None,
                     path,
                     start_line,
                     max_lines,
@@ -336,6 +363,7 @@ fn dispatch(command: Command) -> Result<ExitCode> {
             envelope::ok(&commands::write(
                 &vault,
                 commands::WriteRequest {
+                    vault: None,
                     path,
                     content: read_stdin()?,
                     expected_revision,
@@ -350,7 +378,22 @@ fn dispatch(command: Command) -> Result<ExitCode> {
 
         Command::Unlock { path, vault } => {
             let (vault, path) = vault.open(path.as_deref())?;
-            envelope::ok(&commands::unlock(&vault, commands::LockRequest { path })?)
+            let person = Person::for_vault(&vault);
+            envelope::ok(&commands::unlock(&vault, commands::LockRequest { path }, &person)?)
+        }
+
+        Command::Vaults => envelope::ok(&list_vaults()?),
+
+        Command::Share { vault, name } => {
+            let vault = vault.open()?;
+            let shared = agents::share(&vault, name.as_deref())?;
+            envelope::ok(&json!({ "name": shared.name, "path": shared.path, "shared": true }))
+        }
+
+        Command::Unshare { vault } => {
+            let vault = vault.open()?;
+            let changed = agents::unshare(&vault)?;
+            envelope::ok(&json!({ "path": vault.root(), "shared": false, "changed": changed }))
         }
 
         Command::CreateFolder { vault, path } => envelope::ok(&commands::create_folder(
@@ -394,6 +437,38 @@ fn dispatch(command: Command) -> Result<ExitCode> {
     })
 }
 
+/// Every vault Heimdall knows — registered, shared, or both — with whether it
+/// is shared with AI clients and under what name.
+///
+/// Shell output, for a person and the desktop; it names absolute paths, which
+/// is why nothing like it is ever an MCP tool.
+fn list_vaults() -> Result<serde_json::Value> {
+    let data_dir = appdata::data_dir()?;
+    let shared = agents::list(&data_dir)?;
+    let mut roots = registry::list(&data_dir)?;
+    for vault in &shared {
+        if !roots.contains(&vault.path) {
+            roots.push(vault.path.clone());
+        }
+    }
+    roots.sort();
+
+    let vaults: Vec<_> = roots
+        .into_iter()
+        .map(|root| {
+            let share = shared.iter().find(|vault| vault.path == root);
+            json!({
+                "path": root,
+                "folder": root.file_name().unwrap_or_default(),
+                "exists": root.is_dir(),
+                "shared": share.is_some(),
+                "name": share.map(|vault| vault.name.clone()),
+            })
+        })
+        .collect();
+    Ok(json!({ "vaults": vaults }))
+}
+
 /// Read Markdown content from stdin, bounded before it reaches a domain check.
 ///
 /// Content never arrives as a shell-interpreted argument (SPEC §11): a note
@@ -435,6 +510,9 @@ fn version(as_json: bool) -> ExitCode {
         "core_version": heimdall_core::VERSION,
         "output_schema_version": envelope::SCHEMA_VERSION,
         "mcp_protocol_version": crate::mcp::PROTOCOL_VERSION.to_string(),
+        // A release build always asks a person before an unlock; the release
+        // script refuses to ship one that does not say so.
+        "presence": if presence::REQUIRED { "required" } else { "scripted-in-debug" },
     }))
 }
 
@@ -453,15 +531,17 @@ mod tests {
         let command = Cli::command();
         for subcommand in command.get_subcommands() {
             let name = subcommand.get_name();
-            // `create` names a location with --root instead of selecting a vault.
-            if name == "create" {
+            // `create` names a location with --root instead of selecting a
+            // vault, and `vaults` lists them all.
+            if name == "create" || name == "vaults" {
                 continue;
             }
             let vault = subcommand
                 .get_arguments()
                 .find(|arg| arg.get_id() == "vault")
                 .unwrap_or_else(|| panic!("{name} has no --vault"));
-            let discovers = matches!(name, "read" | "write" | "lock" | "unlock");
+            // `mcp` without --vault serves the shared vaults.
+            let discovers = matches!(name, "read" | "write" | "lock" | "unlock" | "mcp");
             assert_eq!(
                 vault.is_required_set(),
                 !discovers,
@@ -500,10 +580,14 @@ mod tests {
             "delete-path",
             "link-graph",
             "mcp",
+            // Which vaults AI clients may see: a person's choice, never a tool.
+            "vaults",
+            "share",
+            "unshare",
         ] {
             assert!(names.contains(&expected), "missing {expected}");
         }
-        assert_eq!(names.len(), 11, "unexpected subcommands: {names:?}");
+        assert_eq!(names.len(), 14, "unexpected subcommands: {names:?}");
         // No general-purpose file access ever appears here (SPEC §9).
         for forbidden in ["read-file", "write-file", "execute", "read_file", "write_file"] {
             assert!(!names.contains(&forbidden), "unexpected {forbidden}");

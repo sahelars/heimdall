@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{Error, Result};
-use crate::notelocks::LockRules;
+use crate::notelocks::Locks;
 use crate::paths::RelPath;
 use crate::storage::Vault;
 
@@ -43,7 +43,7 @@ pub fn create_folder(vault: &Vault, request: CreateFolderRequest) -> Result<Crea
         existing = existing.parent();
     }
     let created = vault.with_write_lock(&path, || {
-        LockRules::load(vault)?.deny_change_in(&existing, &path)?;
+        Locks::load(vault)?.deny_change_in(&existing, &path)?;
         vault.create_dir_all(&path)
     })?;
 

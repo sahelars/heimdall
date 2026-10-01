@@ -4,8 +4,8 @@ Markdown vaults your AI can read and write, and you can lock.
 
 Heimdall gives AI clients two verbs over your notes, `read` and `write`, instead
 of unrestricted filesystem access. You can **lock** any note, any folder, or the
-whole vault, and nothing can change it until you unlock it: not an agent, not a
-script, not the editor.
+whole vault, and nothing can change it until you unlock it — not an agent, not a
+script, not the editor — and unlocking asks for Touch ID or your password.
 
 A vault is a folder of Markdown files and nothing else, so any Markdown editor
 opens the same files. Heimdall keeps nothing of its own inside it.
@@ -61,22 +61,30 @@ heimdall create my-vault --root ~/Documents
 
 ## Connecting an AI client
 
-Open the vault, then go to **Settings → Server**. **Add entry** next to Claude
-Desktop or ChatGPT writes the server entry into that client's configuration and
-leaves everything else in the file untouched. **Run health check** performs a
-real MCP handshake against the vault, which confirms a client will be able to
-connect. Restart the client afterwards so it picks up the new server.
+Open **Settings → Server**.
 
-For any other MCP client, use one server process per vault, over stdio. Give the
-absolute path to the bundled binary, because GUI clients don't inherit your
-shell's `PATH`:
+1. **Share** the vaults AI clients may use. Each one gets a name (its folder
+   name unless you rename it), and that name is all a client ever sees.
+2. **Add entry** next to Claude Desktop or ChatGPT. This writes one `heimdall`
+   entry into that client's configuration, whatever the number of vaults, and
+   leaves everything else in the file untouched. Per-vault entries from older
+   versions are replaced, and their vaults are shared first.
+3. Restart the client. For ChatGPT, use **Work** or **Codex** mode: plain chat
+   and chatgpt.com don't run local servers.
+
+**Run health check** performs a real MCP handshake, which confirms the server
+starts and answers. Sharing, unsharing, or renaming a vault later needs no
+restart. The client sees the change on its next call.
+
+For any other MCP client, run `heimdall mcp` over stdio. Give the absolute path
+to the bundled binary, because GUI clients don't inherit your shell's `PATH`:
 
 ```json
 {
   "mcpServers": {
     "heimdall": {
       "command": "/Applications/Heimdall.app/Contents/MacOS/heimdall",
-      "args": ["mcp", "--vault", "/Users/you/Documents/my-vault"]
+      "args": ["mcp"]
     }
   }
 }
@@ -85,8 +93,28 @@ shell's `PATH`:
 For example, with Claude Code:
 
 ```bash
-claude mcp add heimdall -- /Applications/Heimdall.app/Contents/MacOS/heimdall mcp --vault ~/Documents/my-vault
+claude mcp add heimdall -- /Applications/Heimdall.app/Contents/MacOS/heimdall mcp
 ```
+
+From the shell, `heimdall vaults` lists vaults and which are shared, and
+`heimdall share --vault PATH [--name NAME]` and `heimdall unshare --vault PATH`
+change that.
+
+### "Operation not permitted" and vaults in Documents
+
+macOS guards Documents, Desktop, Downloads, iCloud Drive, other cloud storage,
+and external volumes. When ChatGPT or Claude launches `heimdall mcp`, macOS
+decides whether *that* process may open your vault, separately from the
+Heimdall app. If it can't, the client still lists Heimdall's tools, and each call
+says access was refused. To fix it, do one of these:
+
+- allow the prompt macOS shows,
+- add `/Applications/Heimdall.app/Contents/MacOS/heimdall` under **System
+  Settings → Privacy & Security → Files and Folders** (or **Full Disk
+  Access**), or
+- keep the vault somewhere unguarded, such as `~/Heimdall/`.
+
+The Server screen flags shared vaults in these places.
 
 ### What an agent can do
 
@@ -96,16 +124,22 @@ shell.
 - **No general file access.** There is no general file read, write, or execute
   tool.
 - **No lock tools.** There is no `lock` or `unlock` tool.
-- **No way to change vaults.** No tool takes a vault path. The vault is fixed by
-  `--vault`, so a call cannot name another vault, switch to one, or discover
-  one. Creating a vault is a shell command.
+- **Only the vaults you share, only by name.** A call names a shared vault by
+  the name you gave it, never by a path. With more than one shared, a call that
+  doesn't name one is refused, along with the list of names. A vault you
+  haven't shared, a made-up name, and a path all get the same "not found".
+  Sharing and creating vaults are things you do, not tools.
 
 The server's initialization instructions tell a client to:
 
 - start with `read`,
 - pass the revision from its latest read when it writes,
-- treat a locked path as read-only until you unlock it. A refused write is
-  reported to you, with the lock responsible, rather than worked around.
+- use these tools rather than the filesystem,
+- treat a locked path as read-only. They are told not to try any other route:
+  not a shell, file tools, scripts, or operating the Heimdall app or any other
+  app through computer use. A refused write is reported to you, with the lock
+  responsible. The `write` tool's description and every `LOCKED` refusal say
+  the same, for clients that never show the instructions.
 
 Each tool publishes an input and output schema derived from the same Rust types
 the shell returns, so the two cannot drift. Results come back as typed
@@ -132,10 +166,23 @@ in every `read`, but it can neither lift one nor set one. Setting one is
 withheld too, because a folder lock would erase the note-level unlocks beneath
 it.
 
-Against an agent whose only way into the vault is this MCP server, a lock is a
-real boundary. It is not one against an agent that also has your shell or
-filesystem, because that agent can edit the files directly. Keep such tools away
-from a vault you need protected.
+Locks are enforced in three places:
+
+- **In Heimdall.** Every write path checks the lock, whatever spelling it was
+  given: another capitalisation, a decomposed accent, or a symlinked folder.
+- **By macOS.** Each locked note gets the filesystem's immutable flag, the one
+  Finder calls "Locked". An agent's shell, `apply_patch`, another editor, or
+  `rm` all get "Operation not permitted". A note carrying the flag counts as
+  locked even if Heimdall's own records are deleted.
+- **At the unlock.** Unlocking from the app or with `heimdall unlock` asks for
+  Touch ID or your login password, and the prompt says which program asked.
+  An agent that drives the app through computer use can press the button, but
+  it can't answer that prompt.
+
+What a lock doesn't stop is an agent deliberately working against you with
+your own account. It could run `chflags nouchg` on a note, or untick "Locked" in
+Finder before editing. Agents are told not to try. Don't give computer-use
+agents Finder or a text editor for vault work.
 
 ## The desktop app
 
@@ -170,7 +217,8 @@ revision refuses it too.
 **Settings** (`⌘,`) has four sections:
 
 - **Vault** creates a vault or opens an existing folder.
-- **Server** connects AI clients, as described above.
+- **Server** chooses which vaults AI clients can see and connects clients, as
+  described above.
 - **Appearance** overrides the system theme and sets an accent colour for each
   theme.
 - **Diagnostics** reports which binary is in use, its versions, the vault's
@@ -222,7 +270,9 @@ and the bundled CLI is replaced along with the app.
    `sudo rm /usr/local/bin/heimdall`.
 3. Optionally, remove Heimdall's own data:
    `~/Library/Application Support/heimdall/`. This holds the registry of known
-   vaults, the lock rules, and the write locks. Deleting it unlocks every note.
+   vaults, the shared vaults, the lock rules, and the write locks. Deleting it
+   drops every lock rule. Notes that were locked keep the macOS "Locked" flag
+   until you untick it in Finder (Get Info).
 4. Remove the `heimdall` entry from any AI client you connected.
 
 Your vaults are ordinary folders of Markdown, and uninstalling never touches

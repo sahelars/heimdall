@@ -32,27 +32,26 @@ async fn invoke_cli(command: String, request: Value, stdin: Option<String>) -> C
     blocking(move || cli_bridge::run(&command, &request, stdin.as_deref())).await
 }
 
-/// Launch the MCP server for a vault and complete a real handshake.
+/// Launch the MCP server for the shared vaults and complete a real handshake.
 #[tauri::command]
-async fn health_check(vault: String) -> HealthCheck {
-    blocking(move || cli_bridge::health_check(&vault)).await
+async fn health_check() -> HealthCheck {
+    blocking(cli_bridge::health_check).await
 }
 
 /// The MCP client configuration files this application can write to.
 #[tauri::command]
-async fn list_client_configs(vault: String) -> Vec<KnownClient> {
-    blocking(move || client_config::known_clients(&vault)).await
+async fn list_client_configs() -> Vec<KnownClient> {
+    blocking(client_config::known_clients).await
 }
 
-/// Write the server entry into one known client's configuration.
+/// Write the one server entry into a known client's configuration.
 ///
 /// Only reachable for a client named in [`list_client_configs`], and only ever
-/// called after the user asks for it (SPEC §15).
+/// called after the user asks for it (SPEC §15). The vaults its older
+/// per-vault entries served are shared first; if any of those cannot be
+/// shared, the configuration is left exactly as it was.
 #[tauri::command]
-async fn install_client_config(
-    client_id: String,
-    vault: String,
-) -> Result<InstallOutcome, DomainError> {
+async fn install_client_config(client_id: String) -> Result<InstallOutcome, DomainError> {
     blocking(move || {
         let command = cli_bridge::sidecar_path();
         if !command.is_file() {
@@ -61,7 +60,22 @@ async fn install_client_config(
                 "the bundled heimdall command line tool is missing, so there is nothing to point a client at",
             ));
         }
-        client_config::install(&client_id, &vault, &command, cli_bridge::sidecar_origin())
+        let origin = cli_bridge::sidecar_origin();
+        if origin.is_development() {
+            // Refused before sharing anything, for the reason `install` gives.
+            return client_config::install(&client_id, &command, origin);
+        }
+        for vault in client_config::legacy_vaults(&client_id)? {
+            // A folder that is gone has nothing left to share.
+            if !std::path::Path::new(&vault).is_dir() {
+                continue;
+            }
+            let shared = cli_bridge::run("share", &serde_json::json!({ "vault": vault }), None);
+            if let Some(error) = shared.error {
+                return Err(error);
+            }
+        }
+        client_config::install(&client_id, &command, origin)
     })
     .await
 }
