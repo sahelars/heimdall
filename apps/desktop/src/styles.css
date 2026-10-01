@@ -1398,9 +1398,10 @@ pre {
   background: var(--bg);
   color: var(--muted);
   border: 1px solid var(--line-soft);
-  font-family: inherit;
-  font-size: 11px;
-  padding: 4px 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
   cursor: pointer;
 }
 

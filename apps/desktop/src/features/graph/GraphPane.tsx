@@ -25,6 +25,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Simulation } from "d3-force";
 
 import type { LinkGraphData } from "../../api/types";
+import { IconRecentre } from "../../components/icons";
 import { draw, type GraphColours } from "./draw";
 import {
   approach,
@@ -446,8 +447,14 @@ export function GraphPane({ data, activePath, settings = GRAPH_DEFAULTS, onOpen 
       />
 
       {empty ? null : (
-        <button type="button" className="graph__recentre" onClick={recentre}>
-          Recentre
+        <button
+          type="button"
+          className="graph__recentre"
+          title="Recentre"
+          aria-label="Recentre"
+          onClick={recentre}
+        >
+          <IconRecentre size={14} />
         </button>
       )}
 
