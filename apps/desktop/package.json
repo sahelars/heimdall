@@ -13,7 +13,7 @@
     "test:watch": "vitest",
     "tauri": "tauri",
     "tauri:dev": "npm run sidecar && tauri dev",
-    "tauri:build": "npm run sidecar -- --release && tauri build",
+    "tauri:build": "npm run sidecar -- --release && PATH=\"$PWD/scripts/actool:$PATH\" tauri build",
     "release:mac": "node scripts/release-macos.mjs"
   },
   "dependencies": {
