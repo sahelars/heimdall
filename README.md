@@ -298,8 +298,11 @@ The script does the following:
 4. Checks every signature the way Gatekeeper will.
 5. Prints the DMG's path and its SHA-256 for the release notes.
 
-If the build fails while creating `Assets.car`, run `killall ibtoold` and try
-again. A stale `actool` daemon intermittently crashes on Icon Composer icons.
+`npm run tauri:build` puts `scripts/actool/actool` first on `PATH`. Tauri
+compiles `Icon.icon` with `--accent-color AccentColor` and a closed stdin, and
+`actool` 26.6 crashes on either one while creating `Assets.car`. The wrapper
+drops the flag, gives `actool` `/dev/null` as stdin, and passes everything else
+through unchanged. Once Tauri or Xcode fixes the crash, remove the wrapper.
 
 ## Design in one paragraph
 
