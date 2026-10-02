@@ -57,6 +57,53 @@ export function Button({
   );
 }
 
+/**
+ * An on/off setting, as a switch rather than a tick box.
+ *
+ * A button with `role="switch"`, so it is one tab stop, answers Space and
+ * Return like any button, and reads as "on" or "off" to a screen reader. The
+ * track is a hairline box and the knob a filled square in ink that sits left
+ * when off and right when on — no accent, which belongs to the four places the
+ * stylesheet spends it.
+ */
+export function Switch({
+  label,
+  checked,
+  onChange,
+  disabled,
+  hint,
+  id,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+  hint?: string;
+  id: string;
+}) {
+  return (
+    <div className="field">
+      <span className="field__label" id={`${id}-label`}>
+        {label}
+      </span>
+      <button
+        id={id}
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-labelledby={`${id}-label`}
+        className={checked ? "switch switch--on" : "switch"}
+        disabled={disabled}
+        onClick={() => onChange(!checked)}
+      >
+        <span className="switch__knob" aria-hidden="true" />
+        <span className="switch__state">{checked ? "On" : "Off"}</span>
+      </button>
+      {hint ? <span className="field__hint">{hint}</span> : null}
+    </div>
+  );
+}
+
 export function Field({
   label,
   value,

@@ -92,6 +92,16 @@ export function unshareVault(vault: string) {
   return invokeCli<{ path: string; shared: false; changed: boolean }>("unshare", { vault });
 }
 
+/** Open System Settings at Privacy & Security › Full Disk Access. */
+export function openPrivacySettings(): Promise<void> {
+  return invoke<void>("open_privacy_settings");
+}
+
+/** Select the bundled command line tool in Finder, to add it to Full Disk Access. */
+export function revealCli(): Promise<void> {
+  return invoke<void>("reveal_sidecar");
+}
+
 /** The exact command a client runs: one server for every shared vault. */
 export function mcpCommand(cliPath: string): string {
   return `${quote(cliPath)} mcp`;

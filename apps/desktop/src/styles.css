@@ -689,6 +689,69 @@ pre {
   cursor: not-allowed;
 }
 
+/*
+ * A switch: a hairline track, a square knob in ink, and the word for its state
+ * beside the knob, so "on" never depends on reading a position alone. As tall
+ * as a button, so it lines up in a row of them.
+ */
+.switch {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  font-family: inherit;
+  font-size: inherit;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+.switch:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.switch:focus-visible {
+  outline: 1px solid var(--fg);
+  outline-offset: 2px;
+}
+
+.switch:disabled {
+  color: var(--muted);
+  border-color: var(--muted);
+  cursor: not-allowed;
+}
+
+/* The knob travels a 28px track: left when off, right when on. */
+.switch__knob {
+  position: relative;
+  width: 28px;
+  height: 12px;
+  border: 1px solid var(--line);
+}
+
+.switch__knob::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 8px;
+  height: 8px;
+  background: var(--muted);
+}
+
+.switch--on .switch__knob::after {
+  left: auto;
+  right: 1px;
+  background: var(--fg);
+}
+
+.switch__state {
+  min-width: 2em;
+  text-align: left;
+}
+
 .button--primary {
   background: var(--fg);
   color: var(--bg);

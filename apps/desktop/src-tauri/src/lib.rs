@@ -80,6 +80,56 @@ async fn install_client_config(client_id: String) -> Result<InstallOutcome, Doma
     .await
 }
 
+/// System Settings, opened at Privacy & Security › Full Disk Access.
+///
+/// An AI client launches `heimdall mcp` itself, and macOS judges that process
+/// on its own account; for a vault in Documents, Desktop, Downloads, or iCloud
+/// Drive it is refused without a prompt (SPEC §16). Adding the bundled CLI
+/// here is the fix, so the Server screen takes the user straight to it.
+pub const PRIVACY_SETTINGS_URL: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
+
+/// The one program both commands below run, by absolute path: no `PATH`
+/// lookup and no shell.
+const OPEN: &str = "/usr/bin/open";
+
+/// Open System Settings at Full Disk Access. Takes nothing from React.
+#[tauri::command]
+async fn open_privacy_settings() -> Result<(), DomainError> {
+    blocking(|| launch(&[PRIVACY_SETTINGS_URL])).await
+}
+
+/// Select the bundled CLI in Finder, so it can be dragged into Full Disk
+/// Access. Takes nothing from React: the path is the sidecar this app runs.
+#[tauri::command]
+async fn reveal_sidecar() -> Result<(), DomainError> {
+    blocking(|| {
+        let sidecar = cli_bridge::sidecar_path();
+        if !sidecar.is_file() {
+            return Err(DomainError::new(
+                "IO_ERROR",
+                "the bundled heimdall command line tool is missing from this application",
+            ));
+        }
+        launch(&["-R".as_ref(), sidecar.as_os_str()])
+    })
+    .await
+}
+
+fn launch<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Result<(), DomainError> {
+    std::process::Command::new(OPEN)
+        .args(args)
+        .status()
+        .map_err(|err| DomainError::new("IO_ERROR", format!("could not open it: {}", err.kind())))
+        .and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(DomainError::new("IO_ERROR", "macOS could not open it"))
+            }
+        })
+}
+
 /// Run blocking work off the UI thread.
 ///
 /// Every command here spawns a process or touches the filesystem, and the
@@ -112,7 +162,23 @@ pub fn run() {
             health_check,
             list_client_configs,
             install_client_config,
+            open_privacy_settings,
+            reveal_sidecar,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Heimdall");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_privacy_link_is_fixed_and_points_at_full_disk_access() {
+        // Nothing React sends reaches `open`: the URL is a constant, and both
+        // commands take no arguments at all.
+        assert!(PRIVACY_SETTINGS_URL.starts_with("x-apple.systempreferences:"));
+        assert!(PRIVACY_SETTINGS_URL.ends_with("Privacy_AllFiles"));
+        assert_eq!(OPEN, "/usr/bin/open");
+    }
 }

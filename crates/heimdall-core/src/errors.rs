@@ -167,10 +167,12 @@ impl Error {
     /// macOS privacy settings keep the launching application out of.
     pub fn os_permission(context: &str, err: &io::Error) -> Self {
         Self::io_error(format!(
-            "{context}: {}. The file may be locked, or macOS may be keeping this \
-             application out of the folder: allow it in System Settings > Privacy & \
-             Security (Files and Folders, or Full Disk Access), or keep the vault \
-             outside Documents, Desktop, Downloads, and iCloud Drive",
+            "{context}: {}. The file may be locked, or macOS is keeping Heimdall out of \
+             the folder — which it does without asking when an AI app starts Heimdall for a \
+             vault in Documents, Desktop, Downloads, or iCloud Drive. Add Heimdall's command \
+             line tool (Heimdall.app > Contents > MacOS > heimdall) under System Settings > \
+             Privacy & Security > Full Disk Access, or keep the vault in a folder of its own \
+             in your home directory",
             sanitize(err)
         ))
         .with_detail("reason", "os_permission")
@@ -247,7 +249,8 @@ mod tests {
             let err = Error::from_io_path("open", &io::Error::from_raw_os_error(errno));
             assert_eq!(err.code, ErrorCode::IoError, "errno {errno}");
             assert_eq!(err.details["reason"], "os_permission");
-            assert!(err.message.contains("Privacy"), "{}", err.message);
+            assert!(err.message.contains("Full Disk Access"), "{}", err.message);
+            assert!(!err.message.contains("/Applications"), "{}", err.message);
         }
     }
 

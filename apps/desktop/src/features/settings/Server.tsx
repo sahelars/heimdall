@@ -18,7 +18,9 @@ import {
   listClientConfigs,
   listVaults,
   mcpCommand,
+  openPrivacySettings,
   protectedLocation,
+  revealCli,
   shareVault,
   unshareVault,
 } from "../../api/cli";
@@ -31,7 +33,7 @@ import type {
   KnownClient,
   KnownVault,
 } from "../../api/types";
-import { Button, Facts, Failure, Notice, Panel } from "../../components";
+import { Button, Facts, Failure, Notice, Panel, Switch } from "../../components";
 import { Prompt } from "../../components/Prompt";
 
 /** What each client is called here, and what a user needs to know about it. */
@@ -150,22 +152,19 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
                   <span className="field__hint">{known.path}</span>
                 </div>
                 {known.shared ? (
-                  <>
-                    <Button onClick={() => setRenaming(known)} disabled={busy}>
-                      Rename
-                    </Button>
-                    <Button onClick={() => change(() => unshareVault(known.path))} disabled={busy}>
-                      Stop sharing
-                    </Button>
-                  </>
-                ) : (
-                  <Button
-                    onClick={() => change(() => shareVault(known.path))}
-                    disabled={busy || !known.exists}
-                  >
-                    Share
+                  <Button onClick={() => setRenaming(known)} disabled={busy}>
+                    Rename
                   </Button>
-                )}
+                ) : null}
+                <Switch
+                  id={`share-${known.path}`}
+                  label="AI clients"
+                  checked={known.shared}
+                  onChange={(on) =>
+                    change(() => (on ? shareVault(known.path) : unshareVault(known.path)))
+                  }
+                  disabled={busy || (!known.shared && !known.exists)}
+                />
               </div>
             ))}
           </div>
@@ -174,12 +173,21 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
           <Notice title="macOS may keep AI clients out">
             {guarded.map(({ known, place }) => (
               <p className="muted" key={known.path}>
-                “{known.name}” is in {place}. macOS asks before letting another app's copy of
-                Heimdall open it; if a client reports “Operation not permitted”, allow Heimdall in
-                System Settings › Privacy &amp; Security › Files and Folders (or Full Disk Access),
-                or keep the vault somewhere else, such as a folder in your home directory.
+                “{known.name}” is in {place}. When an AI client starts Heimdall, macOS refuses it
+                that folder without asking, and the client reports “Operation not permitted”. Add
+                Heimdall's command line tool under System Settings › Privacy &amp; Security › Full
+                Disk Access — the buttons below open the setting and show the tool in Finder, to
+                drag into the list — or keep the vault somewhere else, such as ~/Heimdall.
               </p>
             ))}
+            <div className="row">
+              <Button onClick={() => void openPrivacySettings().catch(() => undefined)}>
+                Open Privacy settings
+              </Button>
+              <Button onClick={() => void revealCli().catch(() => undefined)}>
+                Show Heimdall's command in Finder
+              </Button>
+            </div>
           </Notice>
         ) : null}
       </Panel>

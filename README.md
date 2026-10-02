@@ -63,8 +63,11 @@ heimdall create my-vault --root ~/Documents
 
 Open **Settings → Server**.
 
-1. **Share** the vaults AI clients may use. Each one gets a name (its folder
-   name unless you rename it), and that name is all a client ever sees.
+1. Make sure each vault you want AI clients to use is **Available to AI
+   clients**. A vault you create or open in Heimdall is, unless you switch it
+   off. Change it later from the Active vault panel on the Vault screen or the
+   list on the Server screen. Each shared vault gets a name (its folder name
+   unless you rename it), and that name is all a client ever sees.
 2. **Add entry** next to Claude Desktop or ChatGPT. This writes one `heimdall`
    entry into that client's configuration, whatever the number of vaults, and
    leaves everything else in the file untouched. Per-vault entries from older
@@ -103,18 +106,19 @@ change that.
 ### "Operation not permitted" and vaults in Documents
 
 macOS guards Documents, Desktop, Downloads, iCloud Drive, other cloud storage,
-and external volumes. When ChatGPT or Claude launches `heimdall mcp`, macOS
-decides whether *that* process may open your vault, separately from the
-Heimdall app. If it can't, the client still lists Heimdall's tools, and each call
-says access was refused. To fix it, do one of these:
+and external volumes. When ChatGPT or Claude starts `heimdall mcp`, macOS judges
+that process on its own, separately from the Heimdall app, and refuses it these
+folders without asking. The client still lists Heimdall's tools, but every call
+to such a vault reports "Operation not permitted". There are two fixes:
 
-- allow the prompt macOS shows,
-- add `/Applications/Heimdall.app/Contents/MacOS/heimdall` under **System
-  Settings → Privacy & Security → Files and Folders** (or **Full Disk
-  Access**), or
-- keep the vault somewhere unguarded, such as `~/Heimdall/`.
-
-The Server screen flags shared vaults in these places.
+- Keep vaults in a folder of their own in your home directory, such as
+  `~/Heimdall/Work`. Settings → Vault suggests this and warns before you create
+  a vault anywhere guarded.
+- Or add Heimdall's command line tool under **System Settings → Privacy &
+  Security → Full Disk Access**. On the Server screen, **Open Privacy settings**
+  opens that list and **Show Heimdall's command in Finder** selects
+  `Heimdall.app/Contents/MacOS/heimdall` so you can drag it in. Then restart the
+  client.
 
 ### What an agent can do
 

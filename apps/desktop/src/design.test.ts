@@ -319,6 +319,23 @@ describe("keyboard focus", () => {
   });
 });
 
+describe("the switch", () => {
+  it("is a hairline box with a square knob in ink, and its own focus ring", () => {
+    const rule = (selector: string) =>
+      rules(declarations).find((candidate) =>
+        candidate.selector.split(",").some((part) => part.trim() === selector),
+      );
+    expect(rule(".switch")?.body).toMatch(/border:\s*1px solid var\(--line\);/);
+    expect(rule(".switch__knob")?.body).toMatch(/border:\s*1px solid var\(--line\);/);
+    expect(rule(".switch--on .switch__knob::after")?.body).toMatch(/background:\s*var\(--fg\);/);
+    expect(rule(".switch:focus-visible")?.body).toMatch(/outline:\s*1px solid var\(--fg\);/);
+    // Not one of the four places the accent is spent.
+    for (const selector of [".switch", ".switch--on .switch__knob::after"]) {
+      expect(rule(selector)?.body ?? "").not.toContain("--accent");
+    }
+  });
+});
+
 describe("the settings sheet", () => {
   it("draws no rule under its title", () => {
     // The tab strip below draws its own, and two hairlines a row apart boxed

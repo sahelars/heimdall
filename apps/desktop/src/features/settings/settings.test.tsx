@@ -161,6 +161,128 @@ describe("Setup", () => {
     });
   });
 
+  /** Answer `create`, `share`, `unshare` and `vaults` the way the CLI would. */
+  function setupBridge({
+    vaults = [] as unknown[],
+    shareFails = false,
+  } = {}) {
+    const calls: { command: string; request: Record<string, unknown> }[] = [];
+    invoke.mockImplementation((_command: string, args?: Record<string, unknown>) => {
+      const command = args?.command as string;
+      const request = (args?.request ?? {}) as Record<string, unknown>;
+      calls.push({ command, request });
+      if (command === "create") {
+        return Promise.resolve({
+          ok: true,
+          data: { path: `${request.root}/${request.name}`, mode: "scaffolded", created: [] },
+        });
+      }
+      if (command === "share") {
+        if (shareFails) {
+          return Promise.resolve({
+            ok: false,
+            error: { code: "ALREADY_EXISTS", message: 'another shared vault is already called "demo"' },
+          });
+        }
+        return Promise.resolve({ ok: true, data: { name: "demo", path: request.vault, shared: true } });
+      }
+      if (command === "vaults") return Promise.resolve({ ok: true, data: { vaults } });
+      return Promise.resolve({ ok: true, data: {} });
+    });
+    return calls;
+  }
+
+  async function createDemo(root = "/Users/n") {
+    await userEvent.type(screen.getByLabelText("Vault name"), "demo");
+    await userEvent.type(screen.getByLabelText("Location"), root);
+    await userEvent.click(screen.getByRole("button", { name: "Create vault" }));
+  }
+
+  it("shares a new vault with AI clients unless told not to", async () => {
+    // Someone who has just made a vault and asks ChatGPT to write in it means
+    // for that to work; a vault that existed but was not shared was the bug.
+    const calls = setupBridge();
+    render(<Setup vault="" onVaultChange={vi.fn()} />);
+    const toggles = screen.getAllByRole("switch", { name: "Available to AI clients" });
+    for (const toggle of toggles) expect(toggle).toHaveAttribute("aria-checked", "true");
+
+    await createDemo();
+
+    await screen.findByText("Vault created");
+    expect(calls).toContainEqual({ command: "share", request: { vault: "/Users/n/demo" } });
+    expect(screen.getByText("shared as “demo”")).toBeInTheDocument();
+  });
+
+  it("leaves a new vault unshared when the switch is off", async () => {
+    const calls = setupBridge();
+    render(<Setup vault="" onVaultChange={vi.fn()} />);
+    await userEvent.click(screen.getAllByRole("switch", { name: "Available to AI clients" })[0]!);
+    for (const toggle of screen.getAllByRole("switch", { name: "Available to AI clients" })) {
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+    }
+
+    await createDemo();
+
+    await screen.findByText("Vault created");
+    expect(calls.some((call) => call.command === "share")).toBe(false);
+    expect(screen.getByText("not shared")).toBeInTheDocument();
+  });
+
+  it("still opens a vault whose share failed, and says why", async () => {
+    setupBridge({ shareFails: true });
+    const onVaultChange = vi.fn();
+    render(<Setup vault="" onVaultChange={onVaultChange} />);
+
+    await createDemo();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("already called");
+    expect(onVaultChange).toHaveBeenCalledWith("/Users/n/demo");
+  });
+
+  it("warns about a location macOS keeps AI clients out of, and suggests another", async () => {
+    setupBridge();
+    render(<Setup vault="" onVaultChange={vi.fn()} />);
+    expect(screen.getByLabelText("Location")).toHaveAttribute("placeholder", "/Users/you/Heimdall");
+
+    await userEvent.type(screen.getByLabelText("Location"), "/Users/n/Documents");
+    expect(screen.getByText(/macOS keeps AI clients out of Documents/)).toBeInTheDocument();
+
+    await userEvent.clear(screen.getByLabelText("Location"));
+    await userEvent.type(screen.getByLabelText("Location"), "/Users/n/Heimdall");
+    expect(screen.queryByText(/macOS keeps AI clients out of/)).toBeNull();
+  });
+
+  it("switches the active vault's sharing from where it is shown", async () => {
+    const calls = setupBridge({
+      vaults: [{ path: "/Users/n/notes", folder: "notes", exists: true, shared: false, name: null }],
+    });
+    const { container } = render(<Setup vault="/Users/n/notes" onVaultChange={vi.fn()} />);
+
+    await waitFor(() => expect(calls.some((call) => call.command === "vaults")).toBe(true));
+    const toggle = container.querySelector("#active-share") as HTMLElement;
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+
+    await userEvent.click(toggle);
+    await waitFor(() =>
+      expect(calls).toContainEqual({ command: "share", request: { vault: "/Users/n/notes" } }),
+    );
+  });
+
+  it("names the active vault's shared name and can stop sharing it", async () => {
+    const calls = setupBridge({
+      vaults: [{ path: "/Users/n/notes", folder: "notes", exists: true, shared: true, name: "Notes" }],
+    });
+    render(<Setup vault="/Users/n/notes" onVaultChange={vi.fn()} />);
+
+    const toggle = await screen.findByRole("switch", { name: "Available to AI clients as “Notes”" });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(toggle);
+    await waitFor(() =>
+      expect(calls).toContainEqual({ command: "unshare", request: { vault: "/Users/n/notes" } }),
+    );
+  });
+
   it("surfaces a vault that cannot be read with the message the CLI gives", async () => {
     invoke.mockResolvedValue({
       ok: false,
@@ -253,8 +375,25 @@ describe("Server", () => {
     expect(screen.getByText("Private — not shared")).toBeInTheDocument();
     expect(shareCalls).toHaveLength(0);
 
-    await userEvent.click(screen.getByRole("button", { name: "Share" }));
+    const switches = screen.getAllByRole("switch", { name: "AI clients" });
+    expect(switches.map((one) => one.getAttribute("aria-checked"))).toEqual(["true", "false"]);
+    await userEvent.click(switches[1]!);
     await waitFor(() => expect(shareCalls).toEqual([{ vault: "/Users/n/Private" }]));
+  });
+
+  it("stops sharing a vault from its switch", async () => {
+    const unshareCalls: Record<string, unknown>[] = [];
+    serve({
+      vaults: [{ path: "/Users/n/Work", folder: "Work", exists: true, shared: true, name: "Work" }],
+      onCli: (command, request) => {
+        if (command === "unshare") unshareCalls.push(request);
+        return undefined;
+      },
+    });
+    render(<Server vault="/Users/n/Work" status={STATUS} />);
+
+    await userEvent.click(await screen.findByRole("switch", { name: "AI clients" }));
+    await waitFor(() => expect(unshareCalls).toEqual([{ vault: "/Users/n/Work" }]));
   });
 
   it("offers the open vault for sharing before anything has registered it", async () => {
@@ -279,7 +418,13 @@ describe("Server", () => {
 
     expect(await screen.findByText("macOS may keep AI clients out")).toBeInTheDocument();
     expect(screen.getByText(/is in Documents/)).toBeInTheDocument();
-    expect(screen.getByText(/Privacy & Security/)).toBeInTheDocument();
+    expect(screen.getByText(/Full\s+Disk Access/)).toBeInTheDocument();
+
+    // Straight to the setting, and to the file to drag into it.
+    await userEvent.click(screen.getByRole("button", { name: "Open Privacy settings" }));
+    expect(invoke).toHaveBeenCalledWith("open_privacy_settings");
+    await userEvent.click(screen.getByRole("button", { name: "Show Heimdall's command in Finder" }));
+    expect(invoke).toHaveBeenCalledWith("reveal_sidecar");
   });
 
   it("reports a successful handshake with what the server said and why it cannot prove more", async () => {
