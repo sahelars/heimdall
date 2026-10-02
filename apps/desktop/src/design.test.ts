@@ -397,6 +397,20 @@ describe("palette", () => {
     expect(root).toMatch(/--accent-dark-base:\s*#ffffff;/);
   });
 
+  it("gives the accent wells each theme's ground, whatever theme is showing", () => {
+    // A well previews its accent on the background it will be spent on, so the
+    // white default for dark mode is not a white box on a light page.
+    const root = declarations.match(/:root\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(root).toMatch(/--ground-light:\s*#ffffff;/);
+    expect(root).toMatch(/--ground-dark:\s*#000000;/);
+    expect(declarations).toMatch(
+      /\.swatch--light::-webkit-color-swatch-wrapper\s*\{[^}]*background:\s*var\(--ground-light\)/,
+    );
+    expect(declarations).toMatch(
+      /\.swatch--dark::-webkit-color-swatch-wrapper\s*\{[^}]*background:\s*var\(--ground-dark\)/,
+    );
+  });
+
   it("spends an accent in light mode too, not only in dark", () => {
     // The regression this guards: the accent used to be read only by the dark
     // blocks, so a colour chosen in Settings did nothing at all in light mode.

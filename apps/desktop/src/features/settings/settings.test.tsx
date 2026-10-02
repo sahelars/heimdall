@@ -588,6 +588,50 @@ describe("Settings", () => {
     expect(document.documentElement.style.getPropertyValue("--accent-dark")).toBe("#ffffff");
   });
 
+  /** Declare both bases on the document the way the production build ships them. */
+  function well(dialog: HTMLElement, theme: "light" | "dark"): HTMLInputElement {
+    return dialog.querySelector(`#accent-colour-${theme}`) as HTMLInputElement;
+  }
+
+  function shippedBases() {
+    document.documentElement.style.setProperty("--accent-light-base", "#000");
+    document.documentElement.style.setProperty("--accent-dark-base", "#fff");
+  }
+
+  it("fills both wells with their theme's default, as the built stylesheet spells it", async () => {
+    // They came up empty in the shipped app: the minifier writes #000000 as
+    // #000, and only six-digit hex was accepted.
+    shippedBases();
+    const dialog = await appearance();
+
+    expect(within(dialog).getByLabelText("Light hex")).toHaveValue("#000000");
+    expect(within(dialog).getByLabelText("Dark hex")).toHaveValue("#FFFFFF");
+    expect(well(dialog, "light")).toHaveValue("#000000");
+    expect(well(dialog, "dark")).toHaveValue("#ffffff");
+  });
+
+  it("shows the default again as soon as a choice is cleared", async () => {
+    // The well used to read the document, which still held the cleared colour
+    // until the effect that removes it ran.
+    shippedBases();
+    const dialog = await appearance();
+    await userEvent.clear(within(dialog).getByLabelText("Dark hex"));
+    await userEvent.type(within(dialog).getByLabelText("Dark hex"), "#00ff00");
+    expect(well(dialog, "dark")).toHaveValue("#00ff00");
+
+    await userEvent.click(within(dialog).getAllByRole("button", { name: "Default" })[1]!);
+
+    expect(well(dialog, "dark")).toHaveValue("#ffffff");
+    expect(within(dialog).getByLabelText("Dark hex")).toHaveValue("#FFFFFF");
+    expect(within(dialog).getAllByRole("button", { name: "Default" })[1]).toBeDisabled();
+  });
+
+  it("draws each well on its own theme's ground", async () => {
+    const dialog = await appearance();
+    expect(well(dialog, "light")).toHaveClass("swatch", "swatch--light");
+    expect(well(dialog, "dark")).toHaveClass("swatch", "swatch--dark");
+  });
+
   it("does not offer to reset an accent that has not been set", async () => {
     const dialog = await appearance();
 

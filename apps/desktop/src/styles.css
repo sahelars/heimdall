@@ -71,6 +71,15 @@
    */
   --accent-light-base: #000000;
   --accent-dark-base: #ffffff;
+
+  /*
+   * Each theme's ground, whatever theme is showing — for the accent wells,
+   * which preview a theme's accent on the background it will be spent on.
+   * Without them the white default for dark mode, drawn on a light page, is a
+   * white box on white and reads as empty.
+   */
+  --ground-light: #ffffff;
+  --ground-dark: #000000;
   --accent: var(--accent-light, var(--accent-light-base));
   --link: var(--accent);
 
@@ -773,7 +782,16 @@ pre {
 }
 
 .swatch::-webkit-color-swatch-wrapper {
-  padding: 0;
+  padding: 4px;
+}
+
+/* Each well on its own theme's ground, so its accent is seen as it will be. */
+.swatch--light::-webkit-color-swatch-wrapper {
+  background: var(--ground-light);
+}
+
+.swatch--dark::-webkit-color-swatch-wrapper {
+  background: var(--ground-dark);
 }
 
 .swatch::-webkit-color-swatch {

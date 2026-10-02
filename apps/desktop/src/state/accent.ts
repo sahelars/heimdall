@@ -80,22 +80,42 @@ export function applyAccents(root: HTMLElement, accents: Accents): void {
 }
 
 /**
- * What one theme's accent resolves to right now.
+ * A colour as `#rrggbb`, lowercase, from any form a stylesheet can arrive in.
  *
- * The choice when there is one, and otherwise that theme's own end of the
- * palette — so a well shows what its theme would actually use, including the
- * well for the theme that is not currently showing.
- *
- * Both properties are read directly rather than reading the `--accent` they
- * feed, which would mean depending on how a browser computes a `var()` chain
- * for a custom property, and would only ever answer for the showing theme. An
- * empty string comes back where the stylesheet has not been loaded at all,
- * which is what a DOM-less test environment reports.
+ * The production build's minifier shortens `#000000` to `#000` and `#ffffff`
+ * to `#fff`, and a browser may hand a computed colour back as `rgb(…)`. A
+ * colour input understands only six-digit hex, so everything read back from
+ * the stylesheet comes through here. `null` for anything that is not a colour
+ * in one of those forms.
  */
-export function resolvedAccent(root: HTMLElement, theme: AccentTheme): string {
-  const style = getComputedStyle(root);
-  const chosen = style.getPropertyValue(PROPERTY[theme]).trim();
-  if (isAccent(chosen)) return chosen;
-  const base = style.getPropertyValue(BASE[theme]).trim();
-  return isAccent(base) ? base : "";
+export function toHex(value: string): string | null {
+  const text = value.trim().toLowerCase();
+  if (/^#[0-9a-f]{6}$/.test(text)) return text;
+  const short = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/.exec(text);
+  if (short) return `#${short[1]}${short[1]}${short[2]}${short[2]}${short[3]}${short[3]}`;
+  const rgb = /^rgba?\(\s*(\d{1,3})[\s,]+(\d{1,3})[\s,]+(\d{1,3})\s*(?:[,/]\s*[\d.]+%?\s*)?\)$/.exec(text);
+  if (rgb) {
+    const channels = rgb.slice(1, 4).map(Number);
+    if (channels.some((channel) => channel > 255)) return null;
+    return `#${channels.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
+  }
+  return null;
+}
+
+/**
+ * The colour a theme uses when nothing has been chosen for it: that theme's
+ * own end of the palette, as the stylesheet declares it.
+ *
+ * Only the base is read. A well that has a choice already knows it from
+ * props; reading the chosen property here too would read the document a
+ * render behind, because `applyAccents` runs in an effect after the render
+ * that asked — so pressing Default left the well showing the colour just
+ * cleared.
+ *
+ * Both bases are declared on `:root`, so this answers for the theme that is
+ * not showing as well. An empty string comes back where the stylesheet has
+ * not been loaded at all, which is what a DOM-less test environment reports.
+ */
+export function defaultAccent(root: HTMLElement, theme: AccentTheme): string {
+  return toHex(getComputedStyle(root).getPropertyValue(BASE[theme])) ?? "";
 }
