@@ -83,7 +83,10 @@ impl Vault {
         let dir = Dir::open_ambient_dir(root.as_std_path(), ambient_authority()).map_err(|err| {
             match err.kind() {
                 std::io::ErrorKind::NotFound => {
+                    // Tagged, so the desktop can tell "this vault's folder is
+                    // gone" from a note that is not there.
                     Error::not_found("vault directory does not exist")
+                        .with_detail("reason", "vault_missing")
                 }
                 std::io::ErrorKind::NotADirectory => {
                     Error::invalid_input("vault path is not a directory")
@@ -531,7 +534,7 @@ impl Vault {
 
     /// The name every per-vault file is keyed by: a hash of the canonical root.
     fn key(&self) -> String {
-        blake3::hash(self.root.as_str().as_bytes()).to_hex().to_string()
+        vault_key(&self.root)
     }
 
     /// Open (creating if needed) the file this vault's lock lives on.
@@ -620,6 +623,41 @@ fn acquire(file: &std::fs::File, target: &RelPath, wait_limit: Duration) -> Resu
             Err(err) => return Err(Error::from_io(&format!("lock {target}"), &err)),
         }
     }
+}
+
+/// The name a vault's files in the application-data directory are keyed by:
+/// a hash of its canonical root.
+///
+/// A free function as well as [`Vault`]'s, so the files of a vault whose folder
+/// is gone — which can no longer be opened — can still be found and removed.
+pub fn vault_key(root: &Utf8Path) -> String {
+    blake3::hash(root.as_str().as_bytes()).to_hex().to_string()
+}
+
+/// Whether a vault root has been deleted, as opposed to being out of reach.
+///
+/// Only a lookup that fails with "not found" counts. A macOS privacy refusal
+/// is a folder that exists and this process may not enter; a root on an
+/// external drive whose volume is not mounted is a drive that is unplugged.
+/// Forgetting either would throw away a vault the user still has.
+pub fn vault_is_gone(root: &Utf8Path) -> bool {
+    match std::fs::symlink_metadata(root.as_std_path()) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => !on_unmounted_volume(root),
+        _ => false,
+    }
+}
+
+/// Whether `root` lies under `/Volumes/<name>` and that volume is not there.
+fn on_unmounted_volume(root: &Utf8Path) -> bool {
+    let mut components = root.components();
+    let (Some(first), Some(second), Some(volume)) =
+        (components.next(), components.next(), components.next())
+    else {
+        return false;
+    };
+    first.as_str() == "/"
+        && second.as_str() == "Volumes"
+        && !Utf8Path::new("/Volumes").join(volume.as_str()).exists()
 }
 
 /// Whether this build can make a note immutable at the filesystem level.

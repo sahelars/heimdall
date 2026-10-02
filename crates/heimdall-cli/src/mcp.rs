@@ -336,7 +336,13 @@ impl ServerHandler for HeimdallServer {
 /// reason for any failure reaches the user through them.
 pub fn serve(vault_path: Option<&Utf8Path>) -> CoreResult<()> {
     let server = match vault_path {
-        None => HeimdallServer::shared(appdata::data_dir()?),
+        None => {
+            let data_dir = appdata::data_dir()?;
+            // Housekeeping only: a deleted vault is already never offered
+            // (`agents::list` skips it), and this never stops a start.
+            let _ = heimdall_core::registry::forget_missing(&data_dir);
+            HeimdallServer::shared(data_dir)
+        }
         Some(path) => match Vault::open(path) {
             Ok(vault) => {
                 // A vault served over MCP is registered too, so the shell can

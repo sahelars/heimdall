@@ -46,6 +46,8 @@ const CLIENT_NOTES: Record<string, string> = {
 export function Server({ vault, status }: { vault: string; status: CliStatus | null }) {
   const [clients, setClients] = useState<KnownClient[]>([]);
   const [vaults, setVaults] = useState<KnownVault[]>([]);
+  // Vaults the last listing forgot because their folders were deleted.
+  const [forgotten, setForgotten] = useState<string[]>([]);
   const [installed, setInstalled] = useState<InstallOutcome | null>(null);
   const [health, setHealth] = useState<HealthCheck | null>(null);
   const [error, setError] = useState<DomainError | null>(null);
@@ -63,6 +65,8 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
     try {
       const response = await listVaults();
       setVaults(response.ok ? (response.data?.vaults ?? []) : []);
+      const dropped = response.ok ? (response.data?.forgotten ?? []) : [];
+      if (dropped.length > 0) setForgotten(dropped);
     } catch {
       setVaults([]);
     }
@@ -147,7 +151,7 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
                   <span className="field__label">
                     {known.shared ? known.name : known.folder}
                     {known.shared ? " — shared" : " — not shared"}
-                    {known.exists ? "" : " (folder missing)"}
+                    {known.exists ? "" : " (not reachable right now)"}
                   </span>
                   <span className="field__hint">{known.path}</span>
                 </div>
@@ -169,6 +173,16 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
             ))}
           </div>
         )}
+        {forgotten.length > 0 ? (
+          <Notice title="Deleted vaults forgotten">
+            <p className="muted">
+              {forgotten.length === 1 ? "This folder was" : "These folders were"} deleted, so
+              Heimdall no longer lists {forgotten.length === 1 ? "it" : "them"}, shares{" "}
+              {forgotten.length === 1 ? "it" : "them"} with AI clients, or keeps{" "}
+              {forgotten.length === 1 ? "its" : "their"} lock rules: {forgotten.join(", ")}
+            </p>
+          </Notice>
+        ) : null}
         {guarded.length > 0 ? (
           <Notice title="macOS may keep AI clients out">
             {guarded.map(({ known, place }) => (

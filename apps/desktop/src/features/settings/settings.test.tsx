@@ -396,6 +396,36 @@ describe("Server", () => {
     await waitFor(() => expect(unshareCalls).toEqual([{ vault: "/Users/n/Work" }]));
   });
 
+  it("says which deleted vaults it forgot, and lists them no more", async () => {
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "list_client_configs") return Promise.resolve([]);
+      if (command === "invoke_cli" && args?.command === "vaults") {
+        return Promise.resolve({
+          ok: true,
+          data: {
+            vaults: [{ path: "/Users/n/Work", folder: "Work", exists: true, shared: true, name: "Work" }],
+            forgotten: ["/private/tmp/heimdall-smoke-vault"],
+          },
+        });
+      }
+      return Promise.resolve({ ok: true, data: {} });
+    });
+    render(<Server vault="/Users/n/Work" status={STATUS} />);
+
+    expect(await screen.findByText("Deleted vaults forgotten")).toBeInTheDocument();
+    expect(screen.getByText(/\/private\/tmp\/heimdall-smoke-vault/)).toBeInTheDocument();
+    expect(screen.queryByText(/heimdall-smoke-vault — /)).toBeNull();
+    expect(screen.queryByText(/folder missing/)).toBeNull();
+  });
+
+  it("calls a vault that is there but out of reach not reachable, not missing", async () => {
+    serve({
+      vaults: [{ path: "/Volumes/USB/v", folder: "v", exists: false, shared: false, name: null }],
+    });
+    render(<Server vault="/Users/n/Work" status={STATUS} />);
+    expect(await screen.findByText(/not reachable right now/)).toBeInTheDocument();
+  });
+
   it("offers the open vault for sharing before anything has registered it", async () => {
     serve({ vaults: [] });
     render(<Server vault="/Users/n/Fresh" status={STATUS} />);

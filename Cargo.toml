@@ -8,14 +8,14 @@ members = ["crates/heimdall-core", "crates/heimdall-cli"]
 exclude = ["apps/desktop/src-tauri"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.85"
 license-file = "LICENSE"
 repository = "https://github.com/slarsen/heimdall"
 
 [workspace.dependencies]
-heimdall-core = { path = "crates/heimdall-core", version = "0.1.0" }
+heimdall-core = { path = "crates/heimdall-core", version = "0.1.1" }
 
 blake3 = "1"
 camino = { version = "1", features = ["serde1"] }

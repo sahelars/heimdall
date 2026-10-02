@@ -1,7 +1,7 @@
 [package]
 name = "heimdall-desktop"
 description = "Edit a Heimdall vault and configure its local MCP server."
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.85"
 license-file = "../../../LICENSE"

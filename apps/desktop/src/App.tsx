@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 
-import { cliStatus } from "./api/cli";
+import { cliStatus, listVaults, vaultName } from "./api/cli";
 import {
   CliFailure,
   createFolder,
@@ -205,6 +205,9 @@ export function App() {
     readPref("vault", "", (value): value is string => typeof value === "string"),
   );
   const [status, setStatus] = useState<CliStatus | null>(null);
+  // The folder name of a vault forgotten because its folder was deleted, for
+  // the empty screen to say what happened to it.
+  const [forgotten, setForgotten] = useState<string | null>(null);
   const [failures, setFailures] = useState<RecordedFailure[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -419,6 +422,36 @@ export function App() {
           setActionError(null);
         }
       } catch (thrown) {
+        if (thrown instanceof CliFailure && thrown.error.details?.reason === "vault_missing") {
+          // The vault's folder is not there. Listing the vaults forgets one
+          // that was deleted; if it is gone from the list, it is gone, and
+          // the workspace says so and goes back to "No vault yet" rather
+          // than raising the same banner on every launch. One that is still
+          // listed — a drive that is unplugged — keeps the banner below.
+          try {
+            const listed = await listVaults();
+            const still = listed.ok
+              ? listed.data?.vaults.some(
+                  (known) => known.path === target || known.path === `/private${target}`,
+                )
+              : true;
+            if (!still) {
+              bannerFromReload.current = false;
+              setActionError(null);
+              setForgotten(vaultName(target));
+              setVault("");
+              writePref("vault", "");
+              setHistory(EMPTY_HISTORY);
+              setNote(null);
+              setIndex(null);
+              setListing([]);
+              setRootLocked(false);
+              return;
+            }
+          } catch {
+            // Fall through to the banner: not knowing is not "deleted".
+          }
+        }
         if (thrown instanceof CliFailure) {
           record("link-graph", thrown.error);
           // Its own, so its own success may clear it again.
@@ -466,6 +499,7 @@ export function App() {
   }, [vault, scheduleReload]);
 
   const chooseVault = useCallback((next: string) => {
+    setForgotten(null);
     setVault(next);
     writePref("vault", next);
     setHistory(EMPTY_HISTORY);
@@ -1246,6 +1280,11 @@ export function App() {
         />
       ) : (
         <p className="empty">
+          {forgotten ? (
+            <>
+              The folder for “{forgotten}” was deleted, so Heimdall has forgotten it.{" "}
+            </>
+          ) : null}
           No vault yet. Open <strong>Heimdall → Settings…</strong> to create one or choose an
           existing folder.
         </p>

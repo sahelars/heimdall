@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use crate::appdata;
 use crate::errors::{Error, Result};
 use crate::paths::RelPath;
-use crate::storage::{self, Vault};
+use crate::agents;
+use crate::storage::{self, vault_is_gone, vault_key, Vault};
 
 /// How long to wait for another process that is registering a vault.
 const REGISTRY_WAIT_LIMIT: Duration = Duration::from_secs(10);
@@ -43,6 +44,61 @@ pub struct Located {
 /// Every registered vault root, sorted.
 pub fn list(data_dir: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
     Ok(load(&registry_path(data_dir))?.vaults)
+}
+
+/// Forget every vault whose folder has been deleted, and return their roots.
+///
+/// A vault is a folder on disk, and when the folder is gone so is the vault:
+/// it is dropped from the registry and from the vaults shared with AI clients,
+/// and its lock rules and write-lock file are removed. "Deleted" is the narrow
+/// [`vault_is_gone`] — not found, and not on an unplugged drive — so a vault
+/// macOS privacy settings keep this process out of is never forgotten.
+///
+/// Locked notes keep their immutable flag (SPEC §6), so a folder restored from
+/// the Trash still has its locked notes locked, under `locked_at` themselves.
+///
+/// The registry and shared-vault locks are taken one after the other, never
+/// together, and never inside a vault's write lock.
+pub fn forget_missing(data_dir: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
+    let path = registry_path(data_dir);
+    let mut candidates = load(&path)?.vaults;
+    for root in agents::all_roots(data_dir)? {
+        if !candidates.contains(&root) {
+            candidates.push(root);
+        }
+    }
+    let gone: Vec<Utf8PathBuf> = candidates.into_iter().filter(|root| vault_is_gone(root)).collect();
+    if gone.is_empty() {
+        return Ok(gone);
+    }
+
+    with_registry_lock(data_dir, || {
+        let mut stored = load(&path)?;
+        let before = stored.vaults.len();
+        stored.vaults.retain(|root| !gone.contains(root));
+        if stored.vaults.len() != before {
+            appdata::write_json(&path, &stored)?;
+        }
+        Ok(())
+    })?;
+    agents::forget(data_dir, &gone)?;
+
+    // Nothing can be holding this lock: the vault it serialises no longer
+    // exists to be opened. Removing a missing file is not an error.
+    for root in &gone {
+        let key = vault_key(root);
+        for file in [
+            data_dir.join("vaults").join(format!("{key}.json")),
+            data_dir.join("locks").join(format!("{key}.lock")),
+        ] {
+            match std::fs::remove_file(&file) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(Error::from_io("forget a deleted vault", &err)),
+            }
+        }
+    }
+    Ok(gone)
 }
 
 /// Record `vault` so the shell can find it from inside. Idempotent.

@@ -19,7 +19,7 @@ use crate::appdata;
 use crate::errors::{Error, Result};
 use crate::paths;
 use crate::registry::{self, with_state_lock};
-use crate::storage::Vault;
+use crate::storage::{vault_is_gone, Vault};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Stored {
@@ -48,9 +48,14 @@ fn same_name(a: &str, b: &str) -> bool {
     a.to_lowercase() == b.to_lowercase()
 }
 
-/// Every shared vault, in name order.
+/// Every shared vault whose folder still exists, in name order.
+///
+/// A vault deleted since it was shared is left out here without writing
+/// anything, so the server never offers an agent a vault that is gone;
+/// [`crate::registry::forget_missing`] is what removes it for good.
 pub fn list(data_dir: &Utf8Path) -> Result<Vec<SharedVault>> {
     let mut vaults = load(data_dir)?.vaults;
+    vaults.retain(|vault| !vault_is_gone(&vault.path));
     vaults.sort_by_key(|vault| vault.name.to_lowercase());
     Ok(vaults)
 }
@@ -156,6 +161,30 @@ pub fn unshare(vault: &Vault) -> Result<bool> {
         appdata::write_json(&file(data_dir), &stored)?;
         Ok(true)
     })
+}
+
+/// Stop sharing every vault in `roots`. Returns the ones that had been shared.
+pub(crate) fn forget(data_dir: &Utf8Path, roots: &[Utf8PathBuf]) -> Result<Vec<Utf8PathBuf>> {
+    with_state_lock(data_dir, "agents.lock", "the shared vaults", || {
+        let mut stored = load(data_dir)?;
+        let mut removed = Vec::new();
+        stored.vaults.retain(|shared| {
+            let gone = roots.contains(&shared.path);
+            if gone {
+                removed.push(shared.path.clone());
+            }
+            !gone
+        });
+        if !removed.is_empty() {
+            appdata::write_json(&file(data_dir), &stored)?;
+        }
+        Ok(removed)
+    })
+}
+
+/// Every root the shared list names, deleted or not.
+pub(crate) fn all_roots(data_dir: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
+    Ok(load(data_dir)?.vaults.into_iter().map(|vault| vault.path).collect())
 }
 
 /// Pick the shared vault a tool call means.
@@ -299,6 +328,25 @@ mod tests {
         // A path is only a name nobody shared, even the path of one that is.
         let path = select(&fx.data, Some(work.root().as_str())).unwrap_err();
         assert_eq!(path.code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn a_deleted_shared_vault_is_never_offered_and_nothing_is_written() {
+        let mut fx = Fixture::new();
+        let work = fx.vault("Work");
+        let gone = fx.vault("Gone");
+        share(&work, None).unwrap();
+        share(&gone, None).unwrap();
+        let stored = std::fs::read(fx.data.join("agents.json")).unwrap();
+
+        std::fs::remove_dir(gone.root().as_std_path()).unwrap();
+
+        let names: Vec<_> = list(&fx.data).unwrap().into_iter().map(|v| v.name).collect();
+        assert_eq!(names, ["Work"]);
+        // With only one left, no name is needed — and the deleted one is not it.
+        assert_eq!(select(&fx.data, None).unwrap().name, "Work");
+        assert_eq!(select(&fx.data, Some("Gone")).unwrap_err().code, ErrorCode::NotFound);
+        assert_eq!(std::fs::read(fx.data.join("agents.json")).unwrap(), stored);
     }
 
     #[test]

@@ -483,6 +483,29 @@ async fn sharing_and_unsharing_take_effect_on_the_next_call() {
 }
 
 #[tokio::test]
+async fn a_shared_vault_deleted_mid_session_is_not_offered_by_the_next_call() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let (_kept_tmp, kept) = new_vault();
+    let (gone_tmp, gone) = new_vault();
+    assert!(run_in(data_dir.path(), &["share", "--vault", &kept, "--name", "Kept"]).status.success());
+    assert!(run_in(data_dir.path(), &["share", "--vault", &gone, "--name", "Gone"]).status.success());
+    let client = connect_shared(data_dir.path()).await;
+
+    // Two shared: a call must name one.
+    assert_eq!(failure(&client, "read", json!({})).await["code"], "INVALID_INPUT");
+
+    drop(gone_tmp);
+
+    // One left, so no name is needed — and the deleted one is never it.
+    assert_eq!(structured(&client, "read", json!({})).await["vault"], "Kept");
+    let refused = failure(&client, "read", json!({ "vault": "Gone" })).await;
+    assert_eq!(refused["code"], "NOT_FOUND");
+    assert_eq!(refused["details"]["vaults"], json!(["Kept"]));
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_fixed_server_answers_only_to_its_own_name() {
     let (_tmp, vault) = new_vault();
     let client = connect(&vault).await;

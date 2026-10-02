@@ -291,3 +291,26 @@ fn sharing_names_a_vault_for_ai_clients_and_vaults_lists_it() {
     assert!(listed["vaults"].as_array().unwrap().iter().all(|v| v["shared"] == false));
     assert_eq!(data(&run_in(&["read", "--vault", &vault]))["vault"], "demo");
 }
+
+#[test]
+fn a_vault_whose_folder_was_deleted_is_forgotten_by_the_next_listing() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let (tmp, vault) = new_vault();
+    let run_in = |args: &[&str]| {
+        common::command()
+            .env("HEIMDALL_DATA_DIR", data_dir.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    data(&run_in(&["share", "--vault", &vault, "--name", "Doomed"]));
+    let canonical = data(&run_in(&["vaults"]))["vaults"][0]["path"].as_str().unwrap().to_string();
+
+    drop(tmp);
+
+    let listed = data(&run_in(&["vaults"]));
+    assert_eq!(listed["forgotten"], serde_json::json!([canonical]));
+    assert_eq!(listed["vaults"], serde_json::json!([]));
+    // Once is enough.
+    assert_eq!(data(&run_in(&["vaults"]))["forgotten"], serde_json::json!([]));
+}

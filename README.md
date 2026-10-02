@@ -67,7 +67,9 @@ Open **Settings → Server**.
    clients**. A vault you create or open in Heimdall is, unless you switch it
    off. Change it later from the Active vault panel on the Vault screen or the
    list on the Server screen. Each shared vault gets a name (its folder name
-   unless you rename it), and that name is all a client ever sees.
+   unless you rename it), and that name is all a client ever sees. Delete a
+   vault's folder and Heimdall forgets it: it drops off the list, stops being
+   shared, and its lock rules are removed.
 2. **Add entry** next to Claude Desktop or ChatGPT. This writes one `heimdall`
    entry into that client's configuration, whatever the number of vaults, and
    leaves everything else in the file untouched. Per-vault entries from older

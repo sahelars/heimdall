@@ -305,6 +305,7 @@ fn dispatch(command: Command) -> Result<ExitCode> {
         }
 
         Command::Create { name, root } => {
+            forget_deleted();
             let root = match root {
                 Some(root) => root,
                 None => working_directory()?,
@@ -385,6 +386,7 @@ fn dispatch(command: Command) -> Result<ExitCode> {
         Command::Vaults => envelope::ok(&list_vaults()?),
 
         Command::Share { vault, name } => {
+            forget_deleted();
             let vault = vault.open()?;
             let shared = agents::share(&vault, name.as_deref())?;
             envelope::ok(&json!({ "name": shared.name, "path": shared.path, "shared": true }))
@@ -437,13 +439,28 @@ fn dispatch(command: Command) -> Result<ExitCode> {
     })
 }
 
+/// Forget the vaults whose folders have been deleted, as housekeeping that
+/// rides along with another command and so never fails it.
+fn forget_deleted() {
+    if let Ok(data_dir) = appdata::data_dir() {
+        let _ = registry::forget_missing(&data_dir);
+    }
+}
+
 /// Every vault Heimdall knows — registered, shared, or both — with whether it
 /// is shared with AI clients and under what name.
+///
+/// Vaults whose folders have been deleted are forgotten first and named in
+/// `forgotten`, so the list a person sees is the vaults they still have.
+/// `exists: false` is left for a vault that is there but out of reach — a
+/// folder macOS privacy settings keep this process out of, or a drive that is
+/// unplugged.
 ///
 /// Shell output, for a person and the desktop; it names absolute paths, which
 /// is why nothing like it is ever an MCP tool.
 fn list_vaults() -> Result<serde_json::Value> {
     let data_dir = appdata::data_dir()?;
+    let forgotten = registry::forget_missing(&data_dir)?;
     let shared = agents::list(&data_dir)?;
     let mut roots = registry::list(&data_dir)?;
     for vault in &shared {
@@ -466,7 +483,7 @@ fn list_vaults() -> Result<serde_json::Value> {
             })
         })
         .collect();
-    Ok(json!({ "vaults": vaults }))
+    Ok(json!({ "vaults": vaults, "forgotten": forgotten }))
 }
 
 /// Read Markdown content from stdin, bounded before it reaches a domain check.

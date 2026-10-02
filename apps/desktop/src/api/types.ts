@@ -92,6 +92,9 @@ export interface InstallOutcome {
 export interface KnownVault {
   path: string;
   folder: string;
+  /** False for a vault that is there but out of reach right now (an unplugged
+   * drive, or a folder macOS keeps the tool out of). Deleted vaults are not
+   * listed at all: `vaults` forgets them. */
   exists: boolean;
   /** Whether AI clients can reach it. */
   shared: boolean;
@@ -101,6 +104,8 @@ export interface KnownVault {
 
 export interface VaultsData {
   vaults: KnownVault[];
+  /** Vaults just forgotten because their folders were deleted. */
+  forgotten?: string[];
 }
 
 /**

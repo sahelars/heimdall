@@ -899,6 +899,47 @@ describe("a vault that cannot be read", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("does not exist");
   });
 
+  /** The bridge for a vault whose folder is not there, and what `vaults` says. */
+  function missingVault(listed: unknown[]) {
+    invoke.mockImplementation((command: string, args: Record<string, unknown>) => {
+      if (command === "cli_status") return Promise.resolve(STATUS);
+      const request = args as { command?: string };
+      if (command === "invoke_cli" && request.command === "vaults") {
+        return Promise.resolve({ ok: true, data: { vaults: listed, forgotten: [] } });
+      }
+      return Promise.resolve({
+        ok: false,
+        error: {
+          code: "NOT_FOUND",
+          message: "vault directory does not exist",
+          details: { reason: "vault_missing" },
+        },
+      });
+    });
+  }
+
+  it("forgets a vault whose folder was deleted, and says so instead of a banner", async () => {
+    // It used to raise the same NOT_FOUND banner on every launch, for a vault
+    // that was never coming back.
+    missingVault([]);
+    render(<App />);
+
+    expect(
+      await screen.findByText(/The folder for “vault” was deleted, so Heimdall has forgotten it/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/No vault yet/)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(window.localStorage.getItem("heimdall.vault")).toBe(JSON.stringify(""));
+  });
+
+  it("keeps the banner for a vault that is still listed, such as one on an unplugged drive", async () => {
+    missingVault([{ path: "/vault", folder: "vault", exists: false, shared: false, name: null }]);
+    render(<App />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("does not exist");
+    expect(window.localStorage.getItem("heimdall.vault")).toBe(JSON.stringify("/vault"));
+  });
+
   it("clears the warning once the vault loads", async () => {
     bridge();
     render(<App />);
