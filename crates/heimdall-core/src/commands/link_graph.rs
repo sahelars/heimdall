@@ -5,22 +5,13 @@
 //! same picture at once, and assembling it from bounded reads would cost one
 //! process per ten notes.
 //!
-//! It covers `aios/` as well, which the ordinary document operations may not.
-//! Three things make that admissible rather than a hole in the boundary:
-//!
-//! 1. **It is unreachable from MCP by construction.** These types derive no
-//!    `JsonSchema`, so giving them a `#[tool]` would not compile. The boundary
-//!    exists to stop an AI client reaching protected state through a
-//!    general-purpose door; there is no door.
-//! 2. **It returns no content, ever** — paths, titles, sizes, modification
-//!    times, and link endpoints. That is strictly less than `list_memories` and
-//!    `list_entries` already report about the same tree.
-//! 3. **The caller is the human at the keyboard**, who can open every one of
-//!    those files in any editor already. The same reasoning SPEC §7 applies to
-//!    `heimdall create`.
+//! It is unreachable from MCP by construction: these types derive no
+//! `JsonSchema`, so giving them a `#[tool]` would not compile. It returns no
+//! content, ever — paths, titles, sizes, modification times, lock state, and
+//! link endpoints.
 //!
 //! Bounds are caps rather than pagination, and hitting one is a truncated
-//! success — the treatment `list_documents` gives its own scan guard, not an
+//! success — the treatment a folder `read` gives its own scan guard, not an
 //! error that throws away the work already done.
 
 use std::collections::BTreeMap;
@@ -31,33 +22,15 @@ use crate::commands::links;
 use crate::commands::resolve::{self, Index};
 use crate::errors::Result;
 use crate::limits;
+use crate::notelocks::Locks;
 use crate::paths::RelPath;
 use crate::storage::Vault;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinkGraphRequest {
-    /// Include the protected `aios/` tree. Defaults to true: the desktop's file
-    /// tree shows it, so the graph must too.
-    #[serde(default = "included")]
-    pub include_aios: bool,
     /// How deep to descend. Defaults to and is capped at the recursion maximum.
     pub max_depth: Option<u32>,
-}
-
-fn included() -> bool {
-    true
-}
-
-// Written out rather than derived: a derived `Default` would give
-// `include_aios: false` and quietly disagree with the serde default above.
-impl Default for LinkGraphRequest {
-    fn default() -> Self {
-        Self {
-            include_aios: true,
-            max_depth: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,7 +38,8 @@ pub struct GraphNode {
     pub path: String,
     /// The filename stem — what a graph shows under the dot.
     pub title: String,
-    pub in_aios: bool,
+    /// Whether the note is locked (read-only).
+    pub locked: bool,
     pub size_bytes: u64,
     pub modified_at: String,
     /// False when this file was too large, unreadable, or past the scan budget,
@@ -111,8 +85,8 @@ pub struct LinkGraphResponse {
 }
 
 pub fn link_graph(vault: &Vault, request: LinkGraphRequest) -> Result<LinkGraphResponse> {
-    vault.ensure_initialized()?;
     let max_depth = limits::resolve_graph_depth(request.max_depth)?;
+    let rules = Locks::load(vault)?;
 
     let mut found = Vec::new();
     let mut omitted = 0usize;
@@ -121,12 +95,11 @@ pub fn link_graph(vault: &Vault, request: LinkGraphRequest) -> Result<LinkGraphR
         &RelPath::root(),
         1,
         max_depth,
-        request.include_aios,
         &mut found,
         &mut omitted,
     );
 
-    // The same total order `list_documents` uses, and the reason two runs over
+    // The same total order a folder `read` uses, and the reason two runs over
     // an unchanged vault produce byte-identical output.
     found.sort_by(|a, b| a.path.as_str().cmp(b.path.as_str()));
 
@@ -136,7 +109,7 @@ pub fn link_graph(vault: &Vault, request: LinkGraphRequest) -> Result<LinkGraphR
         .map(|note| GraphNode {
             path: note.path.to_string(),
             title: title_of(&note.path),
-            in_aios: note.path.is_in_aios(),
+            locked: rules.is_locked_by_rule(&note.path),
             size_bytes: note.size_bytes,
             modified_at: note.modified_at.clone(),
             scanned: false,

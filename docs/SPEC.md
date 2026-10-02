@@ -5,38 +5,39 @@
 
 ## 1. Product definition
 
-Heimdall is an intent-aware MCP layer for Markdown vaults. It lets AI clients work with notes, durable memories, and entries (conversation summaries and notifications) through constrained domain operations instead of unrestricted filesystem access.
+Heimdall is an intent-aware MCP layer for Markdown vaults. It gives AI clients two verbs over a vault — `read` and `write` — instead of unrestricted filesystem access, and it gives people a guardrail over what those verbs may touch: any note, any folder, or the whole vault can be **locked**, and a locked path is read-only for everyone until the person unlocks it. Agents can see a lock but never set or lift one: locks are set from the shell and the desktop, not over MCP.
 
 Heimdall has two independently installable products:
 
-1. **Heimdall CLI** — a headless Rust executable providing direct shell commands and an MCP server. The CLI is the product core; it is fully usable without the desktop application.
-2. **Heimdall Desktop** — a Tauri application with a React, TypeScript, and Vite interface. It both configures the server and works the vault: a file tree, a Markdown editor with preview, and an interactive link graph, alongside vault creation, MCP client configuration, and diagnostics. A vault is a folder of plain Markdown files and nothing else, so any Markdown editor remains a perfectly good way to work over the same files.
+1. **Heimdall CLI** — a headless Rust executable providing direct shell commands and an MCP server. The CLI is the product core; it is fully usable without the desktop application. Run from inside a vault, `heimdall read` and `heimdall write` need no configuration at all.
+2. **Heimdall Desktop** — a Tauri application with a React, TypeScript, and Vite interface. It both configures the server and works the vault: a file tree, a Markdown editor with preview, and an interactive link graph, alongside lock controls, vault creation, MCP client configuration, and diagnostics. A vault is a folder of plain Markdown files and nothing else, so any Markdown editor remains a perfectly good way to work over the same files.
 
 The desktop application bundles a version-matched CLI and calls it for every domain operation.
 
 ## 2. Terminology
 
-- **Vault** — a folder of Markdown files, or a user-selected folder inside one. It is the security and content boundary for a Heimdall session.
-- **Ordinary document** — a Markdown note outside the protected `aios/` folder.
-- **Managed content** — memories, entries, and attachments inside `aios/`.
-- **Entry** — a create-only, timestamped managed record. V1 has two entry kinds: `conversation` (a compressed conversation summary) and `notification`.
+- **Vault** — a folder of Markdown files. It is the security and content boundary for a Heimdall session. Every Markdown file in it that is not hidden is a **note**, and every folder a **folder**; there is no protected or managed tree.
 - **Revision** — a BLAKE3 hash of the exact file bytes, formatted as `blake3:<lowercase-hex>`.
-- **Client operation** — a domain operation the desktop calls directly through the shell CLI and the MCP surface does not expose. `heimdall create` (§7) is the original; the editor's writes and `link_graph` are the rest (§15). The distinction is enforced by the type system, not by convention: a client operation's request and response types derive no `JsonSchema`, and `rmcp` cannot build a tool without one.
+- **Lock** — a rule making a note or folder read-only (§6). The rules are Heimdall's state about a vault, stored outside it (§14); on macOS every locked note also carries the filesystem's immutable flag, so other editors and an agent's own file tools are refused too.
+- **Shared vault** — a vault the user has chosen to make reachable by AI clients, under a name of their choosing (§7). One MCP server serves every shared vault; a tool call picks one by that name, never by a path.
+- **Registry** — the list of vault roots Heimdall knows, kept in the application-data directory, so the shell can find a vault from any folder inside it (§7).
+- **Client operation** — a domain operation the desktop calls directly through the shell CLI and the MCP surface does not expose. `heimdall create` (§7) is the original; the editor's structural writes — create a folder, move, relink, delete — and `link_graph` are the rest (§15). The distinction is enforced by the type system, not by convention: a client operation's request and response types derive no `JsonSchema`, and `rmcp` cannot build a tool without one.
 
 "Application" refers only to the Heimdall desktop product. User content locations are called vaults.
 
 ## 3. Design principles
 
 - Keep one implementation of domain and filesystem behavior in `heimdall-core`.
-- Give AI clients purpose-aware operations, not arbitrary file access.
-- List before reading and read only selected, bounded content.
-- Keep ordinary notes separate from protected Heimdall state.
-- One vault per server process; scope is fixed by configuration, never by tool input.
+- Give AI clients purpose-aware operations, not arbitrary file access: two verbs, `read` and `write`, and nothing that changes what those verbs may touch.
+- Read before writing, and read only selected, bounded content.
+- A lock is the user's decision and binds every writer — agents, scripts, and the desktop editor alike. Only people set and lift locks; no MCP tool can, and lifting one asks the person at the computer to prove they are there.
+- An agent reaches only the vaults the user shares, and names one only by its shared name — never by a filesystem path.
 - Never overwrite user data silently.
 - Use optimistic concurrency for replace-style writes.
 - Prefer stateless continuation over server-side cursor state.
 - Use structured, versioned output at process boundaries.
 - Default to local-only operation; no network or telemetry is required.
+- Nothing of Heimdall's is written into a vault.
 - Add databases, daemons, or general write operations only when measured requirements justify them.
 
 ## 4. System architecture
@@ -67,7 +68,7 @@ MCP client                         Desktop user
 ### Boundaries
 
 - `heimdall-core` owns validation, limits, revisions, and filesystem operations.
-- `heimdall-cli` translates shell commands and MCP calls into core operations.
+- `heimdall-cli` translates shell commands and MCP calls into core operations. The shell's own conveniences — finding the vault from the working directory and resolving paths typed relative to it — happen here, before the call reaches core.
 - The Tauri Rust layer only launches the bundled CLI, supplies input, and returns output.
 - Client operations exist only on the shell surface. Adding one never adds an MCP tool.
 - React never accesses the filesystem or launches arbitrary processes.
@@ -88,9 +89,12 @@ heimdall/
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── commands/
+│   │       ├── appdata.rs
 │   │       ├── errors.rs
 │   │       ├── limits.rs
+│   │       ├── notelocks.rs
 │   │       ├── paths.rs
+│   │       ├── registry.rs
 │   │       ├── revisions.rs
 │   │       ├── template.rs
 │   │       ├── timestamps.rs
@@ -131,8 +135,8 @@ heimdall/
 
 Integration tests live in each crate's own `tests/` directory, because Cargo
 only compiles `tests/` inside a package and the workspace root is a virtual
-manifest. `crates/heimdall-core/tests/` covers discovery bounds, durability, and
-concurrency; `crates/heimdall-cli/tests/` covers the output envelope,
+manifest. `crates/heimdall-core/tests/` covers discovery bounds, durability,
+concurrency, locks, and the vault registry; `crates/heimdall-cli/tests/` covers the output envelope,
 cross-process behavior, and the shell/MCP contract, with shared helpers in
 `tests/common/`. Fixtures live beside the tests that use them.
 
@@ -141,12 +145,14 @@ MCP client, so anything that corrupted the protocol stream shows up as a failed
 handshake rather than a passing assertion.
 
 `storage.rs` owns the vault capability itself (`Vault`) alongside atomic writes
-and file locks; there is no separate vault module. `timestamps.rs` holds UTC
-formatting and the entry-filename parser. `commands/links.rs` holds the link
-scanner and `commands/frontmatter.rs` the entry-frontmatter parser, both
-`pub(crate)` helpers in the same shape as `read_range.rs` — pure string in,
-structure out, so the rules about fenced code and owned fields can be pinned down
-without building a vault. Neither needs a new dependency.
+and the write lock; there is no separate vault module. `appdata.rs` locates the
+per-user application-data directory and reads and writes Heimdall's own JSON
+there; `notelocks.rs` holds the lock rules and `registry.rs` the list of known
+vaults, both kept in that directory (§14). `timestamps.rs` holds UTC formatting.
+`commands/links.rs` holds the link scanner, a `pub(crate)` helper in the same
+shape as `read_range.rs` — pure string in, structure out, so the rules about
+fenced code can be pinned down without building a vault. `commands/listing.rs`
+is the folder half of `read`.
 
 `apps/desktop/src-tauri` is excluded from the Cargo workspace. `tauri::
 generate_context!` embeds the built frontend, so a workspace member would break
@@ -161,7 +167,7 @@ never chosen), while `src/**/*.test.ts` covers the screens and the visual rules.
 
 Recommended baseline dependencies:
 
-- Rust: `clap`, `serde`, `serde_json`, `thiserror`, `camino`, `cap-std`, `blake3`, `dirs`, `fs4`, `include_dir`, `time`, and `tempfile`. (`fs4` is the maintained fork of the unmaintained `fs2`.) `dirs` locates the per-user application-data directory the write lock lives in (§14). `time` supplies the UTC formatting that entry filenames and frontmatter require.
+- Rust: `clap`, `serde`, `serde_json`, `thiserror`, `camino`, `cap-std`, `blake3`, `dirs`, `fs4`, `include_dir`, `time`, and `tempfile`. (`fs4` is the maintained fork of the unmaintained `fs2`.) `dirs` locates the per-user application-data directory the write lock, lock rules, and registry live in (§14). `time` supplies UTC timestamp formatting.
 - `tokio` belongs to `heimdall-cli` only, where `rmcp` needs it. `heimdall-core` is synchronous: its work is filesystem-bound, and a blocking API keeps it testable without a runtime. The MCP adapter runs each core call on a blocking worker rather than colouring the domain layer async.
 - `schemars` is a core dependency so tool schemas derive from the domain types themselves (§12).
 - MCP: the official Rust SDK, `rmcp`, pinned to a tested release and protocol baseline (`=3.1.3`, protocol `2025-11-25`).
@@ -174,65 +180,46 @@ Recommended baseline dependencies:
 <vault>/
 ├── *.md
 ├── <arbitrary files>
-├── <ordinary-folders>/
+├── <folders>/
 │   ├── *.md
-    └── <arbitrary files>
-├── .trash/                     # deleted content; never listed, never read
-└── aios/
-    ├── memories/
-    │   ├── memory.md
-    │   └── extended/
-    │       └── *.md
-    ├── conversations/
-    │   └── YYYY-MM-DD_HH-mm-ss.md
-    ├── notifications/
-    │   └── YYYY-MM-DD_HH-mm-ss.md
-    └── attachments/
-        └── <arbitrary files>
+│   └── <arbitrary files>
+└── .trash/                     # deleted content; never listed, never read
 ```
 
 Rules:
 
-- All managed text files use UTF-8 Markdown and the `.md` extension.
-- Vault may contain non-Markdown files.
-- Vault creation and initialization preserve every existing file, including hidden configuration folders belonging to other tools.
-- Ordinary document operations exclude the entire `aios/` tree. The comparison is case-insensitive: on macOS and Windows `AIOS/notes.md` and `aios/notes.md` are the same file, so a case-sensitive check would let ordinary operations reach protected content.
-- Only protected-content operations may access `aios/`.
-- V1 does not expose attachment content.
-- Generated Markdown must render normally in any ordinary Markdown reader.
-- Memory links use wikilinks, for example:
-
-```markdown
-- [[aios/memories/extended/project_history|Project history]]
-```
-
-### Entry files and frontmatter
-
-Generated entries receive Heimdall-owned frontmatter:
-
-```markdown
----
-created_at: 2026-08-16T14:30:00Z
-type: conversation
----
-
-# Summary
-
-Compressed summary content.
-```
-
-- `type` is `conversation` or `notification` and always matches the folder the entry lives in.
-- Heimdall owns entry frontmatter exclusively. If caller-supplied entry content itself begins with a frontmatter block (a leading `---` line), reject the call with `INVALID_INPUT` and a message explaining that Heimdall adds frontmatter. Never strip, merge, or silently rewrite supplied content.
-- A replace-style entry write (`write_entry`, §15) reads the invariant more precisely than the create rule can. What Heimdall owns is `created_at` and `type`, which must always agree with the filename and the folder; the rest of the block is the user's. So an edit must carry byte-identical values for both owned fields, and any other key — `tags`, a `links` list from an editor's property panel — passes through untouched. An entry with no Heimdall frontmatter, such as one copied in by hand, has nothing to preserve and may be edited freely.
+- Notes are UTF-8 Markdown with the `.md` extension. A vault may contain other files; Heimdall lists and reads only folders and `.md` files.
+- There is no protected or managed tree. Every visible note and folder is reachable by `read` and `write`, subject to locks.
+- Hidden entries (anything beginning with `.`) belong to other tools — or, for `.trash/`, to nobody — and are never listed, read, or written.
+- Vault creation and registration preserve every existing file, including hidden configuration folders belonging to other tools.
+- Nothing of Heimdall's is written into a vault: the write lock, the lock rules, and the registry all live in the per-user application-data directory (§14). The one unavoidable exception is an atomic write's temporary sibling, which exists for the length of one rename.
 - Deleted content moves to `.trash/` at the vault root, mirroring its original folders. The leading dot means it is already excluded from every listing, and mirroring is the only layout in which restoring a file is unambiguous. Emptying the trash is not a Heimdall operation.
-- Filename timestamps and `created_at` both use UTC. The filename pattern is `YYYY-MM-DD_HH-mm-ss.md` derived from the same UTC instant as the RFC 3339 `created_at` value. UTC filenames sort correctly and cannot collide or misorder across DST transitions.
-- On a same-second collision, append `_01`, `_02`, and so on; never overwrite.
+- Links use wikilinks or relative Markdown links, for example `[[projects/my_project|My project]]`.
+
+### Locks
+
+A lock makes part of a vault read-only. It is the guardrail a person puts around notes an agent — or anyone — must not change.
+
+- **Targets.** The vault root (the whole vault), any folder, or any note. The target must exist.
+- **Rules.** Locks are stored as rules, each a path marked *locked* or *unlocked*. A path's effective state is its **nearest rule**, looking at the path itself and then each folder above it up to the root; with no rule anywhere it is unlocked. So locking a folder locks everything in it at every depth, and a single note can still be unlocked inside a locked folder — or locked inside an unlocked one.
+- **Folder operations mean the whole folder.** Locking or unlocking a folder (or the root) sets its rule and clears every rule beneath it. "Lock this folder" means every note in it, not every note but the ones someone once unlocked. A redundant rule — one that says what its folder already says — is never stored.
+- **What a lock forbids.** Writing a locked note; creating a note or folder directly inside a locked folder; moving or deleting a locked path, a folder with anything locked inside it, anything directly inside a locked folder, or anything *into* a locked folder. A lock fixes a note's place as well as its bytes. Each refusal is `LOCKED`, with `details.path` and `details.locked_at` — the rule responsible, `""` for the vault root.
+- **What a lock allows.** Reading. Every `read` result reports `locked` (and `locked_at`) for the path read, and every listing entry reports `locked`, so a caller learns before it writes that it cannot.
+- **Who it binds.** Everyone who writes through Heimdall: MCP clients, the shell, and the desktop editor, which opens a locked note read-only. On macOS it binds everyone else too: `lock` sets the filesystem's user-immutable flag (`UF_IMMUTABLE`, Finder's "Locked") on every locked note, so a plain write, a replace-by-rename, an unlink, and a rename are all refused by the operating system — which is what an editor, `sed -i`, an agent's `apply_patch`, and `rm` do. Only notes are flagged, never folders: a flag on a folder would stop a note unlocked inside it from being written (an atomic write needs a temporary sibling), stop `.trash/` being created, and break other tools' housekeeping. Hidden paths are never flagged. `lock` reports `protection: complete | partial | unsupported`; the flagging is bounded in time inside the write lock, and running the same command again finishes a `partial` one. Elsewhere there is no flag an unprivileged user can set that also stops a rename, so the report is `unsupported` and the lock binds Heimdall's writers only.
+- **Every spelling of a path.** A rule is about a file, and many strings name one file: APFS ignores case and Unicode normalization, and a symlinked folder inside the vault is a second name for the folder it points at. Every check is made against both the spelling the caller used and the path's real on-disk spelling (`realpath`), and either one locking it is enough. Rules are stored under the real spelling; rules written in another spelling are re-keyed when loaded, and where two collide the locked one wins.
+- **A flagged note is locked.** A note carrying the immutable flag is locked whether or not a rule says so, with `locked_at` naming the note. So deleting the rules, or pointing Heimdall at another application-data directory, unlocks nothing, and a note locked in Finder is locked in Heimdall too. Heimdall never lifts a flag except in `unlock`, and `lock` only ever adds them.
+- **Failing closed.** A lock rule that no longer parses locks the whole vault (`locked_at: ""`); an unparseable unlock is ignored, since it can only widen. An application-data directory that cannot be located is an error, never a guessed temporary one with no rules in it (§14).
+- **Links.** `relink` (§15) never rewrites a locked note; it reports the note instead, because a lock is exactly a promise that the note will not change.
+- **Housekeeping.** Rules for paths that no longer exist — renamed or deleted outside Heimdall — are ignored and pruned on the next `lock` or `unlock`. A note moved by `move_path` cannot carry a lock, since a locked note does not move; one deleted to the trash does not take a rule with it, and a note restored from the trash comes back writable.
+- **Who may lock and unlock.** People, through the shell and the desktop. Neither is an MCP tool (§9), in either direction: an agent that could `unlock` could get past any lock, and one that could `lock` a folder would erase every note-level unlock the user had set beneath it, with no way to put them back.
+- **Unlocking needs a person.** A button an accessibility client can press, or a command an agent's shell can run, proves nothing about who asked — an agent driving the desktop app through computer use once clicked a note's unlock toggle, edited it, and locked it again. So every `unlock` first asks the person at the computer: on macOS, Touch ID or the login password through LocalAuthentication, in a system dialog no other process can fill in. The prompt names what is being unlocked, in which vault, and which program asked. Declining, being unable to ask (no screen session, as over SSH), or not answering within 90 seconds is `NOT_CONFIRMED`, with `details.reason` `cancelled`, `unavailable`, or `timeout`, and changes nothing. It is asked before the vault's write lock is taken, so a prompt left on screen stalls no other writer. Core cannot be called to unlock without a `Presence` check, so no new caller can forget it. Release builds always ask (`heimdall --version --json` reports `presence: "required"`, and the release script refuses a build that does not); a debug build accepts a scripted answer for tests, and only for a vault under the system temp directory. Elsewhere than macOS the question is a typed confirmation on `/dev/tty`, which a process owning the terminal could answer. Locking asks no one: it only narrows.
+- **What remains.** Against an agent whose access to the vault is Heimdall's MCP server, a lock is a boundary. Against one with the user's shell or an accessibility grant, it is now a boundary that takes deliberate effort to cross — clearing the flag with `chflags nouchg`, or unticking "Locked" in Finder's Get Info — rather than one any file tool walks through, and the server instructions, the `write` description, and every `LOCKED` refusal tell an agent not to try. Making the flag something the user's own processes cannot clear would take a privileged helper, which Heimdall does not install.
 
 ## 7. Vault creation and configuration
 
 ### `heimdall create` (shell only)
 
-Vault creation and initialization is a setup operation performed by a human (directly or through the desktop app). It is a shell command only and is **not** exposed as an MCP tool.
+Vault creation is a setup operation performed by a human (directly or through the desktop app). It is a shell command only and is **not** exposed as an MCP tool.
 
 The same rule governs every client operation (§2, §15): a shell subcommand the desktop calls, never a tool.
 
@@ -246,66 +233,102 @@ heimdall create <name> [--root <path>] --json
 
 Behavior:
 
-- If the target folder does not exist or is empty, write the complete template verbatim: the `aios/` structure and whatever example notes the template ships. A folder holding only filesystem debris (`.DS_Store` and friends) counts as empty.
-- Whatever `docs/vault-template/` contains is what a new vault receives, so changing the example notes needs no code change. Only the managed container directories are created programmatically — `memories/extended/`, `conversations/`, `notifications/`, and `attachments/` — because an empty directory cannot be embedded or tracked in git. Filesystem debris is never copied.
-- If the target folder already exists and has content (for example a folder of notes already in use), create only the missing `aios/` structure. Do not add example notes and do not touch any existing file, hidden or otherwise.
+- If the target folder does not exist or is empty, write the template verbatim: whatever example notes `docs/vault-template/` ships (`mode: "scaffolded"`). A folder holding only filesystem debris (`.DS_Store` and friends) counts as empty. Filesystem debris is never copied.
+- If the target folder already exists and has content (a folder of notes already in use), write nothing into it at all (`mode: "registered"`).
+- Either way, register the vault (below).
 - Roll back only empty directories created by a failed operation.
 
-The canonical template contents (the `aios/` structure and the example notes) live in `docs/vault-template/` and are embedded into the binary (for example with `include_dir`) so the CLI needs no runtime assets. The template writes no editor configuration of any kind: a vault is Markdown files, and whatever tool a user opens them with brings its own settings.
+The canonical template lives in `docs/vault-template/` and is embedded into the binary (with `include_dir`) so the CLI needs no runtime assets; changing the example notes needs no code change. The template writes no editor configuration of any kind: a vault is Markdown files, and whatever tool a user opens them with brings its own settings.
+
+### Finding the vault from the shell
+
+A vault is a plain folder, so nothing inside it can mark its root. The **registry** does instead: a list of canonical vault roots in the application-data directory (§14).
+
+- `heimdall create` registers the vault it creates or adopts. So does every command given an explicit `--vault` — including `heimdall mcp` — which is how vaults that predate the registry join it with no migration. Registration never fails the command it rides along with.
+- `read`, `write`, `lock`, and `unlock` take `--vault` optionally. Without it, the CLI canonicalizes the working directory and uses the **longest registered root that contains it**, so a vault nested inside another is found as itself. A folder in no registered vault is `NOT_INITIALIZED`, with a message saying to pass `--vault` or run `heimdall create`.
+- Paths typed at the shell resolve **relative to where the command stands**: the working directory when the vault was found from it, the vault root when `--vault` named it. `..` may climb out of the working directory but never out of the vault (`PATH_OUTSIDE_VAULT`). An absolute path is accepted too — the whole path is optional, not forbidden — and must lie inside the vault. Omitting the path means that same place: `heimdall read` reads the current folder, and `heimdall lock` locks it.
+- Output paths are always vault-relative, however the input was spelled.
+- Client operations (`create-folder`, `move-path`, `relink`, `delete-path`, `link-graph`) and `share`/`unshare` still **require** `--vault`: they are the desktop's, and it always says which vault it means. `mcp` without `--vault` serves the shared vaults (below) and never looks at the working directory.
+
+```text
+$ cd ~/Notes/projects
+$ heimdall read                        # lists ~/Notes/projects
+$ heimdall read my_project.md          # reads projects/my_project.md
+$ echo "# Plan" | heimdall write plan.md
+$ heimdall lock                        # locks projects/
+$ heimdall unlock ../ideas/hello_world.md
+```
+
+### Sharing vaults with AI clients
+
+Which vaults an AI client can reach is the user's decision, made at the shell or on the desktop's Server screen and never by a tool. The **shared vaults** are a list of `{name, path}` in `<data>/agents.json` (§14) — its own file, so an older Heimdall rewriting the registry cannot drop it.
+
+```text
+heimdall vaults                              # every known vault, shared or not, with names
+heimdall share   --vault P [--name NAME]     # share P (or rename it), as NAME or its folder name
+heimdall unshare --vault P
+```
+
+- A name is what tool calls use: one folder-name-shaped string (the rules `heimdall create` applies), unique ignoring case. Without `--name`, the folder name is used, with a numeric suffix when another shared vault has it (`notes`, `notes 2`); a name asked for that is taken is `ALREADY_EXISTS`.
+- `share` also registers the vault. `unshare` leaves the registry alone.
+- The desktop shares a vault it creates or opens unless the person switches that off (§15): a vault someone has just made, then asked an agent to write in, is meant to be reachable. Creating at the shell (`heimdall create`) does not share; sharing there is its own command.
+- `vaults` names absolute paths, which is why nothing like it is ever a tool.
 
 ### MCP configuration
 
-One vault per server process. The vault is fixed by server configuration; no tool call can name, switch, or discover vault paths.
+One server entry, whatever the number of vaults:
 
 ```text
-heimdall mcp --vault "/Users/name/Documents/My Vault"
+heimdall mcp
 ```
-
-MCP client configuration:
 
 ```json
 {
   "mcpServers": {
     "heimdall": {
-      "command": "heimdall",
-      "args": ["mcp", "--vault", "/Users/name/Documents/My Vault"]
+      "command": "/Applications/Heimdall.app/Contents/MacOS/heimdall",
+      "args": ["mcp"]
     }
   }
 }
 ```
 
+`heimdall mcp` serves every shared vault. It reads `agents.json` on every call, so sharing, unsharing, or renaming a vault takes effect on the next call without restarting the client, and it opens the chosen vault per call rather than holding handles, so a moved or unshared folder is never served from a stale one.
+
 Rules:
 
-- Tool calls never contain vault paths or vault IDs.
-- MCP never falls back to the process working directory; `--vault` is required.
-- If the configured vault is not initialized (no valid `aios/` structure), domain tools fail with `NOT_INITIALIZED` and a message telling the user to run `heimdall create` (or use the desktop app).
-- To use multiple vaults, configure multiple server entries (`heimdall-personal`, `heimdall-work`), each with its own `--vault`. Native multi-vault mode is deferred (see §13).
+- `read` and `write` take an optional `vault`: a **name** from the shared list, matched ignoring case. It may be left out while exactly one vault is shared. With several shared, a call without it is `INVALID_INPUT` with `details.vaults` listing the names — guessing is how a note lands in the wrong vault. A name not on the list is `NOT_FOUND`, the same answer for an unshared vault, a made-up name, and a filesystem path, so a refusal says nothing about what else exists.
+- Paths in tool calls are vault-relative; the vault root is the default. An absolute path is read as a path inside the named vault, never as a way out of it.
+- Every `read` and `write` result carries `vault`, the name of the vault it used.
+- The session's `instructions` (§12) name the shared vaults as they were when it started; paths are never shown to an agent.
+- `heimdall mcp --vault P` still serves exactly one vault, for configurations written before sharing existed; `vault`, if given, must then be that vault's name. Installing from the desktop replaces such entries (§15).
+- The server starts whatever state its vaults are in. A vault that cannot be opened — usually macOS privacy protection keeping the process out of Documents, Desktop, Downloads, or iCloud Drive (§16) — is reported by each call that needs it, with a message saying what to allow. A server that exited instead would leave the client listing no tools and the user with nothing to go on.
+- Any existing folder can be shared. There is no initialization step and no structure a vault must have.
 - Client-provided MCP Roots do not expand authority in V1.
 
 ## 8. Bounded discovery and reads
 
-No operation reads an entire vault without limits. `link_graph` (§15) scans the whole
-vault and is bounded by node, per-file, and total-byte caps rather than by pagination.
+No operation reads an entire vault without limits. `read` returns one bounded page of a
+folder or one bounded range of a note. `link_graph` (§15) scans the whole vault and is
+bounded by node, per-file, and total-byte caps rather than by pagination.
 
 ### Listing limits
 
 - Default page size: 50 entries. Maximum page size: 200 entries.
 - Listings return metadata only, never file content.
-- Do not hash file content during listing. Revisions are returned by reads and successful creates/writes.
-- `list_documents` is non-recursive by default. Recursive listing requires an explicit flag, defaults to a depth of 4, and has a maximum depth of 16.
-- Documents sort by relative path, byte-wise, over the whole result set rather than by traversal order — that total order is what makes "resume strictly after this path" well defined. Entries sort newest first, breaking ties by filename. Memories list the main memory first, then extended memories by filename.
-- `list_documents` returns directories and `.md` files. Vaults may hold other files, but V1 exposes no operation that can read one, so listing them would be a dead end. Hidden entries (anything beginning with `.`), filesystem debris such as `.DS_Store`, Heimdall's write-temp sidecars, and the `.lock` sidecars older versions left beside notes are never listed.
-- `list_documents` uses stateless continuation: when another page exists, the response includes `next_cursor`, which is simply the last relative path returned. The next call passes it as `cursor` and listing resumes strictly after that path under the same parameters. A malformed cursor is `INVALID_INPUT`. There is no server-side cursor state to invalidate.
-- As a safety guard, one `list_documents` call resolves at most 10,000 filesystem entries; if the guard is hit, return the partial page with `next_cursor`. Only entries beyond the cursor count against the guard: ground a previous page already covered was paid for by that page, and charging for it again would make the far end of a large vault permanently unreachable. Entries a call can reject on name alone — hidden, debris, not Markdown, already behind the cursor — cost nothing.
-- `list_memories` and `list_entries` do not paginate. Their folders are small and bounded in practice; they honor `limit` (default 50, maximum 200) and clients may raise `limit` when they need more.
+- Do not hash file content during listing. Revisions are returned by reads of a note and by successful writes.
+- A folder `read` is non-recursive by default. Recursive listing requires an explicit flag, defaults to a depth of 4, and has a maximum depth of 16.
+- Entries sort by relative path, byte-wise, over the whole result set rather than by traversal order — that total order is what makes "resume strictly after this path" well defined.
+- A folder `read` returns directories and `.md` files. Vaults may hold other files, but no operation can read one, so listing them would be a dead end. Hidden entries (anything beginning with `.`), filesystem debris such as `.DS_Store`, Heimdall's write-temp sidecars, and the `.lock` sidecars older versions left beside notes are never listed.
+- A folder `read` uses stateless continuation: when another page exists, the response includes `next_cursor`, which is simply the last relative path returned. The next call passes it as `cursor` and listing resumes strictly after that path under the same parameters. A malformed cursor is `INVALID_INPUT`. There is no server-side cursor state to invalidate.
+- As a safety guard, one folder `read` resolves at most 10,000 filesystem entries; if the guard is hit, return the partial page with `next_cursor`. Only entries beyond the cursor count against the guard: ground a previous page already covered was paid for by that page, and charging for it again would make the far end of a large vault permanently unreachable. Entries a call can reject on name alone — hidden, debris, not Markdown, already behind the cursor — cost nothing.
 - Listings are weakly consistent while files change; clients may re-list when they need a fresh snapshot.
 
 ### Read limits
 
-- A `read_documents` request may select at most 10 files.
-- Default range per file: 200 lines. Maximum requested range per file: 1,000 lines.
-- Default total returned content: 64 KiB. Hard total returned content: 256 KiB.
-- Read protected content with the same line and byte limits.
+- A `read` of a note returns one range of one file. There is no multi-file read: a caller that wants several notes asks for each, and each answer carries its own revision and lock state.
+- Default range: 200 lines. Maximum requested range: 1,000 lines.
+- Default returned content: 64 KiB. Hard maximum: 256 KiB.
 - Split only at UTF-8 and line boundaries.
 - Return `complete: false` and `next_line` when more content remains.
 - Never silently discard or imply that a partial file is complete.
@@ -313,9 +336,8 @@ vault and is bounded by node, per-file, and total-byte caps rather than by pagin
 ### Link graph limits
 
 `link_graph` is a client operation (§2, §15): it indexes the whole vault in one call,
-including `aios/`, and is not an MCP tool. It returns no file content — only paths,
-titles, sizes, modification times, and link endpoints, which is strictly less about the
-protected tree than `list_memories` and `list_entries` already report.
+and is not an MCP tool. It returns no file content — only paths, titles, sizes,
+modification times, lock state, and link endpoints.
 
 Being whole-vault, it is bounded by caps rather than by continuation:
 
@@ -324,7 +346,7 @@ Being whole-vault, it is bounded by caps rather than by continuation:
 - At most 64 MiB scanned in total. When that budget is spent, the remaining nodes come back with `scanned: false` and `truncated.total_bytes_cap_hit` is true.
 - At most 1,000 links extracted from any one file.
 
-A cap is a truncated success, not a failure — the same treatment `list_documents` gives
+A cap is a truncated success, not a failure — the same treatment a folder `read` gives
 its scan guard. `scanned: false` is the difference between "this note has no links" and
 "its links were not read", and the response never conflates the two.
 
@@ -342,7 +364,7 @@ than as an honest truncation flag.
 Backlinks are the reverse of `edges` and are computed by the client. Returning them as
 well would duplicate every edge and let the two drift apart.
 
-Every read result includes:
+Every note read returns a `document` of this shape (§10):
 
 ```json
 {
@@ -357,47 +379,42 @@ Every read result includes:
 }
 ```
 
-## 9. V1 MCP surface
+## 9. MCP surface
 
-V1 is tools-only for broad client compatibility. Tool names remain snake case; shell subcommands use kebab case (`heimdall list-documents`, `heimdall read-memory`, and so on) and mirror the same core operations.
+V1 is tools-only for broad client compatibility. The surface is two tools, and the shell has a subcommand of exactly the same name for each — `heimdall read`, `heimdall write` — mirroring the same core operation. The names are the plain verbs: no `read_file`, `read-documents`, or other qualified spelling.
 
-### Discovery and reads
+| Tool | Use | Mutates |
+|---|---|---|
+| `read` | Read a folder (a bounded listing) or a note (a bounded range of its lines) in the shared vault `vault` names. Omit `path` for the vault root. Reports lock state. | No |
+| `write` | Create a note, or replace one given the revision from the latest read, in the vault `vault` names. Never overwrites silently; refused with `LOCKED` on a locked path. | Yes |
 
-| Tool | Use |
-|---|---|
-| `list_documents` | Discover ordinary Markdown notes before choosing what to read. Never use it to access `aios/`. |
-| `read_documents` | Read selected, bounded ranges of ordinary notes returned by `list_documents`. |
-| `list_memories` | Discover the main memory and extended memory files. |
-| `read_memory` | Read a bounded range from the main memory or one selected extended memory. The main memory is where the user's standing instructions live, so read it first. |
-| `list_entries` | Discover conversation summaries and notifications by metadata, filtered by kind. |
-| `read_entry` | Read one selected entry. |
+Tool annotations say the same to clients that decide what to confirm from them: `read` is `readOnlyHint: true`; `write` is `readOnlyHint: false`, `destructiveHint: false` — it is additive by construction, since it cannot replace a note without the revision from a read, and an agent creating many notes should not meet a prompt per note — and `idempotentHint: false`. Both are `openWorldHint: false`. Locks, not prompts, are what keep a note from changing.
 
-### Mutations
+Two tools total. Do not add a general `read_file`, `write_file`, or `execute` tool. Vault creation is shell-only (§7).
 
-| Tool | Use |
-|---|---|
-| `write_memory` | Replace the main or one extended memory using an expected revision. Do not use it for ordinary notes or append-only logs. |
-| `create_entry` | Create a new compressed conversation summary or notification. Never replaces an existing entry. |
+There is deliberately no agent-instructions file and no tool to read one. MCP already has a channel for telling a client how to behave — the `instructions` string published at initialization (§12). What varies per vault belongs in the vault's own notes, which `read` reaches like any other.
 
-Eight tools total. Do not add a general `read_file`, `write_file`, or `execute` tool. Vault creation is shell-only (§7).
-
-There is deliberately no agent-instructions file and no tool to read one. MCP already has a channel for telling a client how to behave — the `instructions` string published at initialization (§12) — and what varies per vault is the user's own durable context, which is the main memory. A third place to say the same thing is a third place to keep in step.
+`lock` and `unlock` are shell subcommands and not tools. A lock decides what an agent may change, so an agent must not be able to change it — not by unlocking, and not by locking either, since a folder lock clears the note-level rules beneath it (§6). This is unconditional rather than a server flag: a flag would make the weaker setup the default. Their request and response types derive no `JsonSchema`, so, like the client operations below, neither can be given a tool without a compile error. An agent that meets a lock reports it — `LOCKED` carries `locked_at` — and the person decides. Sharing a vault is in the same category: `vaults`, `share`, and `unshare` are shell subcommands with no tool.
 
 The desktop's client surface is separate, and larger (§15). It is reached only through
 shell subcommands, and its request and response types deliberately derive no
 `JsonSchema` — `rmcp` builds a tool's schemas from those types, so a client operation
-cannot be given a tool without a compile error. "Eight tools" is therefore a property the
+cannot be given a tool without a compile error. "Two tools" is therefore a property the
 compiler holds, not a promise review has to keep.
 
 ## 10. Tool contracts
 
-### `list_documents`
+### `read`
 
-Input:
+Input (every field optional):
 
 ```json
 {
+  "vault": "Work",
   "path": "projects",
+  "start_line": null,
+  "max_lines": null,
+  "max_total_bytes": null,
   "recursive": false,
   "max_depth": null,
   "cursor": null,
@@ -405,147 +422,87 @@ Input:
 }
 ```
 
-Each result entry returns relative `path`, `kind` (`directory` or `document`), `size_bytes` for documents, and `modified_at`. It never returns content or a revision. The operation excludes `aios/` at every depth. Continuation follows §8.
+- `vault` is a shared vault's name (§7); it may be omitted while only one vault is shared.
+- `path` is a folder or a Markdown note, vault-relative; omitted, it is the vault root. A path that does not exist is `NOT_FOUND`; a hidden path (including `.trash/`) or a non-Markdown file is `INVALID_INPUT`; one that resolves outside the vault is `PATH_OUTSIDE_VAULT`.
+- `start_line`, `max_lines`, and `max_total_bytes` apply to a note; `recursive`, `max_depth`, `cursor`, and `limit` to a folder. An option for the other kind is `INVALID_INPUT` naming the parameter, rather than being ignored.
+- Limits and continuation follow §8.
 
-### `read_documents`
+A folder returns a listing, never content or revisions:
+
+```json
+{
+  "vault": "Work",
+  "path": "projects",
+  "kind": "directory",
+  "locked": false,
+  "listing": {
+    "entries": [
+      { "path": "projects/my_project.md", "kind": "document", "size_bytes": 912,
+        "modified_at": "2026-08-16T14:30:00Z", "locked": false }
+    ],
+    "next_cursor": null,
+    "scan_guard_hit": false
+  }
+}
+```
+
+A note returns one bounded range and its revision:
+
+```json
+{
+  "vault": "Work",
+  "path": "projects/my_project.md",
+  "kind": "document",
+  "locked": true,
+  "locked_at": "projects",
+  "document": { "path": "projects/my_project.md", "content": "# My Project\n", "start_line": 1,
+                "end_line": 2, "next_line": null, "complete": true, "size_bytes": 13,
+                "revision": "blake3:..." }
+}
+```
+
+`vault` is the name of the vault read — its shared name, or its folder name at the shell when it is not shared. `locked_at` appears only when `locked` is true and names the rule responsible (`""` for the vault root), or the note itself when the note carries the immutable flag with no rule behind it. The response is one object with the payload nested under `listing` or `document`, not a union of two shapes, because an MCP `outputSchema` must be an object.
+
+### `write`
 
 Input:
 
 ```json
 {
-  "documents": [
-    {
-      "path": "projects/my_project.md",
-      "start_line": 1,
-      "max_lines": 200
-    }
-  ],
-  "max_total_bytes": 65536
-}
-```
-
-Behavior:
-
-- Require one to ten explicit Markdown paths.
-- Reject directories; callers discover files with `list_documents`.
-- Return each selected range with revision and continuation metadata.
-- Stop before the total byte cap and mark remaining selections as not returned.
-
-### `list_memories`
-
-Input:
-
-```json
-{
-  "limit": 50
-}
-```
-
-Returns the main memory first, followed by extended memory filenames and basic metadata. It does not return content or revisions.
-
-### `read_memory`
-
-Main memory input:
-
-```json
-{
-  "start_line": 1,
-  "max_lines": 200
-}
-```
-
-Extended memory input:
-
-```json
-{
-  "extended": "project_history.md",
-  "start_line": 1,
-  "max_lines": 200
-}
-```
-
-`extended` accepts one base filename ending in `.md`; it never accepts a path.
-
-### `write_memory`
-
-Input:
-
-```json
-{
-  "content": "# Memory\n\nCompressed durable context.",
-  "extended": null,
+  "vault": "Work",
+  "path": "projects/my_project.md",
+  "content": "# My Project\n\nUpdated.\n",
   "expected_revision": "blake3:..."
 }
 ```
 
 Behavior:
 
-- Replace the complete main memory when `extended` is null.
-- Replace or create exactly one file inside `aios/memories/extended/` when `extended` is a safe Markdown filename.
-- Require `expected_revision` for an existing file.
-- Require explicit JSON `null` as `expected_revision` when creating a new extended memory.
-- Compare the revision again while holding the vault's cross-process write lock.
-- On a mismatch, return `REVISION_CONFLICT` with the current revision but not the current content.
-- Write to a temporary sibling, flush, atomically rename, and return `new_revision`.
-- Never truncate, merge, or summarize automatically.
+- Writes one complete Markdown note: a whole-file replacement, never a patch or an append.
+- **Without `expected_revision`** (absent or `null`), it creates the note and never replaces one: if the note exists, the result is `REVISION_CONFLICT` with `details.current_revision`. The shell spells the explicit form `--create`; it is also the default.
+- **With `expected_revision`**, it replaces the note only if that revision is still what is on disk. A mismatch is `REVISION_CONFLICT` with the current revision but not the current content; a missing note is `NOT_FOUND`.
+- The note's folder must already exist (`NOT_FOUND`, naming the folder). One mistyped path must not scatter directories through the vault; the desktop has `create_folder` for a new one.
+- A locked note, or a new note directly inside a locked folder, is `LOCKED` (§6).
+- Hidden paths and non-Markdown paths are `INVALID_INPUT`. Content is limited to 1 MiB (`LIMIT_EXCEEDED`); the shell applies the same bound to stdin.
+- Revision comparison, the lock check, and the replacement happen as one step under the vault's cross-process write lock (§14). The write lands in a temporary sibling, is flushed, and is atomically renamed.
+- Returns `vault`, `path`, `new_revision`, `size_bytes`, and `created`.
 
-Main-memory policy:
+That an absent revision means "create" rather than "error" is deliberate: it makes the common case — writing a new note — one argument shorter, and it still can never replace anything, which is the property the older "absent is a mistake" rule existed to protect.
 
-- Hard storage limit: 32 KiB (32,768 UTF-8 bytes). Writes above it fail with `LIMIT_EXCEEDED`.
-- Advisory warning: any successful write of 24 KiB or more returns a warning recommending that durable topic detail move into descriptive files under `extended/`, linked from `memory.md`.
-- Extended memories remain topic-specific and have a 1 MiB per-file write limit.
+### `lock` and `unlock` (shell only)
 
-Both thresholds are byte-based. Token counts vary by model and tokenizer, so Heimdall does not estimate tokens.
-
-### `list_entries`
-
-Input:
+Not MCP tools (§9); the shell takes `path` positionally (§11), and the core request is:
 
 ```json
-{
-  "kind": "conversation",
-  "limit": 50
-}
+{ "path": "projects" }
 ```
 
-- `kind` is required: `conversation` or `notification`.
-- Returns filename (`id`), creation time, and size, newest first. Read a selected entry to obtain its revision.
-- `created_at` comes from the filename, which Heimdall derives from the UTC instant of creation, so a listing costs no file reads. Entry folders are ordinary folders and may hold files a user added by hand; those still list, falling back to the filesystem modification time. Nothing a user puts in the vault becomes invisible.
-
-### `read_entry`
-
-Input:
-
-```json
-{
-  "kind": "conversation",
-  "id": "2026-08-16_10-30-00.md",
-  "start_line": 1,
-  "max_lines": 200
-}
-```
-
-`id` is a base filename returned by `list_entries`; it never accepts a path. `kind` selects the folder and must match where the entry lives.
-
-### `create_entry`
-
-Input:
-
-```json
-{
-  "kind": "notification",
-  "content": "# Notification\n\nHigh-level compressed notification."
-}
-```
-
-Behavior:
-
-- Creates a new UTC-timestamped Markdown file in `aios/conversations/` or `aios/notifications/` according to `kind`.
-- Adds Heimdall-owned frontmatter with `created_at` and `type` matching `kind`.
-- Rejects content that begins with its own frontmatter block with `INVALID_INPUT` (§6).
-- Never replaces an existing entry; collisions get a numeric suffix, up to `_99` for one second. Creation uses `O_EXCL`, so a collision is detected by the filesystem rather than by a check another process could race.
-- Content is limited to 1 MiB; larger bodies fail with `LIMIT_EXCEEDED`. The shell applies the same bound to stdin.
-- Returns the new entry's `id`, metadata, and revision.
+- `path` is a folder or a Markdown note, vault-relative; omitted, it is the whole vault. It must exist: `NOT_FOUND` otherwise, and `INVALID_INPUT` for a hidden path or a non-Markdown file.
+- Semantics follow §6: a folder operation applies to everything beneath it and clears the rules there.
+- `unlock` asks the person first (§6) and is `NOT_CONFIRMED` without them; `lock` asks no one.
+- The rule is stored under the path's real on-disk spelling, which is what `path` reports.
+- Returns `path`, `kind` (`directory` or `document`), `locked` (the new state), `changed` — false when the path was already in that state and nothing was stored — `protection` (`complete`, `partial`, or `unsupported`), and `pending`, the notes a `partial` run left to flag or unflag.
+- Changes no file's content. The rules are written, under the vault's write lock, to the application-data directory (§14), and the immutable flag is set or cleared on the notes the command covers.
 
 ## 11. Shell and MCP output semantics
 
@@ -583,9 +540,29 @@ Exit codes:
 - `1` — an expected domain failure. The error envelope is still printed on stdout; only the status differs, so a script can branch without parsing and a caller that does parse loses nothing.
 - `2` — a usage error from argument parsing. The request never reached the domain, so there is no envelope.
 
-Every domain subcommand requires `--vault <path>`, with no working-directory fallback, matching the rule the MCP server follows (§7): the vault a command operates on is always explicit. `heimdall create` instead takes `--root`, which defaults to the working directory, because it is naming a location rather than selecting an existing vault.
+Subcommands:
 
-`write_memory`'s `expected_revision` distinguishes an absent field from an explicit `null`: `null` means "this file does not exist yet", while omitting it means the caller forgot the revision it read, and treating that as a create would let a stale client clobber a file. The shell spells the `null` case as `--create`.
+```text
+heimdall read   [PATH] [--vault P] [--start-line N] [--max-lines N] [--max-total-bytes N]
+                       [--recursive] [--max-depth N] [--cursor C] [--limit N]
+heimdall write  PATH   [--vault P] [--expected-revision R | --create]      # content on stdin
+heimdall lock   [PATH] [--vault P]
+heimdall unlock [PATH] [--vault P]
+
+heimdall create NAME [--root P]
+heimdall create-folder --vault P --path PATH
+heimdall move-path     --vault P --from PATH --to PATH
+heimdall relink        --vault P --from PATH --to PATH [--dry-run]
+heimdall delete-path   --vault P --path PATH [--expected-revision R]
+heimdall link-graph    --vault P [--max-depth N]
+
+heimdall vaults
+heimdall share         --vault P [--name NAME]
+heimdall unshare       --vault P
+heimdall mcp           [--vault P]
+```
+
+`read`, `write`, `lock`, and `unlock` take `PATH` positionally and find the vault from the working directory when `--vault` is omitted, resolving `PATH` relative to it (§7). `unlock` asks the person at the computer before it changes anything (§6). The client operations and `share`/`unshare` require `--vault <path>`: the desktop always says which vault it means. `mcp` serves the shared vaults, or with `--vault` exactly one (§7). `heimdall create` instead takes `--root`, which defaults to the working directory, because it is naming a location rather than selecting an existing vault.
 
 ### MCP
 
@@ -606,9 +583,11 @@ Domain codes:
 - `PATH_OUTSIDE_VAULT`
 - `NOT_FOUND`
 - `ALREADY_EXISTS`
-- `NOT_INITIALIZED`
+- `NOT_INITIALIZED` — the shell was asked to find a vault from a working directory that is inside no registered vault (§7). Nothing else raises it: any folder named with `--vault` is a vault.
 - `REVISION_CONFLICT`
-- `IO_ERROR`
+- `LOCKED` — the path, or the folder it would be created in, moved into, or moved out of, is locked (§6). `details.locked_at` names the rule. The message says plainly that the answer is to tell the user and stop, not to make the change another way, because it is the last thing an agent reads before deciding what to do.
+- `NOT_CONFIRMED` — an `unlock` the person at the computer did not confirm (§6). `details.reason` is `cancelled`, `unavailable`, or `timeout`.
+- `IO_ERROR` — including the operating system refusing access (`EPERM`, `EACCES`), with `details.reason: "os_permission"` and a message naming the two usual causes on macOS: an immutable (locked) file, or privacy settings keeping the process out of the folder. Only `cap-std`'s own escape error, which carries no OS error number, is `PATH_OUTSIDE_VAULT`.
 - `INTERNAL_ERROR`
 
 ## 12. MCP server behavior
@@ -621,9 +600,11 @@ Requirements:
 - Generate tool input/output schemas from shared Rust types where practical. The `heimdall-core` request and response types derive `JsonSchema`, so every tool's `inputSchema` and `outputSchema` follow the domain types automatically and cannot drift from what the shell returns.
 - Pin `rmcp` and an MCP protocol baseline; upgrade deliberately after contract and conformance tests pass. Current pins: `rmcp` `=3.1.3`, protocol `2025-11-25`.
 - Bound how long any operation can wait. Reads and listings are bounded by the limits in §8, and waiting for a contended write lock has its own ceiling (§14) so one wedged process cannot hang the server.
-- Enforce the configured vault boundary before dispatching to core operations.
+- Resolve the call's vault — a shared name, or the one `--vault` fixed — before dispatching to core operations, and have core confirm the name matches the vault it was handed.
+- Start whatever state the vaults are in; report a vault that cannot be opened per call (§7).
+- Publish tool annotations (§9).
 - Support cancellation and bound operation duration.
-- Support `heimdall --version --json` with CLI version, core version, MCP protocol compatibility, and output schema version.
+- Support `heimdall --version --json` with CLI version, core version, MCP protocol compatibility, output schema version, and whether an unlock requires a person (`presence`).
 
 ### Server instructions
 
@@ -632,23 +613,25 @@ to work with it, and it is the only such channel Heimdall has: there is no instr
 file for a client to go and find, because a client that had to call a tool to learn the
 rules would already have made its first call without them.
 
-Publish concise server-level instructions equivalent to:
+Publish concise server-level instructions. They open by naming what this session serves — the shared vaults by name as of initialization ("Pass `vault` with one of these names on every call"), the one vault `--vault` fixed, or that nothing is shared yet — and continue, equivalent to:
 
-> Heimdall manages one Markdown vault. Ordinary notes live outside `aios/`; protected memories and entries (conversation summaries and notifications) live inside it. Read the main memory with `read_memory` at the start of a session: it holds the user's durable context and how they want you to work in this vault. List content before reading it, request only the ranges needed, and follow continuation metadata. Use `write_memory` only for durable memory and always pass the revision returned by the latest read. Use `create_entry` for conversation summaries and notifications; it never replaces existing files.
+> Start with `read` and no path: it lists the vault root. `read` on a folder lists it; `read` on a note returns a bounded range of its lines and the revision a write needs. Request only the ranges you need and follow `next_line` and `next_cursor`. `write` creates a note, or replaces one when you pass the `expected_revision` from your latest read; it never overwrites anything silently. Use these two tools, not the filesystem, for anything in these vaults.
+>
+> Every read says whether a path is `locked`. A locked note or folder is read-only by the user's decision, and only the user can change that. Never try to change a locked note or folder any other way: not with a shell, file-editing or patch tools, or scripts, and not by operating the Heimdall app or any other application through computer use, accessibility, or the screen. If a write is refused with LOCKED, tell the user what is locked and which lock is responsible (`locked_at`), and stop.
+
+Some clients store `instructions` without showing them to the model, so the guardrail is repeated where every client shows it: in the `write` description and in the text of every `LOCKED` refusal. None of the three ever describes a way around a lock.
 
 What is fixed for every vault belongs in that string; what varies per vault belongs in
-the main memory, which the string points at. Every tool also receives a strong
-description explaining when to use it, what it cannot access, its limits, and whether it
-mutates content.
+the vault's own notes. Every tool also receives a strong description explaining when to
+use it, what it cannot access, its limits, and whether it mutates content.
 
 ## 13. Roadmap (deferred by design)
 
 Deferred features must preserve the same vault restrictions, limits, revisions, and continuation behavior.
 
-- **MCP resources.** Read-oriented content is semantically suitable for resources later (`heimdall://documents/<relative-path>`, `heimdall://memories/main`, and so on). Adding resources does not remove the read tools; creation and mutation remain tools.
-- **Native multi-vault mode.** Friendly vault IDs on every call plus a `list_vaults` tool. Until then, one server process per vault (§7).
+- **MCP resources.** Read-oriented content is semantically suitable for resources later (`heimdall://notes/<relative-path>`). Adding resources does not remove `read`; mutation remains tools.
 - **MCP Roots** as an explicit, reviewed configuration source.
-- **Attachment operations**, only with explicit MIME, size, and security rules.
+- **Non-Markdown file operations**, only with explicit MIME, size, and security rules.
 
 ## 14. Filesystem safety and concurrency
 
@@ -661,13 +644,31 @@ Deferred features must preserve the same vault restrictions, limits, revisions, 
 - Use temporary sibling files, flush them, and atomically rename.
 - Hold one cross-process write lock (`fs4`) per vault around revision comparison and replacement. Optimistic concurrency only holds if comparing and replacing are one indivisible step; without it two writers both read revision A, both find it current, and both write, and one edit is lost with no error.
 - The lock lives **outside the vault**, in the per-user application-data directory, in a file named by a hash of the vault's canonical path. It cannot live on the target, because replacing a file renames a new inode over it and each writer would hold a lock on a different file. It must not live on a sidecar beside the target either: a sidecar can never be safely removed — unlinking one another process is about to open leaves the two locking different inodes — so every note ever written left a `.lock` file in the user's vault. A vault holds the user's Markdown and nothing of Heimdall's.
-- Application data, not a cache directory: a cache is something the system may purge, and a purge that unlinks a held lock file is the same divergence that makes lock files unsafe to delete. `HEIMDALL_LOCK_DIR` overrides the location for a deployment with no writable home.
+- Application data, not a cache directory: a cache is something the system may purge, and a purge that unlinks a held lock file is the same divergence that makes lock files unsafe to delete — and a purge of the lock rules would silently unlock every note. `HEIMDALL_DATA_DIR` overrides the location for a deployment with no writable home, and for tests.
 - The vault root is canonicalized when the vault is opened, because the lock key is what two processes must agree on and a path as typed is not that — `~/vault`, `./vault`, and a symlink to it are three spellings of one directory that would otherwise take three separate locks and exclude nothing.
 - One lock per vault is coarser than one per file and therefore strictly stronger, so it cannot introduce a race. A holder only hashes some bytes and renames a temp file, so serialising a vault's writes costs nothing at the rate they arrive. It does mean a locking operation must never be called from inside another one: with a single lock that is a self-deadlock rather than merely redundant.
 - Write temps are the one thing Heimdall does put in a vault, and unavoidably: an atomic write lands in a temporary sibling and is renamed into place, and a rename cannot cross filesystems. It is removed on every path including failure, so one survives only a kill or a power loss.
 - Bound the wait for a contended lock (10 seconds) rather than blocking indefinitely. Every holder does short, bounded work, so exceeding that means another process is stuck, and reporting `IO_ERROR` beats inheriting its hang — a server cannot promise a bounded operation duration on top of an unbounded wait.
 - A rename never replaces an existing destination. `cap-std` exposes no `RENAME_NOREPLACE`, so the check and the rename both happen under the vault's write lock, and a collision is `ALREADY_EXISTS`. This serialises Heimdall processes against each other, not against another editor writing into the same vault — the same weak consistency §8 already accepts for listings.
-- Deletion moves content into `.trash/`; nothing is ever unlinked. Collisions there take numeric suffixes, exactly as entry filenames do.
+- Deletion moves content into `.trash/`; nothing is ever unlinked. Collisions there take numeric suffixes (`note_01.md`, `note_02.md`, …).
+- **Everything Heimdall keeps lives in one per-user application-data directory**, `HEIMDALL_DATA_DIR` if set and otherwise the platform's local data directory plus `heimdall/`:
+
+  ```text
+  <data>/
+  ├── vaults.json            # the registry: canonical vault roots (§7)
+  ├── agents.json            # the vaults shared with AI clients, by name (§7)
+  ├── locks/<key>.lock       # one write lock per vault
+  ├── locks/registry.lock    # serialises registry updates
+  ├── locks/agents.lock      # serialises changes to the shared vaults
+  └── vaults/<key>.json      # one set of lock rules per vault (§6)
+  ```
+
+  There is no fallback location. A guessed one — a temporary directory — would hold no lock rules, and a process reading an empty rule set would treat every locked note as writable, so a data directory that cannot be located is an error. `HEIMDALL_DATA_DIR` must be absolute.
+
+  `<key>` is the BLAKE3 hash of the vault's canonical path, the same key for the write lock and the lock rules. Both JSON files are written through a temporary sibling and a rename, so a reader sees the old state or the new one, never half of either.
+- **Lock rules are read and changed under the vault's write lock.** `lock` and `unlock` rewrite the rules inside it; every write checks them inside the same lock body in which it compares revisions and renames. So an `unlock` cannot land between a write's check and its rename, and a `lock` returning success means no write that began before it is still to land. `read` reads the rules without the lock — its `locked` flag is weakly consistent, like a listing.
+- The registry and the shared vaults are each updated under their own short lock so two processes changing one at once cannot each write a list missing the other's change.
+- Moving or renaming a vault's folder changes its canonical path, and with it the key its lock rules are stored under, so the rules no longer apply. The immutable flags travel with the notes (§6), so its locked notes stay locked; locking the folder again from its new place restores the rules.
 - Compute revisions from exact stored bytes after a successful write.
 - Apply read-size, file-count, stdin-size, and execution-time limits.
 - Redact sensitive path segments and note content from production logs.
@@ -684,7 +685,7 @@ Heimdall and any other Markdown editor can be used over the same files.
 
 ### The workspace
 
-1. **Files** — the whole vault, `aios/` included. Ordinary folders come from `list_documents`; the protected tree can only come from `link_graph`, because ordinary listing excludes `aios/` at every depth by design (§6). New note, new folder, sort order, and collapse-all sit in a toolbar above the tree. A right-click offers rename and delete for ordinary content only: both operations refuse `aios/`, so offering them there would produce nothing but an error. A move that would break inbound links — a rename, a folder rename, or a drag — stops and asks first, **naming** the notes it would rewrite rather than counting them, since those are the files being agreed to. Three answers: update the links, rename only, or cancel; nothing at all is written until one is chosen, so cancelling leaves the vault as it was, and "rename only" is a real position rather than something the dialog talks you out of. A move that breaks no links does not ask, because a rename that touches one file is not worth a dialog. Afterwards nothing is said when every link was carried — the user agreed to it and is looking at the result — and a dialog reports anything left behind, which is the one outcome they would otherwise meet later as a dead link. A folder is asked about its contents, since nothing links to a directory. A delete still warns rather than offering: deletion has no new name to point links at.
+1. **Files** — the whole vault, from a recursive `read` of the root. New note, new folder, sort order, collapse-all, and a lock for the whole vault sit in a toolbar above the tree. A right-click offers rename, delete, and lock or unlock. A locked note or folder carries a small lock glyph in the tree, drawn in the muted grey rather than the accent; it offers unlock and nothing that would change it, and it cannot be dragged or dropped onto, since every one of those operations would be refused (§6). A move that would break inbound links — a rename, a folder rename, or a drag — stops and asks first, **naming** the notes it would rewrite rather than counting them, since those are the files being agreed to. Three answers: update the links, rename only, or cancel; nothing at all is written until one is chosen, so cancelling leaves the vault as it was, and "rename only" is a real position rather than something the dialog talks you out of. A move that breaks no links does not ask, because a rename that touches one file is not worth a dialog. Afterwards nothing is said when every link was carried — the user agreed to it and is looking at the result — and a dialog reports anything left behind, which is the one outcome they would otherwise meet later as a dead link. A folder is asked about its contents, since nothing links to a directory. A delete still warns rather than offering: deletion has no new name to point links at.
 
 A report of that kind must not be a banner. The workspace clears its banner whenever the vault reloads, and autosave triggers a reload a second and a half after any edit — so a banner raised by a write is wiped by a refresh nobody asked for, usually before it has been read. The banner's own vault-level failure is the one thing a successful reload may clear, because it is the one thing a successful reload disproves.
 2. **Note** — a breadcrumb with back/forward history, a source/preview toggle, and an overflow menu. The heading is the note's own `# ` line, and it is the filename: one fact, so editing the heading renames the file and renaming the file rewrites the heading. It is shown in both modes and typed into in one — source, with its `#` dimmed like every other marker, drawn above the editor rather than inside it so that it cannot be scrolled away from and the same line is not on screen twice. In preview it is a rendered heading and inert, because preview is for reading and a rendered heading that quietly accepts typing is one nobody can tell from the rest of the note. It cannot be removed: a note emptied of its name gets the name back, and a note that never had a heading is given one from its filename the first time it is written. Preview renders the note, shows its frontmatter as a properties table with clickable wikilinks, renders fenced `mermaid` diagrams, and lists linked mentions — the notes that link to this one, each a name to click beside its path and nothing else. The note's own outgoing links are not repeated under it: they are in its text a few lines above, and a second copy is one more list to read past. The properties block is found wherever its author put it, which for a note that opens with its name is under the heading rather than on the first line; because `---` is a horizontal rule as well as a fence, a block counts only when it is closed, sits at the top of the note or under a blank line, and encloses a non-empty mapping — and only the first such block is the note's properties, since a note has one set of them. Every other `---` is the rule it looks like, and no rule is drawn that the note does not contain. Source is a Markdown editor with the frontmatter block and the remaining heading markers dimmed.
@@ -711,10 +712,10 @@ Reached from **Heimdall → Settings…** (⌘,) in the application menu, as a m
 workspace rather than a screen inside it — these are occasional tasks, and the window
 belongs to the notes. It has four sections:
 
-1. **Vault** — create a new templated vault (`heimdall create`) or select an existing folder of notes and initialize its `aios/` structure.
-2. **Server** — make the MCP server available: show the exact `heimdall mcp --vault ...` command, generate the `mcpServers` JSON snippet, and (with explicit user consent) write it into known client configuration files. Writing merges into the existing configuration rather than replacing it, backs the previous file up first, and saves through a temporary sibling so an interrupted write cannot leave a client with half a file. A second vault gets its own entry name instead of taking over the first one's. A development build refuses to write at all, and the screen says so before the click: its sidecar is a build artifact that a rebuild or `cargo clean` removes, and a client whose configured command has gone reports a timeout rather than a missing file — so the entry would fail silently and much later. For the same reason the screen reports a registration that is already stale: an entry for this vault whose absolute command is no longer on disk. Provide a one-click health check that launches the server, performs an MCP handshake, and reports the result.
+1. **Vault** — create a new templated vault (`heimdall create`) or select an existing folder of notes, which is registered as a vault as it stands: nothing is written into it. An **Available to AI clients** switch beside both, on by default, shares the vault as soon as it exists; a share that fails is reported without undoing the vault. The Active vault panel carries the same switch, naming the shared name, to change it later. The location placeholder suggests `~/Heimdall`, and a location in a protected folder (§16) gets a hint saying AI clients will be refused it unless the CLI has Full Disk Access.
+2. **Server** — make the MCP server available. It lists every vault Heimdall knows (`heimdall vaults`) with whether it is shared and under what name, with a switch per vault to share or stop sharing it (`share`, `unshare`) and a Rename for a shared one; the open vault is offered even before anything has registered it. It shows the one command every client runs (`heimdall mcp`) and each known client's single `heimdall` entry in its own format (JSON for Claude Desktop, TOML for ChatGPT), and (with explicit user consent) writes it into a known client's configuration file. The known clients are Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`, an `mcpServers` entry) and ChatGPT (`~/.codex/config.toml`, shared with the Codex CLI and app, an `[mcp_servers.heimdall]` table); ChatGPT is labelled as Work or Codex mode only — its plain chat and the web never run a local server — and both say to restart the client afterwards. Each file is written in its own format, and a TOML file keeps its comments and layout. Writing merges into the existing configuration rather than replacing it, backs the previous file up first, and saves through a temporary sibling so an interrupted write cannot leave a client with half a file. Per-vault entries older builds wrote (`heimdall mcp --vault P`, recognised by the command they run rather than their name) are named on the screen and replaced by the one entry; their vaults are shared first, and if any cannot be, the file is left untouched. A `heimdall` key that runs something else is never overwritten; the screen says so and the button is disabled. A development build refuses to write at all, and the screen says so before the click: its sidecar is a build artifact that a rebuild or `cargo clean` removes, and a client whose configured command has gone reports a timeout rather than a missing file — so the entry would fail silently and much later. For the same reason the screen reports a registration that is already stale: a `heimdall` entry whose absolute command is no longer on disk. A shared vault in a folder macOS privacy protection guards (Documents, Desktop, Downloads, iCloud Drive, other cloud storage, external volumes) carries a notice explaining that macOS refuses an AI client's copy of the server that folder without asking, with two buttons: **Open Privacy settings** (System Settings at Full Disk Access, through `/usr/bin/open` and a fixed URL) and **Show Heimdall's command in Finder** (`open -R` on the bundled sidecar). Neither takes anything from React. Provide a one-click health check that launches `heimdall mcp`, performs an MCP handshake, and reports the result and the shared vaults — saying beside it that it runs under Heimdall's own macOS permissions, so it cannot show whether another app's copy of the server will be let into a protected folder.
 3. **Appearance** — System, Light, or Dark, and an accent colour for each theme. System is the default and is applied by the stylesheet's media query, so the first paint is correct without waiting for JavaScript. The accent is offered as a colour well beside the hex it resolves to, with a control that clears the choice rather than writing the default back; light mode has no hue to set.
-4. **Diagnostics** — active CLI path and versions, protocol/schema compatibility, configured vault path and initialization status, limits, and recent actionable errors.
+4. **Diagnostics** — active CLI path and versions, protocol/schema compatibility, configured vault path and whether it can be read, limits, and recent actionable errors.
 
 The properties table is shown only for a note that actually has a `---` block; a
 heading over an empty grid is furniture rather than information. Adding one is
@@ -731,31 +732,40 @@ Installing a custom application menu replaces the platform default, so the menu 
 carry the predefined Edit items. Without them the standard Cut/Copy/Paste/Undo
 accelerators stop reaching the editor.
 
+### Locks in the desktop
+
+Locks bind the desktop exactly as they bind an agent (§6): the editor is one more writer.
+
+- A locked note opens read-only: the editor accepts no input, the heading cannot be renamed, and the properties table offers no controls. The note's header carries a lock toggle, and the tree's context menu offers the same.
+- Unlocking from either asks for Touch ID or the password, because the toggle is a button any accessibility client can press (§6). While the prompt is up a second click asks nothing more. A person who cancels just leaves the note locked, with no dialog; a prompt that could not be shown or was not answered is explained in one.
+- Locking or unlocking the open note changes whether it is editable **in place**. The editor's read-only state is reconfigured rather than the editor rebuilt, so the cursor, the scroll position, and the undo history all survive.
+- A write the CLI refuses with `LOCKED` — a lock set from the shell or by an agent while the note was open — is reported in a dialog naming the lock responsible, never in the banner (a banner raised by a write is wiped by the reload autosave triggers), and autosave does not retry those bytes.
+- `relink` skips locked notes (§6) and reports them; the rename's follow-up dialog names them as links left behind.
+
 ### Client operations
 
-Editing needs writes that the MCP surface does not have and must not grow (§9). These are
-shell subcommands the desktop calls, exactly as `heimdall create` is (§7):
+Editing needs structural writes that the MCP surface does not have and must not grow (§9).
+These are shell subcommands the desktop calls, exactly as `heimdall create` is (§7). Saving
+a note is not among them: the editor saves through `write`, the same operation an agent uses,
+so a lock or a stale revision refuses the editor exactly as it refuses anyone else.
 
 | Command | Use |
 |---|---|
-| `write_document` | Replace or create one ordinary note, guarded by `expected_revision`. |
-| `create_folder` | Make a folder for ordinary notes. |
-| `move_path` | Rename or move a note or folder. Refuses to cross the `aios/` boundary in either direction, and refuses the managed structure. |
-| `relink` | Retarget the links that pointed at a path `move_path` has just changed. |
-| `delete_path` | Move a note or folder into the vault's `.trash/`. Nothing is ever unlinked. |
-| `write_entry` | Replace one entry, preserving Heimdall's `created_at` and `type` (§6). |
-| `link_graph` | Index the whole vault's links in one call (§8). |
+| `create_folder` | Make a folder, and any missing parents. Refused inside a locked folder. |
+| `move_path` | Rename or move a note or folder. Refused for anything locked, and into or out of a locked folder. |
+| `relink` | Retarget the links that pointed at a path `move_path` has just changed. Never writes a locked note. |
+| `delete_path` | Move a note or folder into the vault's `.trash/`. Nothing is ever unlinked. Refused for anything locked. |
+| `link_graph` | Index the whole vault's links in one call (§8). Each node reports whether it is locked. |
 
 Rules:
 
-- None of these is an MCP tool, and none of their types derives `JsonSchema`. The tool surface stays at exactly eight (§9), and a compile error is what enforces it.
-- Writes are optimistically concurrent. `expected_revision` is required; explicit `null` means "create", and omitting it is `INVALID_INPUT` rather than a silent create.
+- None of these is an MCP tool, and none of their types derives `JsonSchema`. The tool surface stays at exactly two (§9), and a compile error is what enforces it.
 - A stale revision returns `REVISION_CONFLICT` with the current revision in `details`, and the client resolves it by asking the user — never by merging and never by overwriting.
 - Renaming a note does not rewrite `[[wikilinks]]` **inside `move_path`**. A move is one rename, and folding an unbounded multi-file write into it would leave a rename that half succeeded with no way to say so. `relink` is that work, as its own operation with its own report, and the client calls it next.
-- `relink` is bounded and checked, which is what the older rule was protecting. **Bounded:** only files holding a link to the moved path are written; the scan is the whole vault under the graph's caps (§8) plus a substring prefilter, and the writes are capped again. **Checked:** the whole read-modify-write runs inside one write lock, which is strictly stronger than an `expected_revision` a caller could pass — a revision check closes the gap between a client's read and its write, and here there is no gap. That is also why it uses the vault primitives directly rather than `write_document`: a locking operation inside a lock body is a self-deadlock (§14).
+- `relink` is bounded and checked, which is what the older rule was protecting. **Bounded:** only files holding a link to the moved path are written; the scan is the whole vault under the graph's caps (§8) plus a substring prefilter, and the writes are capped again. **Checked:** the whole read-modify-write runs inside one write lock, which is strictly stronger than an `expected_revision` a caller could pass — a revision check closes the gap between a client's read and its write, and here there is no gap. That is also why it uses the vault primitives directly rather than `write`: a locking operation inside a lock body is a self-deadlock (§14).
 - A rewrite is **proposed and then verified**. The replacement is written in the shape the link was written in — a bare name stays bare, a vault path stays a path, a note-relative link is re-expressed from the linking note, an extension and a percent encoding are preserved — and is then resolved again through the post-move index. It is spliced in only if it lands on the moved note; if it does not, because the new basename is now ambiguous, the vault-relative path is tried instead. A link that no proposal satisfies is reported and left exactly as written. Retargeting a link at the wrong note is worse than leaving one broken: the first is invisible.
-- Only the target substring is replaced, so an alias, a `#heading` or `#^block` anchor, an `![[` embed marker, and a Markdown link's text and title come out byte-identical. Frontmatter is never reassembled, which is what keeps an entry's `created_at` and `type` (§6) intact when a link inside one moves.
-- `relink` may write into `aios/`. Memories link out with wikilinks (§6), and a memory left pointing at a renamed note is as broken as a note is. It is a protected-content operation for that reason, and it writes nothing but link targets.
+- Only the target substring is replaced, so an alias, a `#heading` or `#^block` anchor, an `![[` embed marker, and a Markdown link's text and title come out byte-identical. Frontmatter is never reassembled, so every other key in it survives when a link inside it moves.
+- A locked note that links at what moved is not rewritten; it is listed in the response's `locked`, so the client can name the links a lock kept pointing at the old path.
 - Both ends of a link can be what moved: a note that changed folders takes its own note-relative links with it, and those are re-expressed from its new home.
 - `link_graph` is a load-and-refresh operation, not an interactive one: it reads every note in the vault. Call it when a vault is opened and after a structural change, never per keystroke.
 
@@ -771,7 +781,7 @@ two versions together. The window between the last chunk and the first write is 
 ### Visual design
 
 - Dark mode: pure black background (`#000`), white text (`#fff`). Light mode: white background, black text. The system preference is the default, with an explicit override in Settings.
-- **One accent per theme**, both the user's, set in Settings → Appearance. Not one accent shared between them: no single colour works on both grounds, since white is the right accent on black and invisible on white and black is the reverse, so a shared accent makes every choice a compromise and the obvious ones unusable in one theme. Each is used as picked, neither lightened nor darkened, and the Appearance copy says to choose one that reads against its own background. The accent is spent on links, the row of the note you have open in the file tree, the active graph node, and mermaid diagrams, and nothing else. The open note is *named* in the accent rather than sat on a block of grey: a selected-row highlight says "list box", and nothing else in this application talks that way.
+- **One accent per theme**, both the user's, set in Settings → Appearance. Not one accent shared between them: no single colour works on both grounds, since white is the right accent on black and invisible on white and black is the reverse, so a shared accent makes every choice a compromise and the obvious ones unusable in one theme. Each is used as picked, neither lightened nor darkened, and the Appearance copy says to choose one that reads against its own background. The accent is spent on links, the row of the note you have open in the file tree, the active graph node, and mermaid diagrams, and nothing else — not on lock glyphs, which are drawn in the muted grey. The open note is *named* in the accent rather than sat on a block of grey: a selected-row highlight says "list box", and nothing else in this application talks that way.
 - Until an accent is chosen that theme is monochrome, falling back to its own end of the palette — black links on white, white on black. So each choice is a never-declared custom property, `--accent-light` and `--accent-dark`, written inline on the root element by Settings, and each theme resolves `--accent` from its own with a declared `--accent-*-base` as the `var()` fallback. An unset custom property falls through to that fallback, which is what makes a choice clearable and keeps theme resolution out of TypeScript entirely — each theme reads only its own property, so writing either is safe whatever is showing. Both bases are declared on `:root` rather than inside their theme blocks for two reasons: Settings shows a well per theme and must read the default for the theme that is *not* showing, and reading a declared property does not depend on how a browser computes a `var()` chain.
 - A preference stored before the accent was split is a single value, and is read back as dark mode's — what it originally meant. Losing someone's colour because the shape around it changed is a poor trade for a few lines.
 - The accent is reached everywhere else through a custom property, so the CodeMirror theme and the canvas renderer read it from CSS rather than naming a colour — and anything drawn rather than styled, the graph and mermaid, must redraw when the choice changes.
@@ -797,7 +807,9 @@ Rules:
 
 - The desktop always uses its bundled sidecar CLI; it never searches `PATH` or executes a user-supplied binary. The sidecar resolves to an absolute path beside the app's own executable, falling back to the staged development copy — never to a bare name a `PATH` lookup could satisfy.
 - Allowlist command names **and each command's argument keys**; never accept an arbitrary executable or raw shell string. Values become separate `argv` entries rather than being interpolated, so a vault path containing spaces, quotes, or a semicolon is only ever a path.
-- `mcp` is not an allowlisted command: starting a long-running server is the client's job, and the health check has its own path.
+- `mcp` is not an allowlisted command: starting a long-running server is the client's job, and the health check has its own path. `vaults`, `share`, and `unshare` are.
+- `unlock` gets a 120-second budget instead of the ordinary 30, since it waits on a person, and takes the vault's shared guard rather than the exclusive one, so autosave is not held up behind a prompt; the CLI's own write lock already serialises it.
+- `read`, `write`, `lock`, and `unlock` receive their `path` positionally, after `--`, so a note whose name begins with a dash is still only a path. The desktop always passes `--vault`, so its paths are vault-relative whatever the sidecar's working directory is (§7).
 - Keep process execution in Rust; grant React no general shell capability.
 - Spawn the CLI without a shell.
 - Pass Markdown through stdin.
@@ -813,6 +825,8 @@ Start with one CLI process per user action. Add a persistent process only if sta
 ### Headless CLI
 
 The headless artifact contains only the Rust CLI/MCP executable and notices.
+
+Heimdall is source-available under the Sustainable Use License 1.0 (`LICENSE`), not an open-source license. Every artifact carries `LICENSE`, and the desktop bundles it at `Heimdall.app/Contents/Resources/LICENSE`. The Cargo manifests name it with `license-file`, because it has no SPDX identifier.
 
 Installation options may include:
 
@@ -832,65 +846,78 @@ The desktop always invokes its own bundled sidecar. It performs no CLI discovery
 - The MCP config snippet generated by the Server screen references the sidecar's absolute path (or the user's own `heimdall` if they prefer and say so). Writing that path into a client's configuration is offered only by a shipped build (§15).
 - Never require administrator privileges for normal per-user installation.
 
+### Desktop distribution (macOS)
+
+The macOS desktop ships as `Heimdall_<version>_aarch64.dmg`, for Apple Silicon only (macOS 11 or later). An Intel or universal build is not produced.
+
+- `Heimdall.app` and its bundled `heimdall` sidecar are signed with a Developer ID Application identity, with the hardened runtime and a secure timestamp, and need no entitlements. The app is notarized, and its ticket is stapled.
+- The sidecar carries an embedded Info.plist (`__TEXT,__info_plist`, written by `crates/heimdall-cli/build.rs`) with the bundle identifier `io.slarsen.heimdall.cli` and usage descriptions for Documents, Desktop, Downloads, removable and network volumes, and File Provider. An AI client launches `heimdall mcp` itself, so macOS privacy protection judges that process on its own account rather than Heimdall.app's; a command-line tool with no Info.plist has no identity to be granted access under. Even with one, macOS does not prompt when an AI client launches it (verified with ChatGPT, 2026-10-01): a vault in a protected folder is refused until the user adds the CLI under Full Disk Access, or keeps the vault elsewhere. The plist gives that grant a stable identity to attach to. Changing the identifier resets any access already granted to it.
+- The DMG is signed, notarized, and stapled too, so Gatekeeper accepts it offline.
+- `npm run release:mac` (`apps/desktop/scripts/release-macos.mjs`) produces the release. It takes the identity and the App Store Connect API key from `APPLE_SIGNING_IDENTITY`, `APPLE_API_KEY`, `APPLE_API_ISSUER`, and `APPLE_API_KEY_PATH`, and none of them is stored in the repository. It refuses to finish unless every signature checks out, Gatekeeper reports the app as notarized, both tickets validate, the bundled CLI reports the app's version and `presence: "required"`, and the CLI is signed as `io.slarsen.heimdall.cli` with its Info.plist bound.
+- The app is meant to run from `/Applications`: the client configuration it writes names the sidecar's absolute path inside the bundle.
+- There is no separate CLI artifact on macOS. A user who wants `heimdall` on their `PATH` links the bundled sidecar, which keeps it signed and version-matched across upgrades. Linking is optional, so installation itself still needs no administrator privileges.
+- Uninstalling removes the app. The per-user application-data directory (§14) is left for the user to delete, because deleting it drops every lock rule and every shared vault; locked notes keep their immutable flag, and stay unwritable until unticked in Finder or unlocked by a reinstalled Heimdall. Vaults are never touched.
+
 ## 17. Testing strategy
 
 ### Core tests
 
-- `heimdall create` writes the full template (`aios/` and the template's example notes) into an empty or missing target, and copies no filesystem debris
-- `heimdall create` on a folder that already has content adds only missing `aios/` structure, never touches an existing file (hidden ones included), and adds no example notes
-- `aios/` exclusion from ordinary discovery and reads
-- Listing pagination via `cursor`/`next_cursor` continuation, deterministic ordering, and the entry-scan guard
-- Multi-file selection, line continuation, and byte/file caps
-- Protected memory and entry listing/reads for both kinds
+- `heimdall create` writes the template's example notes into an empty or missing target, copies no filesystem debris, and registers the vault
+- `heimdall create` on a folder that already has content writes nothing into it (hidden files included) and registers it
+- `read` of a folder: pagination via `cursor`/`next_cursor` continuation, deterministic ordering, and the entry-scan guard; hidden folders and `.trash/` never listed or readable
+- `read` of a note: line continuation, byte caps, and options for the other kind refused rather than ignored
 - UTF-8 boundaries and invalid UTF-8 errors
 - Traversal and symlink escape rejection
-- UTC timestamp collision handling (numeric suffixes)
-- Frontmatter ownership: `create_entry` rejects content beginning with a frontmatter block
 - Atomic writes and interrupted-write recovery
-- Main-memory 32 KiB boundary and 24 KiB advisory warning
-- Revision match, conflict, new-file null revision, and cross-process locking
+- `write`: revision match and conflict; an absent or null revision creates and never replaces; a missing folder is named rather than created; concurrent creates of one path leave exactly one winner
+- Locks under every spelling: another casing or Unicode normalization of a locked note or folder is refused for write, create, create-folder, move, and delete; a symlinked folder inside the vault is held to the folder it names for writes, moves into it, reads, listings, graph nodes, and relink; a rule is stored in the on-disk spelling, and one written in another spelling still locks; an unparseable locked rule locks the whole vault
+- Unlock needs a person: a refused confirmation changes neither rules nor flags and names the vault and path it asked about; nobody is asked about a path that does not exist; locking asks no one
+- File protection (macOS): a locked note refuses a plain write, a rename onto it, and an unlink from outside Heimdall; a folder lock flags every note beneath it and no folder, hidden file, or non-Markdown file; a note unlocked inside a locked folder stays writable; a flagged note with no rule — rules deleted, or another data directory — is still `LOCKED`; a refused unlock leaves the flag; `lock` never lifts a flag
+- Shared vaults: a folder name by default with a suffix on collision; a requested name in use is refused and names are validated; selection needs a name only when several are shared; an unshared vault, a made-up name, and a path are the same answer; unsharing leaves the registry alone
+- The operating system's own permission refusal is `IO_ERROR` with `details.reason: "os_permission"`, never `PATH_OUTSIDE_VAULT`
+- Locks: a folder lock reaches every depth; a note can be unlocked inside a locked folder until the folder is locked again; unlocking a folder unlocks notes locked on their own; a root lock locks everything; every refused operation — write, create, create-folder, move from, move into, move out of, delete, delete of a folder holding a locked note — is `LOCKED` with the right `locked_at`; relink skips locked notes and reports them; locking twice is not a change; only existing folders and notes can be locked; nothing is written into the vault
+- The registry: a subfolder finds its vault and its place in it; the nearest root wins for nested vaults; a sibling with a longer name is not inside; a symlinked working directory finds the real vault; a folder in no vault is `NOT_INITIALIZED`; registering twice records once; shell paths join the working directory, climb with `..` but never out of the vault, and accept an absolute path inside it
+- Cross-process write locking, and a lock racing writers never half applied
 
 ### CLI/MCP contract tests
 
-- Shell and MCP adapters produce equivalent domain outcomes.
+- Shell and MCP adapters produce equivalent domain outcomes for `read` and `write`, successes and failures alike (`NOT_FOUND`, `LIMIT_EXCEEDED`, `INVALID_INPUT`, `REVISION_CONFLICT`, `LOCKED`).
+- A write or a lock through one adapter is visible through the other.
 - Shell output retains its envelope.
-- MCP output uses typed `structuredContent` without the shell envelope.
-- Expected domain failures and protocol failures are distinguished.
+- MCP output uses typed `structuredContent` without the shell envelope, and every result has the fields its published output schema requires.
+- Expected domain failures and protocol failures are distinguished; arguments that violate a tool's schema still carry `INVALID_INPUT`.
 - stdout contains protocol/JSON only; stderr cannot corrupt it.
-- The configured vault boundary is enforced; no tool call can supply a vault path.
-- An uninitialized vault yields `NOT_INITIALIZED` with actionable guidance.
+- The only vault input is a shared vault's name: with several shared, a call without one is `INVALID_INPUT` listing the names; an unshared vault, a made-up name, and a filesystem path get the same `NOT_FOUND`; a write lands only in the vault named; an absolute path is read as a path inside it. Sharing and unsharing take effect on the next call. A fixed server answers only to its own name. A vault that cannot be opened leaves the server up, listing its tools, and is reported per call.
+- The instructions name the shared vaults and never a path, and rule out every other route to a locked note; `write`'s description repeats it; the annotations mark `read` read-only and `write` non-destructive.
+- Run from a folder inside a vault, `read`, `write`, `lock`, and `unlock` need no `--vault`, take the current folder by default, and resolve paths relative to it; from a folder in no vault they report `NOT_INITIALIZED` with guidance.
+- The MCP server advertises exactly `read` and `write` — not `lock`, `unlock`, or any client operation — checked both in-process and over a real stdio connection; calling `lock` or `unlock` over MCP is a protocol error and leaves the lock rules untouched; a lock set at the shell is reported by an MCP `read` and refuses an MCP `write`.
 
 ### Client operation tests
 
-- Saving a note requires the revision it was read at; a stale one is `REVISION_CONFLICT` and the file is untouched.
-- Omitting `expected_revision` is a caller mistake rather than a create.
-- Document writes cannot reach `aios/` in any casing, or any hidden folder.
 - Deletion lands in `.trash/`, keeps the original layout, takes a numeric suffix on collision, and disappears from listings.
-- The managed structure cannot be moved or deleted, and the vault still initializes afterwards.
-- A move refuses to cross the `aios/` boundary in either direction and refuses to leave Markdown behind.
-- An entry edit preserves `created_at` and `type`, accepts the user's own keys, and cannot move an entry between kinds.
+- A move refuses to leave Markdown behind, refuses a folder into itself, and never replaces an existing destination.
 - Link resolution follows the conventional wikilink rules, including the shortest-path tie-break, and is byte-for-byte deterministic across runs.
 - Every link span slices back to the target exactly as written, including past a byte-order mark, across a masked inline-code span, and for a percent-encoded Markdown destination. A span off by one byte corrupts a note, so this is checked directly rather than through its callers.
 - A rename carries a bare name, a vault path, and a note-relative link, each in its own written form; an alias, an anchor, an embed marker, a Markdown title and angle brackets all survive byte-identical.
 - A rename into a now-ambiguous basename escalates to the vault-relative path rather than retargeting the link at the wrong note.
 - A link in fenced or inline code is never rewritten; one in real frontmatter is. A note with no link to the moved path is not written at all, and `.trash/` is left alone.
 - A folder rename carries every link into it, and a moved note's own relative links are re-expressed from its new home.
-- An `aios/` entry's `created_at` and `type` round-trip through a rewrite.
 - A dry run reports the revision the real write produces and writes nothing; a second run over a settled vault changes nothing.
 - Links inside fenced code, inline code, and unterminated frontmatter produce no edges; links inside real frontmatter do.
-- The graph covers `aios/`, marks those nodes, carries no file content, and truncates at each cap while reporting what it left out.
-- The MCP server still advertises exactly eight tools, and none of the client operations appears among them — checked both in-process and over a real stdio connection.
+- The graph carries no file content, reports each node's lock state, and truncates at each cap while reporting what it left out.
 
 ### Desktop tests
 
 - The bundled sidecar is invoked (never a `PATH` binary), without a shell, with Markdown over stdin.
-- Setup creates a templated vault and initializes an existing vault correctly.
-- The Server screen generates a valid client config and the health check completes an MCP handshake.
+- Setup creates a templated vault and registers an existing folder without writing into it.
+- The Server screen generates the one valid client entry with no vault in it, lists vaults with their shared names and shares one only when asked, names the per-vault entries an update replaces, refuses a `heimdall` key that runs something else, warns about vaults in protected folders, labels ChatGPT's modes, and the health check completes an MCP handshake for the shared vaults.
+- Client configuration: installing replaces every per-vault Heimdall entry (JSON and TOML) with one, keeps every other server, setting, and comment, and backs the file up; reinstalling is one entry still.
+- Unlocking from the desktop: a cancelled prompt leaves the note locked with no dialog; one that could not be asked is explained; the bridge gives `unlock` its own timeout and the shared guard.
 - Structured failures remain actionable and do not crash the UI.
 - Theme, border, and typography rules render correctly in dark and light modes, and each theme's accent reaches the page only through a custom property. One theme's accent is never the other's.
 - No colour literal appears anywhere in the TypeScript source; the editor theme and the graph renderer read the stylesheet.
 - A whole note is assembled from bounded reads, restarts when the file changes mid-read, and compares bytes rather than characters when checking the result.
-- The file tree shows the protected tree, which only the link index can supply.
+- A locked note opens read-only; locking or unlocking the open note flips its editability without rebuilding the editor; the tree marks locked rows, offers lock and unlock, and neither drags nor drops onto a locked path; a `LOCKED` refusal is reported in a dialog.
 - Frontmatter round-trips without reformatting the keys the user did not touch.
 - Markdown renders as elements: raw HTML in a note is shown as text, never mounted.
 - Settings opens from the application menu event and closes from both the X and Escape.
@@ -899,9 +926,9 @@ The desktop always invokes its own bundled sidecar. It performs no CLI discovery
 
 For every supported operating system:
 
-1. Install only the CLI and exercise all headless operations, including `heimdall create`.
-2. Install the desktop app on a clean user account; create a vault, run the health check, and install a client config.
-3. Open an existing folder of notes and verify that its files, hidden ones included, remain unchanged after initialization.
+1. Install only the CLI and exercise all headless operations, including `heimdall create`, and `read`/`write`/`lock` from inside the vault without `--vault`.
+2. Install the desktop app on a clean user account; create a vault, share it, run the health check, and install a client config. From the client: the tools appear, a vault in Documents either prompts for access or is reported per call (never a missing server), a write lands in the vault named, a locked note is refused through MCP and by the operating system, and unlocking from the app asks for Touch ID.
+3. Open an existing folder of notes and verify that its files, hidden ones included, remain unchanged after it is registered and after notes in it are locked.
 4. Upgrade and uninstall; preserve all vault content.
 
 ## 18. Delivery phases
@@ -929,6 +956,8 @@ For every supported operating system:
 
 ### Phase 4 — Packaging
 
+Delivered for macOS on Apple Silicon (§16). Still open: an Intel or universal macOS build, a standalone CLI archive, and other platforms.
+
 - Produce signed CLI artifacts and desktop installers.
 - Bundle the correct CLI sidecar for each target triple.
 - Verify clean installation, upgrades, and uninstallation.
@@ -942,32 +971,37 @@ Delivered ahead of Phase 4, which does not block it.
 - Build the three-pane workspace, the Settings modal, and the application menu.
 - Leave the MCP surface unchanged.
 
+### Phase 6 — Read, write, and locks
+
+Delivered ahead of Phase 4, which does not block it.
+
+- Remove the protected `aios/` tree, memories, and entries; every visible note is ordinary content.
+- Collapse the agent-facing surface to `read` and `write`, on the shell and over MCP.
+- Add locks at vault, folder, and note level, with `lock` and `unlock` on the shell and in the desktop, and lock state reported over MCP.
+- Add the vault registry so the shell works from inside a vault with paths relative to the working directory.
+
 ## 19. Definition of done
 
 - The installed executable and MCP command are named `heimdall`.
-- The CLI works without the desktop application.
-- `heimdall create` produces the complete templated vault and safely initializes an existing folder of notes.
+- The CLI works without the desktop application, and from inside a vault needs no `--vault`.
+- `heimdall create` produces the templated vault and safely registers an existing folder of notes.
 - The desktop uses its bundled CLI for every domain operation and can install a working MCP client configuration.
 - No operation performs an unbounded vault read.
-- Ordinary reads cannot expose `aios/`.
-- Memories and both entry kinds can all be listed and read.
+- The MCP surface is exactly `read` and `write`; neither the lock controls nor any client operation is reachable through it.
 - MCP results use typed structured content rather than the shell envelope.
 - The MCP surface has no vault-path or vault-creation capability.
-- Stale complete-file memory writes fail with `REVISION_CONFLICT`.
-- The main memory respects the stable 32 KiB limit with a byte-based advisory warning.
+- Stale writes fail with `REVISION_CONFLICT`, and a write without a revision never replaces a note.
+- A locked note cannot be written, moved, or deleted by any surface, the desktop editor included, until it is unlocked.
 - No write can escape the vault or silently replace unrelated content.
-- The MCP surface is still exactly eight tools after the desktop editor ships, and no client operation is reachable through it.
 - No deletion unlinks user data.
+- Nothing of Heimdall's is left in a vault.
 - Vault data survives CLI/Desktop upgrades and uninstallation.
 
 ## 20. Decisions retained from the original requirements
 
-- The protected on-disk folder remains named `aios/`.
-- `write_memory` replaces a complete target; it does not patch or append.
-- Entry names begin with `YYYY-MM-DD_HH-mm-ss` (now derived from UTC rather than local time).
-- Generated summaries remain high-level and compressed.
-- Vault may contain non-Markdown files, but V1 exposes no attachment operation.
-- Conversations and notifications keep separate on-disk folders even though the tool surface is unified.
+- `write` replaces a complete note; it does not patch or append.
+- A vault may contain non-Markdown files, but no operation reads or writes them.
+- Deleted content goes to `.trash/` and is never unlinked.
 
 ## 21. Verified implementation references
 

@@ -13,7 +13,7 @@
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
-import { EditorState, StateField, type Extension } from "@codemirror/state";
+import { Compartment, EditorState, StateField, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, keymap, type DecorationSet } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 
@@ -148,17 +148,31 @@ export interface EditorConfig {
   /**
    * Whether the note can be written back.
    *
-   * A read-only note still gets an editor so its source can be read and copied,
-   * but not a caret: letting someone type a paragraph into an entry that
-   * `write_entry` will never be asked to save is worse than not offering it.
+   * A locked note still gets an editor so its source can be read and copied,
+   * but not a caret: letting someone type a paragraph into a note that `write`
+   * will refuse is worse than not offering it.
    */
   editable: boolean;
 }
 
+/**
+ * Where editability lives, so it can change without rebuilding the editor.
+ *
+ * Locking or unlocking the open note flips it. Recreating the view for that
+ * would throw away the undo history and the caret; reconfiguring a compartment
+ * keeps both. One compartment serves every view — its contents are held per
+ * state, so views never see each other's setting.
+ */
+export const editableCompartment = new Compartment();
+
+/** The facets that make a view writable, or read-only. */
+export function editability(editable: boolean): Extension {
+  return [EditorState.readOnly.of(!editable), EditorView.editable.of(editable)];
+}
+
 export function editorExtensions({ onChange, onSave, editable }: EditorConfig): Extension[] {
   return [
-    EditorState.readOnly.of(!editable),
-    EditorView.editable.of(editable),
+    editableCompartment.of(editability(editable)),
     history(),
     keymap.of([
       {

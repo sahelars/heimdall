@@ -10,7 +10,7 @@ import { useEffect, useRef, type MutableRefObject } from "react";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 
-import { editorExtensions } from "./editorExtensions";
+import { editability, editableCompartment, editorExtensions } from "./editorExtensions";
 
 interface SourceEditorProps {
   /** Identifies the open note, so switching notes rebuilds the state. */
@@ -65,9 +65,16 @@ export function SourceEditor({
       if (focusHandle) focusHandle.current = null;
     };
     // Rebuilt per note: a fresh document means a fresh undo history, which is
-    // what someone switching notes expects.
+    // what someone switching notes expects. Not per `editable` — locking the
+    // open note is reconfigured below, keeping the history and the caret.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, editable]);
+  }, [path]);
+
+  useEffect(() => {
+    const editor = view.current;
+    if (!editor || editor.state.readOnly === !editable) return;
+    editor.dispatch({ effects: editableCompartment.reconfigure(editability(editable)) });
+  }, [editable]);
 
   useEffect(() => {
     const editor = view.current;

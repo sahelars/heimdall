@@ -71,6 +71,15 @@
    */
   --accent-light-base: #000000;
   --accent-dark-base: #ffffff;
+
+  /*
+   * Each theme's ground, whatever theme is showing — for the accent wells,
+   * which preview a theme's accent on the background it will be spent on.
+   * Without them the white default for dark mode, drawn on a light page, is a
+   * white box on white and reads as empty.
+   */
+  --ground-light: #ffffff;
+  --ground-dark: #000000;
   --accent: var(--accent-light, var(--accent-light-base));
   --link: var(--accent);
 
@@ -609,6 +618,19 @@ pre {
   white-space: nowrap;
 }
 
+/*
+ * A locked row's padlock. Muted, and set here rather than inherited: the open
+ * note's row is written in the accent, and a lock is not one of the surfaces
+ * the accent is spent on.
+ */
+.tree__lock {
+  flex: none;
+  margin-left: auto;
+  line-height: 0;
+  color: var(--muted);
+  pointer-events: none;
+}
+
 .tree__note {
   padding: 6px 10px;
   color: var(--faint);
@@ -665,6 +687,69 @@ pre {
   color: var(--muted);
   border-color: var(--muted);
   cursor: not-allowed;
+}
+
+/*
+ * A switch: a hairline track, a square knob in ink, and the word for its state
+ * beside the knob, so "on" never depends on reading a position alone. As tall
+ * as a button, so it lines up in a row of them.
+ */
+.switch {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  font-family: inherit;
+  font-size: inherit;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+.switch:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.switch:focus-visible {
+  outline: 1px solid var(--fg);
+  outline-offset: 2px;
+}
+
+.switch:disabled {
+  color: var(--muted);
+  border-color: var(--muted);
+  cursor: not-allowed;
+}
+
+/* The knob travels a 28px track: left when off, right when on. */
+.switch__knob {
+  position: relative;
+  width: 28px;
+  height: 12px;
+  border: 1px solid var(--line);
+}
+
+.switch__knob::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 8px;
+  height: 8px;
+  background: var(--muted);
+}
+
+.switch--on .switch__knob::after {
+  left: auto;
+  right: 1px;
+  background: var(--fg);
+}
+
+.switch__state {
+  min-width: 2em;
+  text-align: left;
 }
 
 .button--primary {
@@ -760,7 +845,16 @@ pre {
 }
 
 .swatch::-webkit-color-swatch-wrapper {
-  padding: 0;
+  padding: 4px;
+}
+
+/* Each well on its own theme's ground, so its accent is seen as it will be. */
+.swatch--light::-webkit-color-swatch-wrapper {
+  background: var(--ground-light);
+}
+
+.swatch--dark::-webkit-color-swatch-wrapper {
+  background: var(--ground-dark);
 }
 
 .swatch::-webkit-color-swatch {
@@ -894,7 +988,11 @@ pre {
   color: var(--fg);
   padding: 0;
   width: min(780px, 92vw);
-  max-height: 86vh;
+  /*
+   * A fixed height, not a cap: sized to its content, the sheet jumped every
+   * time a tab changed. `vh` still shrinks it with the window.
+   */
+  height: 86vh;
   overflow: hidden;
 }
 
@@ -915,7 +1013,7 @@ pre {
 .modal__frame {
   display: flex;
   flex-direction: column;
-  max-height: 86vh;
+  height: 100%;
 }
 
 /*
@@ -934,6 +1032,8 @@ pre {
 }
 
 .modal__body {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: var(--pad);
   display: flex;
@@ -1379,9 +1479,10 @@ pre {
   background: var(--bg);
   color: var(--muted);
   border: 1px solid var(--line-soft);
-  font-family: inherit;
-  font-size: 11px;
-  padding: 4px 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
   cursor: pointer;
 }
 

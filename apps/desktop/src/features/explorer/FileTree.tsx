@@ -19,11 +19,11 @@
  * event is what made the earlier version stutter.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { parentOf } from "../../api/source";
-import { IconChevronDown, IconChevronRight } from "../../components/icons";
-import type { TreeNode } from "./tree";
+import { IconChevronDown, IconChevronRight, IconLock } from "../../components/icons";
+import { containsLocked, lockedFolders, type TreeNode } from "./tree";
 
 interface FileTreeProps {
   nodes: TreeNode[];
@@ -34,6 +34,8 @@ interface FileTreeProps {
   onContextMenu: (node: TreeNode, at: { x: number; y: number }) => void;
   /** Move `path` into `folder`. `folder` is `""` for the vault root. */
   onMove: (path: string, folder: string) => void;
+  /** Whether the vault root is locked, which makes it no place to drop. */
+  rootLocked?: boolean;
 }
 
 /** How far the pointer travels before a press becomes a drag. */
@@ -61,8 +63,16 @@ export function FileTree({
   onOpen,
   onContextMenu,
   onMove,
+  rootLocked = false,
 }: FileTreeProps) {
   const [drag, setDrag] = useState<Dragging | null>(null);
+  /**
+   * Whether a folder is read-only, so nothing can be dropped into it or dragged
+   * out of it. Held in a ref for the window listeners, which are installed once.
+   */
+  const locked = useMemo(() => lockedFolders(nodes), [nodes]);
+  const folderLocked = useRef<(folder: string) => boolean>(() => false);
+  folderLocked.current = (folder) => (folder === "" ? rootLocked : locked.has(folder));
   const candidate = useRef<{ path: string; label: string; x: number; y: number } | null>(null);
   /** Where the cursor is, for the label that follows it. */
   const pointer = useRef({ x: 0, y: 0 });
@@ -102,7 +112,7 @@ export function FileTree({
       pointer.current = { x: event.clientX, y: event.clientY };
       place(ghost.current, pointer.current);
 
-      const over = landingAt(event.clientX, event.clientY, start.path);
+      const over = landingAt(event.clientX, event.clientY, start.path, folderLocked.current);
       setDrag((previous) =>
         previous && previous.path === start.path && previous.over === over
           ? previous
@@ -118,7 +128,7 @@ export function FileTree({
         return;
       }
 
-      const folder = landingAt(event.clientX, event.clientY, start.path);
+      const folder = landingAt(event.clientX, event.clientY, start.path, folderLocked.current);
       setDrag(null);
       if (folder === null) return;
 
@@ -158,7 +168,7 @@ export function FileTree({
         aria-label="Vault"
         data-path=""
         data-kind="directory"
-        data-protected="false"
+        data-locked={rootLocked ? "true" : "false"}
       >
         {nodes.map((node) => (
           <TreeRow
@@ -175,7 +185,10 @@ export function FileTree({
             wasDragged={wasDrag}
             onPress={(pressed, event) => {
               wasDrag.current = false;
-              if (pressed.inAios) return;
+              // A locked path cannot move, nor can a folder with anything
+              // locked inside it, nor anything out of a locked folder — the
+              // CLI refuses all three, so the drag never starts.
+              if (containsLocked(pressed) || folderLocked.current(parentOf(pressed.path))) return;
               candidate.current = {
                 path: pressed.path,
                 label: pressed.label,
@@ -217,14 +230,19 @@ function place(element: HTMLElement | null, at: { x: number; y: number }): void 
  * Read off the row under the cursor: onto a folder means into it, onto a note
  * means into the folder that note lives in, and onto the tree itself — the
  * empty space below the rows — means the vault root. `null` when the point is
- * over nothing droppable: outside the tree, the protected subtree, or the
- * dragged folder itself.
+ * over nothing droppable: outside the tree, a locked folder (or a note inside
+ * one), or the dragged folder itself.
  */
-function landingAt(x: number, y: number, dragged: string): string | null {
+function landingAt(
+  x: number,
+  y: number,
+  dragged: string,
+  folderLocked: (folder: string) => boolean,
+): string | null {
   const row = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest<HTMLElement>(
     "[data-path]",
   );
-  if (!row || row.dataset.protected === "true") return null;
+  if (!row) return null;
 
   const path = row.dataset.path ?? "";
   // `parentOf` rather than slicing at `lastIndexOf("/")`: that returns -1 for a
@@ -234,10 +252,12 @@ function landingAt(x: number, y: number, dragged: string): string | null {
 
   // Dropping a folder inside itself would detach the subtree from the vault.
   if (folder === dragged || folder.startsWith(`${dragged}/`)) return null;
+  // A locked folder takes nothing new, whichever row in it was pointed at.
+  if (folderLocked(folder)) return null;
   return folder;
 }
 
-interface RowProps extends Omit<FileTreeProps, "nodes"> {
+interface RowProps extends Omit<FileTreeProps, "nodes" | "rootLocked"> {
   node: TreeNode;
   depth: number;
   dragging: Dragging | null;
@@ -283,7 +303,7 @@ function TreeRow({
         tabIndex={0}
         data-path={node.path}
         data-kind={node.kind}
-        data-protected={node.inAios ? "true" : "false"}
+        data-locked={node.locked ? "true" : "false"}
         aria-level={depth + 1}
         aria-expanded={isFolder ? isOpen : undefined}
         aria-current={isCurrent ? "page" : undefined}
@@ -323,6 +343,11 @@ function TreeRow({
           {isFolder ? isOpen ? <IconChevronDown size={12} /> : <IconChevronRight size={12} /> : null}
         </span>
         <span className="tree__label">{node.label}</span>
+        {node.locked ? (
+          <span className="tree__lock" title="Locked">
+            <IconLock size={11} />
+          </span>
+        ) : null}
       </div>
 
       {isFolder && isOpen && node.children.length > 0 ? (

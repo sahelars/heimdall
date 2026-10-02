@@ -11,17 +11,19 @@ import { describe, expect, it } from "vitest";
 
 import {
   applyAccents,
+  defaultAccent,
   isAccent,
   isAccentsPreference,
   NO_ACCENTS,
-  resolvedAccent,
   toAccents,
+  toHex,
 } from "./accent";
 
-function root(): HTMLElement {
+/** An element declaring both bases — spelled as the source, or as the build ships them. */
+function root(light = "#000000", dark = "#ffffff"): HTMLElement {
   const element = document.createElement("div");
-  element.style.setProperty("--accent-light-base", "#000000");
-  element.style.setProperty("--accent-dark-base", "#ffffff");
+  element.style.setProperty("--accent-light-base", light);
+  element.style.setProperty("--accent-dark-base", dark);
   document.body.appendChild(element);
   return element;
 }
@@ -75,12 +77,18 @@ describe("accent", () => {
     expect(element.style.getPropertyValue("--accent-dark")).toBe("#00ff00");
   });
 
-  it("resolves to the choice for that theme when there is one", () => {
-    const element = root();
-    applyAccents(element, { light: "#ff8800", dark: "#00ff00" });
-
-    expect(resolvedAccent(element, "light")).toBe("#ff8800");
-    expect(resolvedAccent(element, "dark")).toBe("#00ff00");
+  it("reads any colour form a stylesheet arrives in as six-digit hex", () => {
+    // The build's minifier writes #000000 as #000; a browser may answer rgb().
+    expect(toHex("#000")).toBe("#000000");
+    expect(toHex("#FFF")).toBe("#ffffff");
+    expect(toHex("  #abc ")).toBe("#aabbcc");
+    expect(toHex("#00FF88")).toBe("#00ff88");
+    expect(toHex("rgb(0, 0, 0)")).toBe("#000000");
+    expect(toHex("rgb(255 255 255)")).toBe("#ffffff");
+    expect(toHex("rgba(255, 136, 0, 1)")).toBe("#ff8800");
+    for (const junk of ["", "black", "#ff", "#ff88001", "rgb(256, 0, 0)", "var(--x)"]) {
+      expect(toHex(junk), junk).toBeNull();
+    }
   });
 
   it("falls back to each theme's own end of the palette", () => {
@@ -89,15 +97,31 @@ describe("accent", () => {
     // two must resolve to opposite ends rather than to one colour.
     const element = root();
 
-    expect(resolvedAccent(element, "light")).toBe("#000000");
-    expect(resolvedAccent(element, "dark")).toBe("#ffffff");
+    expect(defaultAccent(element, "light")).toBe("#000000");
+    expect(defaultAccent(element, "dark")).toBe("#ffffff");
   });
 
-  it("answers for the theme that is not showing, so both wells can be filled", () => {
-    const element = root();
-    applyAccents(element, { light: null, dark: "#00ff00" });
+  it("reads the defaults as the production build ships them", () => {
+    // The regression: the minifier shortened both bases to three digits, which
+    // the six-digit check rejected, and both wells came up empty in the app.
+    const element = root("#000", "#fff");
 
-    expect(resolvedAccent(element, "light")).toBe("#000000");
-    expect(resolvedAccent(element, "dark")).toBe("#00ff00");
+    expect(defaultAccent(element, "light")).toBe("#000000");
+    expect(defaultAccent(element, "dark")).toBe("#ffffff");
+  });
+
+  it("answers with the default even while a choice is still on the document", () => {
+    // `applyAccents` runs after the render that cleared a choice, so a well
+    // reading the chosen property would show the colour just cleared. The
+    // default is read from the base alone; a choice comes from props.
+    const element = root();
+    applyAccents(element, { light: "#ff8800", dark: "#00ff00" });
+
+    expect(defaultAccent(element, "light")).toBe("#000000");
+    expect(defaultAccent(element, "dark")).toBe("#ffffff");
+  });
+
+  it("answers nothing where no stylesheet is loaded", () => {
+    expect(defaultAccent(document.createElement("div"), "light")).toBe("");
   });
 });

@@ -1,8 +1,7 @@
-//! `list_documents` — bounded discovery of ordinary notes (SPEC §8, §10).
+//! The folder half of `read`: bounded discovery of a vault's notes (SPEC §8).
 //!
 //! Results are metadata only and never include content or a revision: hashing
-//! during a listing would read every file. The protected `aios/` tree is
-//! excluded at every depth.
+//! during a listing would read every file.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -10,22 +9,10 @@ use serde::{Deserialize, Serialize};
 use crate::commands::types::DocumentKind;
 use crate::errors::{Error, Result};
 use crate::limits;
+use crate::notelocks::Locks;
 use crate::paths::{self, RelPath};
 use crate::storage::Vault;
 use crate::timestamps;
-
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ListDocumentsRequest {
-    /// Directory to list, relative to the vault root. Defaults to the root.
-    pub path: Option<String>,
-    #[serde(default)]
-    pub recursive: bool,
-    pub max_depth: Option<u32>,
-    /// The `next_cursor` of a previous page: listing resumes strictly after it.
-    pub cursor: Option<String>,
-    pub limit: Option<u32>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DocumentEntry {
@@ -35,10 +22,13 @@ pub struct DocumentEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
     pub modified_at: String,
+    /// Whether this note or folder is locked (read-only).
+    pub locked: bool,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct ListDocumentsResponse {
+/// One page of a folder.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Listing {
     pub entries: Vec<DocumentEntry>,
     /// Pass back as `cursor` to continue. `None` means the listing is finished.
     pub next_cursor: Option<String>,
@@ -46,17 +36,26 @@ pub struct ListDocumentsResponse {
     pub scan_guard_hit: bool,
 }
 
-pub fn list_documents(
-    vault: &Vault,
-    request: ListDocumentsRequest,
-) -> Result<ListDocumentsResponse> {
-    vault.ensure_initialized()?;
+/// How far and from where a folder read walks.
+pub(crate) struct ListingOptions<'a> {
+    pub recursive: bool,
+    pub max_depth: Option<u32>,
+    pub cursor: Option<&'a str>,
+    pub limit: Option<u32>,
+}
 
-    let limit = limits::resolve_limit(request.limit)?;
-    let max_level = if request.recursive {
-        limits::resolve_max_depth(request.max_depth)?
+/// List `root`, which the caller has already established is a directory.
+pub(crate) fn list(
+    vault: &Vault,
+    root: &RelPath,
+    options: ListingOptions<'_>,
+    locks: &Locks<'_>,
+) -> Result<Listing> {
+    let limit = limits::resolve_limit(options.limit)?;
+    let max_level = if options.recursive {
+        limits::resolve_max_depth(options.max_depth)?
     } else {
-        if request.max_depth.is_some() {
+        if options.max_depth.is_some() {
             return Err(Error::invalid_input(
                 "max_depth applies only to a recursive listing; set recursive to true",
             )
@@ -65,22 +64,7 @@ pub fn list_documents(
         1
     };
 
-    let root = match &request.path {
-        Some(raw) => RelPath::parse(raw)?,
-        None => RelPath::root(),
-    };
-    root.deny_aios()?;
-    if !vault.is_dir(&root) {
-        return Err(if vault.exists(&root) {
-            Error::invalid_input(format!("\"{root}\" is a document, not a directory"))
-                .with_detail("path", root.as_str())
-        } else {
-            Error::not_found(format!("directory \"{root}\" does not exist"))
-                .with_detail("path", root.as_str())
-        });
-    }
-
-    let cursor = match &request.cursor {
+    let cursor = match options.cursor {
         // A cursor is just the last path returned, so it validates as one.
         Some(raw) => Some(
             RelPath::parse(raw)
@@ -95,13 +79,14 @@ pub fn list_documents(
 
     let mut walk = Walk {
         vault,
+        locks,
         cursor: cursor.as_deref(),
         max_level,
         examined: 0,
         guard_hit: false,
         found: Vec::new(),
     };
-    walk.visit(&root, 1)?;
+    walk.visit(root, 1)?;
 
     let Walk {
         guard_hit,
@@ -122,7 +107,7 @@ pub fn list_documents(
         _ => None,
     };
 
-    Ok(ListDocumentsResponse {
+    Ok(Listing {
         entries: found,
         next_cursor,
         scan_guard_hit: guard_hit,
@@ -131,6 +116,7 @@ pub fn list_documents(
 
 struct Walk<'a> {
     vault: &'a Vault,
+    locks: &'a Locks<'a>,
     cursor: Option<&'a str>,
     max_level: usize,
     examined: usize,
@@ -143,16 +129,15 @@ impl Walk<'_> {
         if self.guard_hit {
             return Ok(());
         }
+        // Entries come back spelled as stored, so resolving the folder once
+        // gives every entry its real spelling for the lock check.
+        let real_dir = self.locks.real(dir)?;
         for name in self.vault.child_names(dir)? {
             if !paths::is_listable(&name) {
                 continue;
             }
 
             let path = dir.join(&name);
-            // `aios/` is protected at every depth, not just at the root.
-            if path.is_in_aios() {
-                continue;
-            }
 
             // Names alone answer most of the question, so entries this call has
             // no use for cost nothing: no metadata, no scan budget.
@@ -177,7 +162,8 @@ impl Walk<'_> {
                     return Ok(());
                 }
                 if past_cursor {
-                    self.push(&path, DocumentKind::Directory, None, &child.meta);
+                    let locked = self.locks.is_locked_entry(dir, &real_dir, &name);
+                    self.push(&path, DocumentKind::Directory, None, &child.meta, locked);
                 }
                 if may_descend {
                     self.visit(&path, level + 1)?;
@@ -186,16 +172,18 @@ impl Walk<'_> {
                     }
                 }
             } else if is_markdown && past_cursor {
-                // Vaults may hold arbitrary files, but V1 exposes no operation
-                // that can read one, so listing them would be a dead end.
+                // Vaults may hold arbitrary files, but no operation can read
+                // one, so listing them would be a dead end.
                 if !self.charge() {
                     return Ok(());
                 }
+                let locked = self.locks.is_locked_entry(dir, &real_dir, &name);
                 self.push(
                     &path,
                     DocumentKind::Document,
                     Some(child.meta.size_bytes),
                     &child.meta,
+                    locked,
                 );
             }
         }
@@ -222,12 +210,14 @@ impl Walk<'_> {
         kind: DocumentKind,
         size_bytes: Option<u64>,
         meta: &crate::storage::FileMeta,
+        locked: bool,
     ) {
         self.found.push(DocumentEntry {
             path: path.to_string(),
             kind,
             size_bytes,
             modified_at: timestamps::to_rfc3339(meta.modified_at),
+            locked,
         });
     }
 
@@ -249,14 +239,13 @@ impl Walk<'_> {
 mod tests {
     use super::*;
     use crate::errors::ErrorCode;
-    use crate::template;
+    use crate::commands::read::{read, ReadRequest};
     use camino::Utf8PathBuf;
 
     fn vault() -> (tempfile::TempDir, Vault) {
         let dir = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
         let vault = Vault::open(&root).unwrap();
-        template::scaffold_aios_only(&vault).unwrap();
         (dir, vault)
     }
 
@@ -266,11 +255,15 @@ mod tests {
         vault.atomic_write(&path, content).unwrap();
     }
 
-    fn list(vault: &Vault, request: ListDocumentsRequest) -> ListDocumentsResponse {
-        list_documents(vault, request).unwrap()
+    fn read_folder(vault: &Vault, request: ReadRequest) -> Result<Listing> {
+        read(vault, request).map(|response| response.listing.expect("a folder read lists"))
     }
 
-    fn paths_of(response: &ListDocumentsResponse) -> Vec<&str> {
+    fn list(vault: &Vault, request: ReadRequest) -> Listing {
+        read_folder(vault, request).unwrap()
+    }
+
+    fn paths_of(response: &Listing) -> Vec<&str> {
         response.entries.iter().map(|e| e.path.as_str()).collect()
     }
 
@@ -280,7 +273,7 @@ mod tests {
         write(&vault, "top.md", b"x");
         write(&vault, "projects/deep.md", b"x");
 
-        let response = list(&vault, ListDocumentsRequest::default());
+        let response = list(&vault, ReadRequest::default());
         assert_eq!(paths_of(&response), ["projects", "top.md"]);
         assert_eq!(response.entries[0].kind, DocumentKind::Directory);
         assert_eq!(response.entries[1].size_bytes, Some(1));
@@ -293,7 +286,8 @@ mod tests {
 
         let deep = list(
             &vault,
-            ListDocumentsRequest {
+            ReadRequest {
+                vault: None,
                 recursive: true,
                 max_depth: Some(5),
                 ..Default::default()
@@ -303,46 +297,14 @@ mod tests {
 
         let shallow = list(
             &vault,
-            ListDocumentsRequest {
+            ReadRequest {
+                vault: None,
                 recursive: true,
                 max_depth: Some(2),
                 ..Default::default()
             },
         );
         assert_eq!(paths_of(&shallow), ["a", "a/b"]);
-    }
-
-    #[test]
-    fn protected_content_is_invisible_at_every_depth() {
-        let (_tmp, vault) = vault();
-        write(&vault, "notes.md", b"x");
-
-        let response = list(
-            &vault,
-            ListDocumentsRequest {
-                recursive: true,
-                max_depth: Some(16),
-                ..Default::default()
-            },
-        );
-        assert!(
-            !paths_of(&response).iter().any(|p| p.starts_with("aios")),
-            "{:?}",
-            paths_of(&response)
-        );
-
-        // Asking for it directly is a miss, in either casing.
-        for raw in ["aios", "AIOS", "aios/memories"] {
-            let err = list_documents(
-                &vault,
-                ListDocumentsRequest {
-                    path: Some(raw.to_string()),
-                    ..Default::default()
-                },
-            )
-            .unwrap_err();
-            assert_eq!(err.code, ErrorCode::NotFound, "{raw}");
-        }
     }
 
     #[test]
@@ -354,7 +316,7 @@ mod tests {
         write(&vault, ".hidden.md", b"x");
         write(&vault, ".DS_Store", b"x");
 
-        let response = list(&vault, ListDocumentsRequest::default());
+        let response = list(&vault, ReadRequest::default());
         assert_eq!(paths_of(&response), ["note.md"]);
     }
 
@@ -370,7 +332,8 @@ mod tests {
         loop {
             let response = list(
                 &vault,
-                ListDocumentsRequest {
+                ReadRequest {
+                    vault: None,
                     cursor: cursor.clone(),
                     limit: Some(3),
                     ..Default::default()
@@ -398,7 +361,8 @@ mod tests {
 
         let all = list(
             &vault,
-            ListDocumentsRequest {
+            ReadRequest {
+                vault: None,
                 recursive: true,
                 ..Default::default()
             },
@@ -413,7 +377,8 @@ mod tests {
         loop {
             let page = list(
                 &vault,
-                ListDocumentsRequest {
+                ReadRequest {
+                    vault: None,
                     recursive: true,
                     cursor: cursor.clone(),
                     limit: Some(2),
@@ -434,7 +399,7 @@ mod tests {
         let (_tmp, vault) = vault();
         write(&vault, "only.md", b"x");
 
-        let response = list(&vault, ListDocumentsRequest::default());
+        let response = list(&vault, ReadRequest::default());
         assert_eq!(response.next_cursor, None);
         assert!(!response.scan_guard_hit);
     }
@@ -448,7 +413,8 @@ mod tests {
 
         let response = list(
             &vault,
-            ListDocumentsRequest {
+            ReadRequest {
+                vault: None,
                 recursive: true,
                 ..Default::default()
             },
@@ -459,9 +425,10 @@ mod tests {
     #[test]
     fn a_malformed_cursor_is_rejected() {
         let (_tmp, vault) = vault();
-        let err = list_documents(
+        let err = read_folder(
             &vault,
-            ListDocumentsRequest {
+            ReadRequest {
+                vault: None,
                 cursor: Some("../escape".to_string()),
                 ..Default::default()
             },
@@ -471,13 +438,14 @@ mod tests {
     }
 
     #[test]
-    fn listing_a_missing_or_non_directory_path_is_reported_precisely() {
+    fn listing_a_missing_path_is_not_found() {
         let (_tmp, vault) = vault();
         write(&vault, "note.md", b"x");
 
-        let missing = list_documents(
+        let missing = read_folder(
             &vault,
-            ListDocumentsRequest {
+            ReadRequest {
+                vault: None,
                 path: Some("nowhere".to_string()),
                 ..Default::default()
             },
@@ -485,23 +453,15 @@ mod tests {
         .unwrap_err();
         assert_eq!(missing.code, ErrorCode::NotFound);
 
-        let a_file = list_documents(
-            &vault,
-            ListDocumentsRequest {
-                path: Some("note.md".to_string()),
-                ..Default::default()
-            },
-        )
-        .unwrap_err();
-        assert_eq!(a_file.code, ErrorCode::InvalidInput);
     }
 
     #[test]
     fn max_depth_without_recursive_is_a_caller_mistake() {
         let (_tmp, vault) = vault();
-        let err = list_documents(
+        let err = read_folder(
             &vault,
-            ListDocumentsRequest {
+            ReadRequest {
+                vault: None,
                 max_depth: Some(3),
                 ..Default::default()
             },
@@ -515,7 +475,7 @@ mod tests {
         let (_tmp, vault) = vault();
         write(&vault, "note.md", b"secret content");
 
-        let response = list(&vault, ListDocumentsRequest::default());
+        let response = list(&vault, ReadRequest::default());
         let json = serde_json::to_value(&response.entries[0]).unwrap();
         assert!(json.get("content").is_none());
         assert!(json.get("revision").is_none());

@@ -8,12 +8,17 @@
 //! into it would leave a command that half succeeded with no way to say which
 //! half. Keeping them apart means a move either happened or did not, and what
 //! the rewrite did afterwards is reported on its own terms.
+//!
+//! A lock fixes a note's place as well as its bytes, so nothing locked moves:
+//! not the path, not anything inside it, and not into or out of a locked
+//! folder. Lock rules travel with what moved.
 
 use serde::{Deserialize, Serialize};
 
 use crate::commands::types::DocumentKind;
 use crate::errors::{Error, Result};
-use crate::paths::{self, RelPath};
+use crate::notelocks::Locks;
+use crate::paths::RelPath;
 use crate::storage::Vault;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -31,8 +36,6 @@ pub struct MovePathResponse {
 }
 
 pub fn move_path(vault: &Vault, request: MovePathRequest) -> Result<MovePathResponse> {
-    vault.ensure_initialized()?;
-
     let from = validate(&request.from, "from")?;
     let to = validate(&request.to, "to")?;
 
@@ -47,28 +50,18 @@ pub fn move_path(vault: &Vault, request: MovePathRequest) -> Result<MovePathResp
             .with_detail("path", from.as_str()));
     }
 
-    // Managed structure has to stay where `ensure_initialized` looks for it, or
-    // the next call finds a vault that no longer opens. Note this also covers
-    // `aios/` itself, and therefore anything containing it.
-    if paths::is_structural(&from) {
-        return Err(Error::invalid_input(format!(
-            "\"{from}\" is part of the managed vault structure and cannot be moved"
-        ))
-        .with_detail("path", from.as_str()));
-    }
-
     // Moving a folder inside itself detaches the subtree from the vault. The
     // filesystem reports it as EINVAL, which would surface as an opaque
     // IO_ERROR, so name it here.
-    if is_dir && is_inside(&to, &from) {
+    if is_dir && to.is_within(&from) {
         return Err(Error::invalid_input(format!(
             "\"{to}\" is inside \"{from}\" and cannot be its own destination"
         ))
         .with_detail("path", to.as_str()));
     }
 
-    // A note keeps its extension across a move. Every read operation reaches
-    // only `.md` files, so renaming one to `notes.txt` would make it unreachable
+    // A note keeps its extension across a move. `read` reaches only `.md`
+    // files, so renaming one to `notes.txt` would make it unreachable
     // through Heimdall without ever deleting it.
     if !is_dir && !to.is_markdown() {
         return Err(Error::invalid_input(format!(
@@ -93,7 +86,24 @@ pub fn move_path(vault: &Vault, request: MovePathRequest) -> Result<MovePathResp
 
     // The write lock is what makes "does not already exist" and "rename onto it"
     // one decision rather than two.
-    vault.with_write_lock(&to, || vault.rename_no_replace(&from, &to))?;
+    vault.with_write_lock(&to, || {
+        let mut locks = Locks::load(vault)?;
+        locks.deny_subtree(&from)?;
+        locks.deny_change_in(&from.parent(), &from)?;
+        locks.deny_change_in(&parent, &to)?;
+
+        // Rules are kept under real spellings, so they are carried between
+        // real spellings — worked out before the rename, while `from` exists.
+        let real_from = locks.real(&from)?;
+        let real_to = locks.real(&to)?;
+        vault.rename_no_replace(&from, &to)?;
+        let before = locks.rules().clone();
+        locks.rules_mut().carry(&real_from, &real_to);
+        if *locks.rules() != before {
+            locks.save()?;
+        }
+        Ok(())
+    })?;
 
     Ok(MovePathResponse {
         from: from.to_string(),
@@ -106,40 +116,9 @@ pub fn move_path(vault: &Vault, request: MovePathRequest) -> Result<MovePathResp
     })
 }
 
-/// Both ends of a move must be ordinary, visible vault content.
-///
-/// Crossing the `aios/` boundary is refused in **both** directions, and that is
-/// the load-bearing rule. Dropping a note into `aios/conversations/` would
-/// manufacture a file the entry contract governs — Heimdall-owned frontmatter, a
-/// UTC filename `parse_entry_stem` can read, a `type` matching the folder (SPEC
-/// §6) — with none of those properties, and `list_entries` would then report a
-/// `created_at` silently falling back to the file's mtime. Moving one out turns
-/// managed content into a document that nothing rewrites. A rename cannot
-/// perform either transformation, so it must not pretend to.
+/// Both ends of a move must be visible vault content.
 fn validate(raw: &str, parameter: &str) -> Result<RelPath> {
     let path = RelPath::parse_file(raw).map_err(|err| err.with_detail("parameter", parameter))?;
-    if path.is_in_aios() {
-        return Err(Error::invalid_input(format!(
-            "\"{path}\" is inside \"aios/\"; protected content cannot be moved in or out of the \
-             managed tree"
-        ))
-        .with_detail("parameter", parameter)
-        .with_detail("path", path.as_str()));
-    }
     path.deny_hidden()?;
     Ok(path)
-}
-
-/// Whether `inner` lies at or beneath `outer`, compared by whole components.
-fn is_inside(inner: &RelPath, outer: &RelPath) -> bool {
-    let mut outer_components = outer.components();
-    let mut inner_components = inner.components();
-    loop {
-        match (outer_components.next(), inner_components.next()) {
-            (None, _) => return true,
-            (Some(_), None) => return false,
-            (Some(a), Some(b)) if a == b => continue,
-            (Some(_), Some(_)) => return false,
-        }
-    }
 }

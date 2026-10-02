@@ -32,27 +32,26 @@ async fn invoke_cli(command: String, request: Value, stdin: Option<String>) -> C
     blocking(move || cli_bridge::run(&command, &request, stdin.as_deref())).await
 }
 
-/// Launch the MCP server for a vault and complete a real handshake.
+/// Launch the MCP server for the shared vaults and complete a real handshake.
 #[tauri::command]
-async fn health_check(vault: String) -> HealthCheck {
-    blocking(move || cli_bridge::health_check(&vault)).await
+async fn health_check() -> HealthCheck {
+    blocking(cli_bridge::health_check).await
 }
 
 /// The MCP client configuration files this application can write to.
 #[tauri::command]
-async fn list_client_configs(vault: String) -> Vec<KnownClient> {
-    blocking(move || client_config::known_clients(&vault)).await
+async fn list_client_configs() -> Vec<KnownClient> {
+    blocking(client_config::known_clients).await
 }
 
-/// Write the server entry into one known client's configuration.
+/// Write the one server entry into a known client's configuration.
 ///
 /// Only reachable for a client named in [`list_client_configs`], and only ever
-/// called after the user asks for it (SPEC §15).
+/// called after the user asks for it (SPEC §15). The vaults its older
+/// per-vault entries served are shared first; if any of those cannot be
+/// shared, the configuration is left exactly as it was.
 #[tauri::command]
-async fn install_client_config(
-    client_id: String,
-    vault: String,
-) -> Result<InstallOutcome, DomainError> {
+async fn install_client_config(client_id: String) -> Result<InstallOutcome, DomainError> {
     blocking(move || {
         let command = cli_bridge::sidecar_path();
         if !command.is_file() {
@@ -61,9 +60,74 @@ async fn install_client_config(
                 "the bundled heimdall command line tool is missing, so there is nothing to point a client at",
             ));
         }
-        client_config::install(&client_id, &vault, &command, cli_bridge::sidecar_origin())
+        let origin = cli_bridge::sidecar_origin();
+        if origin.is_development() {
+            // Refused before sharing anything, for the reason `install` gives.
+            return client_config::install(&client_id, &command, origin);
+        }
+        for vault in client_config::legacy_vaults(&client_id)? {
+            // A folder that is gone has nothing left to share.
+            if !std::path::Path::new(&vault).is_dir() {
+                continue;
+            }
+            let shared = cli_bridge::run("share", &serde_json::json!({ "vault": vault }), None);
+            if let Some(error) = shared.error {
+                return Err(error);
+            }
+        }
+        client_config::install(&client_id, &command, origin)
     })
     .await
+}
+
+/// System Settings, opened at Privacy & Security › Full Disk Access.
+///
+/// An AI client launches `heimdall mcp` itself, and macOS judges that process
+/// on its own account; for a vault in Documents, Desktop, Downloads, or iCloud
+/// Drive it is refused without a prompt (SPEC §16). Adding the bundled CLI
+/// here is the fix, so the Server screen takes the user straight to it.
+pub const PRIVACY_SETTINGS_URL: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
+
+/// The one program both commands below run, by absolute path: no `PATH`
+/// lookup and no shell.
+const OPEN: &str = "/usr/bin/open";
+
+/// Open System Settings at Full Disk Access. Takes nothing from React.
+#[tauri::command]
+async fn open_privacy_settings() -> Result<(), DomainError> {
+    blocking(|| launch(&[PRIVACY_SETTINGS_URL])).await
+}
+
+/// Select the bundled CLI in Finder, so it can be dragged into Full Disk
+/// Access. Takes nothing from React: the path is the sidecar this app runs.
+#[tauri::command]
+async fn reveal_sidecar() -> Result<(), DomainError> {
+    blocking(|| {
+        let sidecar = cli_bridge::sidecar_path();
+        if !sidecar.is_file() {
+            return Err(DomainError::new(
+                "IO_ERROR",
+                "the bundled heimdall command line tool is missing from this application",
+            ));
+        }
+        launch(&["-R".as_ref(), sidecar.as_os_str()])
+    })
+    .await
+}
+
+fn launch<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Result<(), DomainError> {
+    std::process::Command::new(OPEN)
+        .args(args)
+        .status()
+        .map_err(|err| DomainError::new("IO_ERROR", format!("could not open it: {}", err.kind())))
+        .and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(DomainError::new("IO_ERROR", "macOS could not open it"))
+            }
+        })
 }
 
 /// Run blocking work off the UI thread.
@@ -98,7 +162,23 @@ pub fn run() {
             health_check,
             list_client_configs,
             install_client_config,
+            open_privacy_settings,
+            reveal_sidecar,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Heimdall");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_privacy_link_is_fixed_and_points_at_full_disk_access() {
+        // Nothing React sends reaches `open`: the URL is a constant, and both
+        // commands take no arguments at all.
+        assert!(PRIVACY_SETTINGS_URL.starts_with("x-apple.systempreferences:"));
+        assert!(PRIVACY_SETTINGS_URL.ends_with("Privacy_AllFiles"));
+        assert_eq!(OPEN, "/usr/bin/open");
+    }
 }

@@ -12,7 +12,7 @@ use serde_json::json;
 use heimdall_desktop_lib::cli_bridge::{self, sidecar_path};
 
 fn staged() -> PathBuf {
-    isolate_lock_dir();
+    isolate_data_dir();
     let path = sidecar_path();
     assert!(
         path.is_file(),
@@ -26,13 +26,16 @@ fn staged() -> PathBuf {
 /// The bridge spawns the CLI without a shell and without touching the
 /// environment, so the child inherits this process's. Setting it once, behind a
 /// `OnceLock`, is what makes that safe to do from tests running in parallel.
-fn isolate_lock_dir() {
+fn isolate_data_dir() {
     static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     ONCE.get_or_init(|| {
         std::env::set_var(
-            "HEIMDALL_LOCK_DIR",
-            std::env::temp_dir().join("heimdall-test-locks"),
+            "HEIMDALL_DATA_DIR",
+            std::env::temp_dir().join("heimdall-test-data"),
         );
+        // Answers the unlock prompt. Only a debug sidecar listens, and only
+        // for a vault under the temp directory, which every vault here is.
+        std::env::set_var("HEIMDALL_TEST_PRESENCE", "confirm");
     });
 }
 
@@ -62,12 +65,12 @@ fn the_bundled_sidecar_creates_a_templated_vault() {
 
     // The vault is real, not just a reported success.
     let vault = dir.path().join("demo");
-    assert!(vault.join("aios/memories/memory.md").is_file());
     assert!(vault.join("ideas/hello_world.md").is_file());
+    assert!(!vault.join("aios").exists());
 }
 
 #[test]
-fn initializing_an_existing_vault_leaves_its_notes_alone() {
+fn registering_an_existing_folder_leaves_its_notes_alone() {
     staged();
     let dir = temp_root();
     let vault = dir.path().join("existing");
@@ -82,7 +85,7 @@ fn initializing_an_existing_vault_leaves_its_notes_alone() {
     );
 
     assert!(response.ok, "{response:?}");
-    assert_eq!(response.data.unwrap()["mode"], "initialized");
+    assert_eq!(response.data.unwrap()["mode"], "registered");
     assert_eq!(std::fs::read(vault.join("note.md")).unwrap(), b"my content");
     assert_eq!(
         std::fs::read(vault.join(".config/app.json")).unwrap(),
@@ -100,21 +103,22 @@ fn markdown_travels_through_stdin_and_arrives_unchanged() {
     cli_bridge::run("create", &json!({ "name": "demo", "root": root }), None);
     let vault = dir.path().join("demo").to_str().unwrap().to_string();
 
-    let read = cli_bridge::run("read-memory", &json!({ "vault": vault }), None);
-    let revision = read.data.unwrap()["revision"].as_str().unwrap().to_string();
+    let note = "projects/my_project.md";
+    let read = cli_bridge::run("read", &json!({ "vault": vault, "path": note }), None);
+    let revision = read.data.unwrap()["document"]["revision"].as_str().unwrap().to_string();
 
     // Quotes, backticks, `$`, and newlines all survive because content is piped
     // rather than passed as an argument (SPEC §11).
-    let content = "# Memory\n\n`rm -rf $HOME` \"quoted\" 'single' $(echo hi)\n\n- 🌍\n";
+    let content = "# Plan\n\n`rm -rf $HOME` \"quoted\" 'single' $(echo hi)\n\n- 🌍\n";
     let written = cli_bridge::run(
-        "write-memory",
-        &json!({ "vault": vault, "expected-revision": revision }),
+        "write",
+        &json!({ "vault": vault, "path": note, "expected-revision": revision }),
         Some(content),
     );
     assert!(written.ok, "{written:?}");
 
-    let back = cli_bridge::run("read-memory", &json!({ "vault": vault }), None);
-    assert_eq!(back.data.unwrap()["content"], content);
+    let back = cli_bridge::run("read", &json!({ "vault": vault, "path": note }), None);
+    assert_eq!(back.data.unwrap()["document"]["content"], content);
 }
 
 #[test]
@@ -197,18 +201,18 @@ fn a_domain_failure_arrives_structured_rather_than_as_a_crash() {
     staged();
     let dir = temp_root();
 
-    // An uninitialized folder: the CLI answers with guidance, and the bridge
-    // must hand that to the UI intact (SPEC §7).
+    // A note that is not there: the CLI answers with a code and the path, and
+    // the bridge must hand that to the UI intact.
     let response = cli_bridge::run(
-        "list-memories",
-        &json!({ "vault": root_of(&dir) }),
+        "read",
+        &json!({ "vault": root_of(&dir), "path": "missing.md" }),
         None,
     );
 
     assert!(!response.ok);
     let error = response.error.unwrap();
-    assert_eq!(error.code, "NOT_INITIALIZED");
-    assert!(error.message.contains("heimdall create"), "{}", error.message);
+    assert_eq!(error.code, "NOT_FOUND");
+    assert_eq!(error.details["path"], "missing.md");
     assert_eq!(response.exit_code, Some(1));
 }
 
@@ -224,7 +228,7 @@ fn an_unknown_command_never_reaches_a_process() {
 }
 
 #[test]
-fn the_health_check_completes_a_real_mcp_handshake() {
+fn the_health_check_completes_a_real_mcp_handshake_for_the_shared_vaults() {
     staged();
     let dir = temp_root();
     cli_bridge::run(
@@ -233,31 +237,45 @@ fn the_health_check_completes_a_real_mcp_handshake() {
         None,
     );
     let vault = dir.path().join("demo").to_str().unwrap().to_string();
+    // Unique, because the test data directory outlives this run.
+    let name = format!("health-{}", std::process::id());
+    let shared = cli_bridge::run("share", &json!({ "vault": vault, "name": name }), None);
+    assert!(shared.ok, "{shared:?}");
 
-    let health = cli_bridge::health_check(&vault);
+    let health = cli_bridge::health_check();
 
     assert!(health.ok, "{health:?}");
     assert_eq!(health.server_name.as_deref(), Some("heimdall"));
     assert_eq!(health.protocol_version.as_deref(), Some("2025-11-25"));
-    assert!(health
-        .instructions
-        .unwrap_or_default()
-        .contains("aios/"));
+    let instructions = health.instructions.unwrap_or_default();
+    assert!(instructions.contains("`read`"), "{instructions}");
+    // The shared vault is named to the client, and its path never is.
+    assert!(instructions.contains(&name), "{instructions}");
+    assert!(!instructions.contains(&vault), "{instructions}");
+
+    let unshared = cli_bridge::run("unshare", &json!({ "vault": vault }), None);
+    assert!(unshared.ok, "{unshared:?}");
 }
 
 #[test]
-fn the_health_check_reports_a_vault_that_cannot_be_served() {
+fn the_vaults_command_lists_what_is_shared() {
     staged();
-    let health = cli_bridge::health_check("/nonexistent-heimdall-vault");
+    let dir = temp_root();
+    cli_bridge::run("create", &json!({ "name": "demo", "root": root_of(&dir) }), None);
+    let vault = dir.path().join("demo").to_str().unwrap().to_string();
+    let name = format!("listed-{}", std::process::id());
+    assert!(cli_bridge::run("share", &json!({ "vault": vault, "name": name }), None).ok);
 
-    assert!(!health.ok);
-    assert!(health.error.is_some());
-    // The reason is on stderr, where the server puts its diagnostics.
-    assert!(
-        health.stderr.contains("NOT_FOUND"),
-        "stderr was {:?}",
-        health.stderr
-    );
+    let listed = cli_bridge::run("vaults", &json!({}), None);
+    assert!(listed.ok, "{listed:?}");
+    let vaults = listed.data.unwrap()["vaults"].as_array().unwrap().clone();
+    let entry = vaults
+        .iter()
+        .find(|entry| entry["name"] == name.as_str())
+        .expect("the shared vault is listed");
+    assert_eq!(entry["shared"], true);
+
+    assert!(cli_bridge::run("unshare", &json!({ "vault": vault }), None).ok);
 }
 
 /// A created vault and its path, for the editor tests below.
@@ -275,36 +293,32 @@ fn editor_vault() -> (tempfile::TempDir, String) {
 fn the_desktop_saves_a_note_and_reads_back_exactly_what_it_wrote() {
     let (_dir, vault) = editor_vault();
 
-    // The awkward characters go through the same stdin path the memory write
-    // uses, because an editor is where they actually turn up.
+    // The awkward characters go through stdin, because an editor is where they
+    // actually turn up.
     let content = "---\nlinks:\n  - \"[[profile]]\"\n---\n\n# Note\n\n`$(whoami)` \"quoted\" 🌍\n";
     let written = cli_bridge::run(
-        "write-document",
+        "write",
         &json!({ "vault": vault, "path": "ideas/note.md", "create": true }),
         Some(content),
     );
     assert!(written.ok, "{written:?}");
 
-    let back = cli_bridge::run(
-        "read-documents",
-        &json!({ "vault": vault, "doc": ["ideas/note.md"] }),
-        None,
-    );
-    assert_eq!(back.data.unwrap()["documents"][0]["content"], content);
+    let back = cli_bridge::run("read", &json!({ "vault": vault, "path": "ideas/note.md" }), None);
+    assert_eq!(back.data.unwrap()["document"]["content"], content);
 }
 
 #[test]
 fn a_stale_revision_from_the_desktop_is_a_conflict_rather_than_an_overwrite() {
     let (_dir, vault) = editor_vault();
     cli_bridge::run(
-        "write-document",
+        "write",
         &json!({ "vault": vault, "path": "ideas/note.md", "create": true }),
         Some("original\n"),
     );
 
     let stale = "blake3:0000000000000000000000000000000000000000000000000000000000000000";
     let response = cli_bridge::run(
-        "write-document",
+        "write",
         &json!({ "vault": vault, "path": "ideas/note.md", "expected-revision": stale }),
         Some("clobbered\n"),
     );
@@ -312,19 +326,15 @@ fn a_stale_revision_from_the_desktop_is_a_conflict_rather_than_an_overwrite() {
     assert!(!response.ok);
     assert_eq!(response.error.unwrap().code, "REVISION_CONFLICT");
 
-    let back = cli_bridge::run(
-        "read-documents",
-        &json!({ "vault": vault, "doc": ["ideas/note.md"] }),
-        None,
-    );
-    assert_eq!(back.data.unwrap()["documents"][0]["content"], "original\n");
+    let back = cli_bridge::run("read", &json!({ "vault": vault, "path": "ideas/note.md" }), None);
+    assert_eq!(back.data.unwrap()["document"]["content"], "original\n");
 }
 
 #[test]
 fn deleting_a_note_moves_it_into_the_vaults_trash() {
     let (dir, vault) = editor_vault();
     cli_bridge::run(
-        "write-document",
+        "write",
         &json!({ "vault": vault, "path": "ideas/doomed.md", "create": true }),
         Some("still here\n"),
     );
@@ -345,7 +355,7 @@ fn deleting_a_note_moves_it_into_the_vaults_trash() {
     assert_eq!(std::fs::read_to_string(trashed).unwrap(), "still here\n");
 
     let listed = cli_bridge::run(
-        "list-documents",
+        "read",
         &json!({ "vault": vault, "recursive": true }),
         None,
     );
@@ -355,41 +365,47 @@ fn deleting_a_note_moves_it_into_the_vaults_trash() {
 }
 
 #[test]
-fn a_rename_across_the_aios_boundary_is_refused_and_moves_nothing() {
+fn a_lock_set_from_the_desktop_makes_a_note_read_only_everywhere() {
     let (_dir, vault) = editor_vault();
-    cli_bridge::run(
-        "write-document",
-        &json!({ "vault": vault, "path": "ideas/note.md", "create": true }),
-        Some("ordinary\n"),
-    );
+    let note = "ideas/hello_world.md";
 
-    let response = cli_bridge::run(
-        "move-path",
-        &json!({
-            "vault": vault,
-            "from": "ideas/note.md",
-            "to": "aios/conversations/2026-08-16_10-00-00.md",
-        }),
-        None,
-    );
-    assert!(!response.ok);
-    assert_eq!(response.error.unwrap().code, "INVALID_INPUT");
+    let locked = cli_bridge::run("lock", &json!({ "vault": vault, "path": "ideas" }), None);
+    assert!(locked.ok, "{locked:?}");
+    assert_eq!(locked.data.unwrap()["locked"], true);
 
-    let back = cli_bridge::run(
-        "read-documents",
-        &json!({ "vault": vault, "doc": ["ideas/note.md"] }),
-        None,
+    let read = cli_bridge::run("read", &json!({ "vault": vault, "path": note }), None);
+    let data = read.data.unwrap();
+    assert_eq!(data["locked"], true);
+    assert_eq!(data["locked_at"], "ideas");
+    let revision = data["document"]["revision"].as_str().unwrap().to_string();
+
+    let refused = cli_bridge::run(
+        "write",
+        &json!({ "vault": vault, "path": note, "expected-revision": revision }),
+        Some("changed\n"),
     );
-    assert_eq!(back.data.unwrap()["documents"][0]["content"], "ordinary\n");
+    let error = refused.error.unwrap();
+    assert_eq!(error.code, "LOCKED");
+    assert_eq!(error.details["locked_at"], "ideas");
+
+    // A whole-vault unlock (no path) clears it.
+    let unlocked = cli_bridge::run("unlock", &json!({ "vault": vault }), None);
+    assert!(unlocked.ok, "{unlocked:?}");
+    let written = cli_bridge::run(
+        "write",
+        &json!({ "vault": vault, "path": note, "expected-revision": revision }),
+        Some("changed\n"),
+    );
+    assert!(written.ok, "{written:?}");
 }
 
 #[test]
 fn the_link_graph_of_a_templated_vault_arrives_whole() {
     let (_dir, vault) = editor_vault();
     cli_bridge::run(
-        "write-document",
+        "write",
         &json!({ "vault": vault, "path": "ideas/source.md", "create": true }),
-        Some("See [[hello_world]] and [[memory]].\n"),
+        Some("See [[hello_world]] and [[my_project]].\n"),
     );
 
     let response = cli_bridge::run("link-graph", &json!({ "vault": vault }), None);
@@ -398,9 +414,8 @@ fn the_link_graph_of_a_templated_vault_arrives_whole() {
 
     let nodes = data["nodes"].as_array().unwrap();
     let paths: Vec<&str> = nodes.iter().map(|n| n["path"].as_str().unwrap()).collect();
-    // The protected tree is in the graph, because the file tree shows it.
-    assert!(paths.contains(&"aios/memories/memory.md"), "{paths:?}");
     assert!(paths.contains(&"ideas/hello_world.md"), "{paths:?}");
+    assert!(nodes.iter().all(|n| n["locked"] == false));
 
     let index = |path: &str| paths.iter().position(|p| *p == path).unwrap();
     let edges: Vec<(usize, usize)> = data["edges"]
@@ -416,7 +431,7 @@ fn the_link_graph_of_a_templated_vault_arrives_whole() {
         .collect();
     let source = index("ideas/source.md");
     assert!(edges.contains(&(source, index("ideas/hello_world.md"))));
-    assert!(edges.contains(&(source, index("aios/memories/memory.md"))));
+    assert!(edges.contains(&(source, index("projects/my_project.md"))));
 }
 
 #[test]
@@ -449,11 +464,13 @@ fn the_client_operations_are_reachable_but_the_server_is_still_not() {
     staged();
     // Every editor command runs; `mcp` remains something only the client starts.
     for command in [
-        "write-document",
+        "read",
+        "write",
+        "lock",
+        "unlock",
         "create-folder",
         "move-path",
         "delete-path",
-        "write-entry",
         "link-graph",
     ] {
         let response = cli_bridge::run(command, &json!({ "vault": "/nonexistent" }), None);

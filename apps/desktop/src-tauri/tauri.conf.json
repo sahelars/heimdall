@@ -31,7 +31,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app", "dmg"],
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",
@@ -44,10 +44,19 @@
     "externalBin": [
       "binaries/heimdall"
     ],
-    "resources": [],
-    "copyright": "",
+    "resources": { "../../../LICENSE": "LICENSE" },
+    "copyright": "© 2026 Sam Larsen. All rights reserved.",
     "category": "Productivity",
-    "shortDescription": "Setup and diagnostics for Heimdall vaults.",
-    "longDescription": "Heimdall creates and edits Markdown vaults and makes the local MCP server available to AI clients."
+    "shortDescription": "Markdown vaults your AI can read and write, and you can lock.",
+    "longDescription": "Heimdall edits Markdown vaults and serves them to AI clients over a local MCP server with two verbs, read and write. Any note, folder, or the whole vault can be locked read-only.",
+    "macOS": {
+      "hardenedRuntime": true,
+      "minimumSystemVersion": "11.0",
+      "dmg": {
+        "appPosition": { "x": 180, "y": 170 },
+        "applicationFolderPosition": { "x": 480, "y": 170 },
+        "windowSize": { "width": 660, "height": 400 }
+      }
+    }
   }
 }

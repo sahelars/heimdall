@@ -5,14 +5,14 @@
 //! worst, an orphaned temp file — never a half-written note.
 
 use camino::Utf8PathBuf;
-use heimdall_core::commands::{list_documents, read_memory, ListDocumentsRequest, ReadMemoryRequest};
-use heimdall_core::paths::{self, RelPath};
+use heimdall_core::commands::{read, ReadRequest};
+use heimdall_core::paths::RelPath;
 use heimdall_core::{template, Revision, Vault};
 
 fn vault() -> (tempfile::TempDir, Vault) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-    let vault = Vault::open_with_lock_dir(&root, &test_lock_dir()).unwrap();
+    let vault = Vault::open_with_data_dir(&root, &test_data_dir()).unwrap();
     template::scaffold_full(&vault).unwrap();
     (dir, vault)
 }
@@ -29,18 +29,24 @@ fn orphaned_temp(dir: &tempfile::TempDir, relative: &str, contents: &[u8]) {
 #[test]
 fn an_interrupted_write_leaves_the_previous_content_readable() {
     let (dir, vault) = vault();
-    let memory = rel(paths::MAIN_MEMORY_FILE);
-    vault.atomic_write(&memory, b"# Memory\n\nCommitted.\n").unwrap();
+    let note = rel("ideas/hello_world.md");
+    vault.atomic_write(&note, b"# Hello\n\nCommitted.\n").unwrap();
 
-    orphaned_temp(
-        &dir,
-        "aios/memories/.memory.md.tmp-99999-0",
-        b"half-written garb",
-    );
+    orphaned_temp(&dir, "ideas/.hello_world.md.tmp-99999-0", b"half-written garb");
 
-    let result = read_memory(&vault, ReadMemoryRequest::default()).unwrap();
-    assert_eq!(result.content, "# Memory\n\nCommitted.\n");
-    assert_eq!(result.revision, Revision::of_bytes(b"# Memory\n\nCommitted.\n"));
+    let result = read(
+        &vault,
+        ReadRequest {
+            vault: None,
+            path: Some("ideas/hello_world.md".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .document
+    .unwrap();
+    assert_eq!(result.content, "# Hello\n\nCommitted.\n");
+    assert_eq!(result.revision, Revision::of_bytes(b"# Hello\n\nCommitted.\n"));
 }
 
 #[test]
@@ -50,13 +56,16 @@ fn an_orphaned_temp_file_is_never_mistaken_for_content() {
     orphaned_temp(&dir, ".note.md.tmp-99999-0", b"garbage");
     orphaned_temp(&dir, ".note.md.lock", b"");
 
-    let response = list_documents(
+    let response = read(
         &vault,
-        ListDocumentsRequest {
+        ReadRequest {
+            vault: None,
             recursive: true,
             ..Default::default()
         },
     )
+    .unwrap()
+    .listing
     .unwrap();
 
     let paths: Vec<_> = response.entries.iter().map(|e| e.path.as_str()).collect();
@@ -113,15 +122,15 @@ fn the_revision_is_computed_from_the_bytes_actually_stored() {
     assert_eq!(reported, Revision::of_bytes(&on_disk));
 }
 
-/// Where these tests keep their write locks.
+/// Where these tests keep Heimdall's application data (write locks, lock rules).
 ///
 /// Outside the vault, as production does, but under the system temp directory
 /// rather than the real application-data one: a test run must not leave files
-/// in a developer's home. Lock files are named by a hash of the vault's path
-/// and every vault here is a fresh temp directory, so sharing one directory
-/// cannot collide.
-fn test_lock_dir() -> camino::Utf8PathBuf {
+/// in a developer's home. Per-vault files are named by a hash of the vault's
+/// path and every vault here is a fresh temp directory, so sharing one
+/// directory cannot collide.
+fn test_data_dir() -> camino::Utf8PathBuf {
     camino::Utf8PathBuf::from_path_buf(std::env::temp_dir())
         .expect("temp dir is UTF-8")
-        .join("heimdall-test-locks")
+        .join("heimdall-test-data")
 }

@@ -65,7 +65,7 @@ describe("Setup", () => {
       data: {
         path: "/Users/n/Documents/demo",
         mode: "scaffolded",
-        created: ["aios/", "ideas/hello_world.md"],
+        created: ["AGENTS.md", "ideas/hello_world.md"],
       },
     });
     const onVaultChange = vi.fn();
@@ -85,30 +85,29 @@ describe("Setup", () => {
     expect(screen.getByText("ideas/hello_world.md")).toBeInTheDocument();
   });
 
-  it("initializes an existing vault by its parent and folder, adding only aios/", async () => {
+  it("registers an existing folder by its parent and name, writing nothing into it", async () => {
     openDialog.mockResolvedValue("/Users/n/Documents/Existing Vault");
     invoke.mockResolvedValue({
       ok: true,
       data: {
         path: "/Users/n/Documents/Existing Vault",
-        mode: "initialized",
-        created: ["aios/", "aios/memories/memory.md"],
+        mode: "registered",
+        created: [],
       },
     });
-    render(<Setup vault="" onVaultChange={vi.fn()} />);
+    const onVaultChange = vi.fn();
+    render(<Setup vault="" onVaultChange={onVaultChange} />);
 
-    await userEvent.click(
-      screen.getByRole("button", { name: "Choose a folder and initialize…" }),
-    );
+    await userEvent.click(screen.getByRole("button", { name: "Choose a folder…" }));
 
-    await screen.findByText("Vault initialized");
+    await screen.findByText("Vault opened");
     expect(invoke).toHaveBeenCalledWith("invoke_cli", {
       command: "create",
       request: { name: "Existing Vault", root: "/Users/n/Documents" },
       stdin: undefined,
     });
-    // Nothing about example notes: initializing adds only what was missing.
-    expect(screen.getByText("aios/memories/memory.md")).toBeInTheDocument();
+    expect(onVaultChange).toHaveBeenCalledWith("/Users/n/Documents/Existing Vault");
+    expect(screen.getByText(/the folder is used as it is/)).toBeInTheDocument();
   });
 
   it("keeps a structured failure readable instead of crashing", async () => {
@@ -133,74 +132,328 @@ describe("Setup", () => {
     expect(alert).toHaveTextContent("demo");
   });
 
-  it("surfaces an uninitialized vault with the guidance the CLI gives", async () => {
+  it("verifies the active vault by reading its root", async () => {
+    invoke.mockResolvedValue({
+      ok: true,
+      data: {
+        path: "",
+        kind: "directory",
+        locked: false,
+        listing: {
+          entries: [
+            { path: "ideas", kind: "directory", modified_at: "", locked: false },
+            { path: "README.md", kind: "document", modified_at: "", locked: false },
+          ],
+          next_cursor: null,
+          scan_guard_hit: false,
+        },
+      },
+    });
+    render(<Setup vault="/Users/n/notes" onVaultChange={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Verify" }));
+
+    await screen.findByText("Readable: 2 items at the vault root");
+    expect(invoke).toHaveBeenCalledWith("invoke_cli", {
+      command: "read",
+      request: { vault: "/Users/n/notes" },
+      stdin: undefined,
+    });
+  });
+
+  /** Answer `create`, `share`, `unshare` and `vaults` the way the CLI would. */
+  function setupBridge({
+    vaults = [] as unknown[],
+    shareFails = false,
+  } = {}) {
+    const calls: { command: string; request: Record<string, unknown> }[] = [];
+    invoke.mockImplementation((_command: string, args?: Record<string, unknown>) => {
+      const command = args?.command as string;
+      const request = (args?.request ?? {}) as Record<string, unknown>;
+      calls.push({ command, request });
+      if (command === "create") {
+        return Promise.resolve({
+          ok: true,
+          data: { path: `${request.root}/${request.name}`, mode: "scaffolded", created: [] },
+        });
+      }
+      if (command === "share") {
+        if (shareFails) {
+          return Promise.resolve({
+            ok: false,
+            error: { code: "ALREADY_EXISTS", message: 'another shared vault is already called "demo"' },
+          });
+        }
+        return Promise.resolve({ ok: true, data: { name: "demo", path: request.vault, shared: true } });
+      }
+      if (command === "vaults") return Promise.resolve({ ok: true, data: { vaults } });
+      return Promise.resolve({ ok: true, data: {} });
+    });
+    return calls;
+  }
+
+  async function createDemo(root = "/Users/n") {
+    await userEvent.type(screen.getByLabelText("Vault name"), "demo");
+    await userEvent.type(screen.getByLabelText("Location"), root);
+    await userEvent.click(screen.getByRole("button", { name: "Create vault" }));
+  }
+
+  it("shares a new vault with AI clients unless told not to", async () => {
+    // Someone who has just made a vault and asks ChatGPT to write in it means
+    // for that to work; a vault that existed but was not shared was the bug.
+    const calls = setupBridge();
+    render(<Setup vault="" onVaultChange={vi.fn()} />);
+    const toggles = screen.getAllByRole("switch", { name: "Available to AI clients" });
+    for (const toggle of toggles) expect(toggle).toHaveAttribute("aria-checked", "true");
+
+    await createDemo();
+
+    await screen.findByText("Vault created");
+    expect(calls).toContainEqual({ command: "share", request: { vault: "/Users/n/demo" } });
+    expect(screen.getByText("shared as “demo”")).toBeInTheDocument();
+  });
+
+  it("leaves a new vault unshared when the switch is off", async () => {
+    const calls = setupBridge();
+    render(<Setup vault="" onVaultChange={vi.fn()} />);
+    await userEvent.click(screen.getAllByRole("switch", { name: "Available to AI clients" })[0]!);
+    for (const toggle of screen.getAllByRole("switch", { name: "Available to AI clients" })) {
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+    }
+
+    await createDemo();
+
+    await screen.findByText("Vault created");
+    expect(calls.some((call) => call.command === "share")).toBe(false);
+    expect(screen.getByText("not shared")).toBeInTheDocument();
+  });
+
+  it("still opens a vault whose share failed, and says why", async () => {
+    setupBridge({ shareFails: true });
+    const onVaultChange = vi.fn();
+    render(<Setup vault="" onVaultChange={onVaultChange} />);
+
+    await createDemo();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("already called");
+    expect(onVaultChange).toHaveBeenCalledWith("/Users/n/demo");
+  });
+
+  it("warns about a location macOS keeps AI clients out of, and suggests another", async () => {
+    setupBridge();
+    render(<Setup vault="" onVaultChange={vi.fn()} />);
+    expect(screen.getByLabelText("Location")).toHaveAttribute("placeholder", "/Users/you/Heimdall");
+
+    await userEvent.type(screen.getByLabelText("Location"), "/Users/n/Documents");
+    expect(screen.getByText(/macOS keeps AI clients out of Documents/)).toBeInTheDocument();
+
+    await userEvent.clear(screen.getByLabelText("Location"));
+    await userEvent.type(screen.getByLabelText("Location"), "/Users/n/Heimdall");
+    expect(screen.queryByText(/macOS keeps AI clients out of/)).toBeNull();
+  });
+
+  it("switches the active vault's sharing from where it is shown", async () => {
+    const calls = setupBridge({
+      vaults: [{ path: "/Users/n/notes", folder: "notes", exists: true, shared: false, name: null }],
+    });
+    const { container } = render(<Setup vault="/Users/n/notes" onVaultChange={vi.fn()} />);
+
+    await waitFor(() => expect(calls.some((call) => call.command === "vaults")).toBe(true));
+    const toggle = container.querySelector("#active-share") as HTMLElement;
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+
+    await userEvent.click(toggle);
+    await waitFor(() =>
+      expect(calls).toContainEqual({ command: "share", request: { vault: "/Users/n/notes" } }),
+    );
+  });
+
+  it("names the active vault's shared name and can stop sharing it", async () => {
+    const calls = setupBridge({
+      vaults: [{ path: "/Users/n/notes", folder: "notes", exists: true, shared: true, name: "Notes" }],
+    });
+    render(<Setup vault="/Users/n/notes" onVaultChange={vi.fn()} />);
+
+    const toggle = await screen.findByRole("switch", { name: "Available to AI clients as “Notes”" });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(toggle);
+    await waitFor(() =>
+      expect(calls).toContainEqual({ command: "unshare", request: { vault: "/Users/n/notes" } }),
+    );
+  });
+
+  it("surfaces a vault that cannot be read with the message the CLI gives", async () => {
     invoke.mockResolvedValue({
       ok: false,
       error: {
-        code: "NOT_INITIALIZED",
-        message:
-          'this vault has no complete aios/ structure; run "heimdall create" against it',
-        details: { missing: ["aios/", "aios/memories/memory.md"] },
+        code: "NOT_FOUND",
+        message: 'the vault "/Users/n/moved" does not exist',
+        details: { path: "/Users/n/moved" },
       },
     });
-    render(<Setup vault="/Users/n/plain-folder" onVaultChange={vi.fn()} />);
+    render(<Setup vault="/Users/n/moved" onVaultChange={vi.fn()} />);
 
     await userEvent.click(screen.getByRole("button", { name: "Verify" }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("NOT_INITIALIZED");
-    expect(alert).toHaveTextContent("heimdall create");
+    expect(alert).toHaveTextContent("NOT_FOUND");
+    expect(alert).toHaveTextContent("does not exist");
   });
 });
 
 describe("Server", () => {
-  it("shows the exact command and a config snippet pointing at the bundled tool", async () => {
-    invoke.mockResolvedValue([]);
-    render(<Server vault="/Users/n/My Vault" status={STATUS} />);
+  const CLAUDE = {
+    id: "claude-desktop",
+    name: "Claude Desktop",
+    path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
+    present: true,
+    installed: false,
+    stale: false,
+    legacy: [],
+  };
+  const CHATGPT = {
+    id: "chatgpt",
+    name: "ChatGPT",
+    path: "/Users/n/.codex/config.toml",
+    present: true,
+    installed: false,
+    stale: false,
+    legacy: [],
+  };
 
-    expect(
-      screen.getByText(`${STATUS.path} mcp --vault "/Users/n/My Vault"`),
-    ).toBeInTheDocument();
-
-    const snippet = screen.getByText(/"mcpServers"/);
-    const parsed = JSON.parse(snippet.textContent!);
-    expect(parsed.mcpServers.heimdall.command).toBe(STATUS.path);
-    expect(parsed.mcpServers.heimdall.args).toEqual(["mcp", "--vault", "/Users/n/My Vault"]);
-  });
-
-  it("reports a successful handshake with what the server said", async () => {
-    invoke.mockImplementation((command: string) => {
-      if (command === "list_client_configs") return Promise.resolve([]);
-      if (command === "health_check") {
-        return Promise.resolve({
-          ok: true,
-          serverName: "heimdall",
-          serverVersion: "0.1.0",
-          protocolVersion: "2025-11-25",
-        });
+  /** Answer the Tauri commands the Server screen makes, with these fixtures. */
+  function serve({
+    clients = [] as unknown[],
+    vaults = [] as unknown[],
+    health = null as unknown,
+    installed = null as unknown,
+    onCli = (_command: string, _request: Record<string, unknown>) => undefined as unknown,
+  } = {}) {
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "list_client_configs") return Promise.resolve(clients);
+      if (command === "health_check") return Promise.resolve(health);
+      if (command === "install_client_config") return Promise.resolve(installed);
+      if (command === "invoke_cli") {
+        const cli = args?.command as string;
+        const request = (args?.request ?? {}) as Record<string, unknown>;
+        const answer = onCli(cli, request);
+        if (answer !== undefined) return Promise.resolve(answer);
+        if (cli === "vaults") return Promise.resolve({ ok: true, data: { vaults } });
+        return Promise.resolve({ ok: true, data: {} });
       }
       return Promise.resolve(null);
     });
+  }
+
+  it("shows one command and one entry, with no vault in either", async () => {
+    serve();
+    render(<Server vault="/Users/n/My Vault" status={STATUS} />);
+
+    expect(screen.getByText(`${STATUS.path} mcp`)).toBeInTheDocument();
+    const snippet = screen.getByText(/"mcpServers"/);
+    const parsed = JSON.parse(snippet.textContent!);
+    expect(parsed.mcpServers).toEqual({ heimdall: { command: STATUS.path, args: ["mcp"] } });
+    expect(screen.getByText(/args = \["mcp"\]/)).toBeInTheDocument();
+  });
+
+  it("lists vaults with their shared names and shares one only when asked", async () => {
+    const shareCalls: Record<string, unknown>[] = [];
+    serve({
+      vaults: [
+        { path: "/Users/n/Work", folder: "Work", exists: true, shared: true, name: "Work" },
+        { path: "/Users/n/Private", folder: "Private", exists: true, shared: false, name: null },
+      ],
+      onCli: (command, request) => {
+        if (command === "share") shareCalls.push(request);
+        return undefined;
+      },
+    });
+    render(<Server vault="/Users/n/Work" status={STATUS} />);
+
+    expect(await screen.findByText("Work — shared")).toBeInTheDocument();
+    expect(screen.getByText("Private — not shared")).toBeInTheDocument();
+    expect(shareCalls).toHaveLength(0);
+
+    const switches = screen.getAllByRole("switch", { name: "AI clients" });
+    expect(switches.map((one) => one.getAttribute("aria-checked"))).toEqual(["true", "false"]);
+    await userEvent.click(switches[1]!);
+    await waitFor(() => expect(shareCalls).toEqual([{ vault: "/Users/n/Private" }]));
+  });
+
+  it("stops sharing a vault from its switch", async () => {
+    const unshareCalls: Record<string, unknown>[] = [];
+    serve({
+      vaults: [{ path: "/Users/n/Work", folder: "Work", exists: true, shared: true, name: "Work" }],
+      onCli: (command, request) => {
+        if (command === "unshare") unshareCalls.push(request);
+        return undefined;
+      },
+    });
+    render(<Server vault="/Users/n/Work" status={STATUS} />);
+
+    await userEvent.click(await screen.findByRole("switch", { name: "AI clients" }));
+    await waitFor(() => expect(unshareCalls).toEqual([{ vault: "/Users/n/Work" }]));
+  });
+
+  it("offers the open vault for sharing before anything has registered it", async () => {
+    serve({ vaults: [] });
+    render(<Server vault="/Users/n/Fresh" status={STATUS} />);
+    expect(await screen.findByText("Fresh — not shared")).toBeInTheDocument();
+  });
+
+  it("warns that macOS may keep a client out of a vault in Documents", async () => {
+    serve({
+      vaults: [
+        {
+          path: "/Users/n/Documents/Heimdall-Vault",
+          folder: "Heimdall-Vault",
+          exists: true,
+          shared: true,
+          name: "Heimdall-Vault",
+        },
+      ],
+    });
+    render(<Server vault="/Users/n/Documents/Heimdall-Vault" status={STATUS} />);
+
+    expect(await screen.findByText("macOS may keep AI clients out")).toBeInTheDocument();
+    expect(screen.getByText(/is in Documents/)).toBeInTheDocument();
+    expect(screen.getByText(/Full\s+Disk Access/)).toBeInTheDocument();
+
+    // Straight to the setting, and to the file to drag into it.
+    await userEvent.click(screen.getByRole("button", { name: "Open Privacy settings" }));
+    expect(invoke).toHaveBeenCalledWith("open_privacy_settings");
+    await userEvent.click(screen.getByRole("button", { name: "Show Heimdall's command in Finder" }));
+    expect(invoke).toHaveBeenCalledWith("reveal_sidecar");
+  });
+
+  it("reports a successful handshake with what the server said and why it cannot prove more", async () => {
+    serve({
+      health: {
+        ok: true,
+        serverName: "heimdall",
+        serverVersion: "0.1.0",
+        protocolVersion: "2025-11-25",
+      },
+    });
     render(<Server vault="/v" status={STATUS} />);
 
+    expect(screen.getByText(/runs with Heimdall's own macOS permissions/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Run health check" }));
 
     await screen.findByText("Handshake succeeded");
     expect(screen.getByText("heimdall 0.1.0")).toBeInTheDocument();
     expect(screen.getByText("2025-11-25")).toBeInTheDocument();
+    expect(invoke).toHaveBeenCalledWith("health_check");
   });
 
   it("keeps a failed handshake actionable", async () => {
-    invoke.mockImplementation((command: string) => {
-      if (command === "list_client_configs") return Promise.resolve([]);
-      if (command === "health_check") {
-        return Promise.resolve({
-          ok: false,
-          error: { code: "IO_ERROR", message: "the server did not answer within 10 seconds" },
-          stderr: "heimdall mcp: NOT_FOUND: vault directory does not exist",
-        });
-      }
-      return Promise.resolve(null);
+    serve({
+      health: {
+        ok: false,
+        error: { code: "IO_ERROR", message: "the server did not answer within 10 seconds" },
+        stderr: "heimdall mcp: could not start",
+      },
     });
     render(<Server vault="/missing" status={STATUS} />);
 
@@ -210,28 +463,13 @@ describe("Server", () => {
     expect(alert).toHaveTextContent("IO_ERROR");
     expect(alert).toHaveTextContent("did not answer");
     // Captured stderr is shown, because that is where the real reason is.
-    expect(alert).toHaveTextContent("vault directory does not exist");
+    expect(alert).toHaveTextContent("could not start");
   });
 
   it("refuses to put a development build's path into a client's configuration", async () => {
     // The path would break on the next rebuild, and the client's only symptom
     // would be a timeout — so the reason has to arrive before the click.
-    invoke.mockImplementation((command: string) => {
-      if (command === "list_client_configs") {
-        return Promise.resolve([
-          {
-            id: "claude-desktop",
-            name: "Claude Desktop",
-            path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
-            present: true,
-            installed: false,
-            stale: false,
-            serverKey: "heimdall",
-          },
-        ]);
-      }
-      return Promise.resolve(null);
-    });
+    serve({ clients: [CLAUDE] });
     render(<Server vault="/v" status={DEV_STATUS} />);
 
     expect(await screen.findByText("Not available in a development build")).toBeInTheDocument();
@@ -240,72 +478,74 @@ describe("Server", () => {
   });
 
   it("says when the entry already there names a command that has gone", async () => {
-    invoke.mockImplementation((command: string) => {
-      if (command === "list_client_configs") {
-        return Promise.resolve([
-          {
-            id: "claude-desktop",
-            name: "Claude Desktop",
-            path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
-            present: true,
-            installed: true,
-            stale: true,
-            serverKey: "heimdall",
-          },
-        ]);
-      }
-      return Promise.resolve(null);
-    });
+    serve({ clients: [{ ...CLAUDE, installed: true, stale: true }] });
     render(<Server vault="/v" status={STATUS} />);
 
     expect(await screen.findByText(/its command is gone/)).toBeInTheDocument();
   });
 
-  it("writes a client entry only when asked, and says what it did", async () => {
-    invoke.mockImplementation((command: string) => {
-      if (command === "list_client_configs") {
-        return Promise.resolve([
-          {
-            id: "claude-desktop",
-            name: "Claude Desktop",
-            path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
-            present: true,
-            installed: false,
-            stale: false,
-            serverKey: "heimdall",
-          },
-        ]);
-      }
-      if (command === "install_client_config") {
-        return Promise.resolve({
-          path: "/Users/n/Library/Application Support/Claude/claude_desktop_config.json",
-          serverKey: "heimdall",
-          replaced: false,
-          backupPath: "/Users/n/Library/Application Support/Claude/claude_desktop_config.heimdall-backup.json",
-        });
-      }
-      return Promise.resolve(null);
+  it("names the per-vault entries an update replaces", async () => {
+    serve({
+      clients: [
+        {
+          ...CHATGPT,
+          legacy: [
+            { key: "heimdall", vault: "/Users/n/Documents/Vault-test" },
+            { key: "heimdall-heimdall-vault", vault: "/Users/n/Documents/Heimdall-Vault" },
+          ],
+        },
+      ],
     });
     render(<Server vault="/v" status={STATUS} />);
 
-    await screen.findByText("Claude Desktop");
+    expect(
+      await screen.findByText(/Replaces 2 older per-vault entries: heimdall, heimdall-heimdall-vault/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Update entry" })).toBeEnabled();
+  });
+
+  it("will not overwrite a heimdall entry that runs something else", async () => {
+    serve({ clients: [{ ...CLAUDE, conflict: "\"heimdall\" in this file runs something other than Heimdall" }] });
+    render(<Server vault="/v" status={STATUS} />);
+
+    expect(await screen.findByText(/runs something other than Heimdall/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add entry" })).toBeDisabled();
+  });
+
+  it("writes a client entry only when asked, and says what it did", async () => {
+    serve({
+      clients: [CLAUDE],
+      installed: {
+        path: CLAUDE.path,
+        serverKey: "heimdall",
+        replaced: true,
+        removed: ["heimdall-work-notes"],
+        backupPath: "/Users/n/Library/Application Support/Claude/claude_desktop_config.heimdall-backup.json",
+      },
+    });
+    render(<Server vault="/v" status={STATUS} />);
+
+    await screen.findByText(CLAUDE.path);
     // Nothing is written until the button is pressed.
     expect(invoke).not.toHaveBeenCalledWith("install_client_config", expect.anything());
 
     await userEvent.click(screen.getByRole("button", { name: "Add entry" }));
 
     await screen.findByText("Configuration written");
-    expect(invoke).toHaveBeenCalledWith("install_client_config", {
-      clientId: "claude-desktop",
-      vault: "/v",
-    });
+    expect(invoke).toHaveBeenCalledWith("install_client_config", { clientId: "claude-desktop" });
+    expect(screen.getByText("heimdall-work-notes")).toBeInTheDocument();
     expect(screen.getByText(/heimdall-backup\.json/)).toBeInTheDocument();
   });
 
-  it("asks for a vault before offering to configure anything", () => {
-    render(<Server vault="" status={STATUS} />);
-    expect(screen.getByText("No vault selected")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Run health check" })).toBeNull();
+  it("offers ChatGPT alongside Claude Desktop, and says which ChatGPT modes can use it", async () => {
+    serve({ clients: [CLAUDE, { ...CHATGPT, present: false }] });
+    render(<Server vault="/v" status={STATUS} />);
+
+    expect(await screen.findByText("ChatGPT — not installed")).toBeInTheDocument();
+    expect(screen.getByText("/Users/n/.codex/config.toml")).toBeInTheDocument();
+    expect(screen.getByText(/Work or Codex mode only/)).toBeInTheDocument();
+    expect(screen.getByText(/Restart ChatGPT after adding/)).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Add entry" })).toHaveLength(2);
   });
 });
 
@@ -350,10 +590,10 @@ describe("Diagnostics", () => {
         failures={[
           {
             at: "2026-08-17T10:00:00Z",
-            context: "write-memory",
+            context: "write ideas/note.md",
             error: {
               code: "REVISION_CONFLICT",
-              message: "the memory changed since it was read",
+              message: "the note changed since it was read",
               details: { current_revision: "blake3:abc" },
             },
           },
@@ -365,7 +605,7 @@ describe("Diagnostics", () => {
     const alert = screen.getByRole("alert");
     expect(alert).toHaveTextContent("REVISION_CONFLICT");
     expect(alert).toHaveTextContent("blake3:abc");
-    expect(screen.getByText(/write-memory/)).toBeInTheDocument();
+    expect(screen.getByText(/write ideas\/note\.md/)).toBeInTheDocument();
   });
 });
 
@@ -491,6 +731,50 @@ describe("Settings", () => {
 
     expect(document.documentElement.style.getPropertyValue("--accent-light")).toBe("#000000");
     expect(document.documentElement.style.getPropertyValue("--accent-dark")).toBe("#ffffff");
+  });
+
+  /** Declare both bases on the document the way the production build ships them. */
+  function well(dialog: HTMLElement, theme: "light" | "dark"): HTMLInputElement {
+    return dialog.querySelector(`#accent-colour-${theme}`) as HTMLInputElement;
+  }
+
+  function shippedBases() {
+    document.documentElement.style.setProperty("--accent-light-base", "#000");
+    document.documentElement.style.setProperty("--accent-dark-base", "#fff");
+  }
+
+  it("fills both wells with their theme's default, as the built stylesheet spells it", async () => {
+    // They came up empty in the shipped app: the minifier writes #000000 as
+    // #000, and only six-digit hex was accepted.
+    shippedBases();
+    const dialog = await appearance();
+
+    expect(within(dialog).getByLabelText("Light hex")).toHaveValue("#000000");
+    expect(within(dialog).getByLabelText("Dark hex")).toHaveValue("#FFFFFF");
+    expect(well(dialog, "light")).toHaveValue("#000000");
+    expect(well(dialog, "dark")).toHaveValue("#ffffff");
+  });
+
+  it("shows the default again as soon as a choice is cleared", async () => {
+    // The well used to read the document, which still held the cleared colour
+    // until the effect that removes it ran.
+    shippedBases();
+    const dialog = await appearance();
+    await userEvent.clear(within(dialog).getByLabelText("Dark hex"));
+    await userEvent.type(within(dialog).getByLabelText("Dark hex"), "#00ff00");
+    expect(well(dialog, "dark")).toHaveValue("#00ff00");
+
+    await userEvent.click(within(dialog).getAllByRole("button", { name: "Default" })[1]!);
+
+    expect(well(dialog, "dark")).toHaveValue("#ffffff");
+    expect(within(dialog).getByLabelText("Dark hex")).toHaveValue("#FFFFFF");
+    expect(within(dialog).getAllByRole("button", { name: "Default" })[1]).toBeDisabled();
+  });
+
+  it("draws each well on its own theme's ground", async () => {
+    const dialog = await appearance();
+    expect(well(dialog, "light")).toHaveClass("swatch", "swatch--light");
+    expect(well(dialog, "dark")).toHaveClass("swatch", "swatch--dark");
   });
 
   it("does not offer to reset an accent that has not been set", async () => {

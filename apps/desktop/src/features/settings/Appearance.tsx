@@ -12,15 +12,18 @@
  * including the one for the theme that is not currently on screen, so a choice
  * for the other theme does not mean switching to it first.
  *
- * Nothing here names a colour — each well and field shows what the stylesheet
- * resolves for its theme, and "Default" clears that choice rather than writing
- * a value back, which is what leaves that theme monochrome.
+ * Nothing here names a colour — each well and field shows the choice, or the
+ * default the stylesheet declares for its theme, and "Default" clears that
+ * choice rather than writing a value back, which is what leaves that theme
+ * monochrome. Each well is drawn on its own theme's ground, so a default that
+ * matches the page — white for dark mode, on a light page — still reads as a
+ * colour rather than as an empty box.
  */
 
 import { useState } from "react";
 
 import { Button, Field, Panel } from "../../components";
-import { isAccent, resolvedAccent, type AccentTheme, type Accents } from "../../state/accent";
+import { defaultAccent, isAccent, type AccentTheme, type Accents } from "../../state/accent";
 import { THEME_PREFERENCES, type ThemePreference } from "../../state/theme";
 
 const LABELS: Record<ThemePreference, string> = {
@@ -54,7 +57,10 @@ function AccentWell({ theme, label, accent, onChange }: AccentWellProps) {
   // must stay on the screen rather than being rejected a character at a time.
   // Per well, so typing in one does not disturb the other.
   const [typed, setTyped] = useState<string | null>(null);
-  const current = accent ?? resolvedAccent(document.documentElement, theme);
+  // The choice comes from props, never from the document: the document is
+  // updated in an effect after this render, so it would still hold a choice
+  // that has just been cleared.
+  const current = accent ?? defaultAccent(document.documentElement, theme);
 
   // A colour input's value is lowercase hex, so a value typed in capitals has
   // to arrive that way too or the two controls disagree about what is set.
@@ -68,7 +74,7 @@ function AccentWell({ theme, label, accent, onChange }: AccentWellProps) {
         </label>
         <input
           id={`accent-colour-${theme}`}
-          className="swatch"
+          className={`swatch swatch--${theme}`}
           type="color"
           value={current}
           onChange={(event) => {

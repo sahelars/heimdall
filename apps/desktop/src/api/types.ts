@@ -14,6 +14,8 @@ export type DomainCode =
   | "ALREADY_EXISTS"
   | "NOT_INITIALIZED"
   | "REVISION_CONFLICT"
+  | "LOCKED"
+  | "NOT_CONFIRMED"
   | "IO_ERROR"
   | "INTERNAL_ERROR";
 
@@ -56,33 +58,66 @@ export interface HealthCheck {
   stderr?: string;
 }
 
+/** An older Heimdall entry that served one vault, which installing replaces. */
+export interface LegacyEntry {
+  key: string;
+  vault: string;
+}
+
 export interface KnownClient {
   id: string;
   name: string;
   path: string;
   present: boolean;
+  /** Whether it has the one `heimdall` entry, serving the shared vaults. */
   installed: boolean;
   /** Whether the entry already there names a command that has gone. */
   stale: boolean;
-  serverKey: string;
+  /** Per-vault entries from older builds; their vaults are shared first. */
+  legacy: LegacyEntry[];
+  /** Set when `heimdall` there runs something else, which is never overwritten. */
+  conflict?: string;
 }
 
 export interface InstallOutcome {
   path: string;
   serverKey: string;
   replaced: boolean;
+  /** Older per-vault entries removed in favour of the one entry. */
+  removed: string[];
   backupPath?: string;
 }
 
-/** `heimdall create` (SPEC §7). */
+/** One vault Heimdall knows, from `heimdall vaults`. */
+export interface KnownVault {
+  path: string;
+  folder: string;
+  exists: boolean;
+  /** Whether AI clients can reach it. */
+  shared: boolean;
+  /** The name tool calls use for it, when shared. */
+  name: string | null;
+}
+
+export interface VaultsData {
+  vaults: KnownVault[];
+}
+
+/**
+ * `heimdall create` (SPEC §7).
+ *
+ * `scaffolded`: an empty or missing folder was given the template.
+ * `registered`: an existing folder of notes was adopted as a vault, and nothing
+ * was written into it.
+ */
 export interface CreateVaultData {
   path: string;
-  mode: "scaffolded" | "initialized";
+  mode: "scaffolded" | "registered";
   created: string[];
 }
 
 /**
- * Any bounded read (SPEC §8).
+ * One bounded range of a note (SPEC §8).
  *
  * The CLI emits snake_case, so these are the wire names. `next_line` and
  * `complete` together are what let a caller assemble a whole file without
@@ -99,18 +134,6 @@ export interface ReadResult {
   revision: string;
 }
 
-export interface DocumentRead extends Partial<ReadResult> {
-  path: string;
-  returned: boolean;
-  reason?: string;
-}
-
-export interface ReadDocumentsData {
-  documents: DocumentRead[];
-  total_bytes: number;
-  truncated: boolean;
-}
-
 export type DocumentKind = "directory" | "document";
 
 export interface DocumentEntry {
@@ -118,16 +141,44 @@ export interface DocumentEntry {
   kind: DocumentKind;
   size_bytes?: number;
   modified_at: string;
+  /** Whether the entry is read-only, by its own rule or an enclosing one. */
+  locked: boolean;
 }
 
-export interface ListDocumentsData {
+/** One page of a folder's contents. */
+export interface Listing {
   entries: DocumentEntry[];
   next_cursor: string | null;
   scan_guard_hit: boolean;
 }
 
+/**
+ * `read`: a folder's listing or one range of a note.
+ *
+ * `locked_at` is present only when `locked` is — the folder or note whose rule
+ * applies, with `""` meaning the vault root.
+ */
+export interface ReadData {
+  /** The vault's name: its shared name, or its folder when it is not shared. */
+  vault?: string;
+  path: string;
+  kind: DocumentKind;
+  locked: boolean;
+  locked_at?: string;
+  listing?: Listing;
+  document?: ReadResult;
+}
+
+/** `lock` / `unlock`. `changed` is false when the path was already that way. */
+export interface LockData {
+  path: string;
+  kind: DocumentKind;
+  locked: boolean;
+  changed: boolean;
+}
+
 /** The result of any client-side write (SPEC §15). */
-export interface WriteDocumentData {
+export interface WriteData {
   path: string;
   new_revision: string;
   size_bytes: number;
@@ -174,6 +225,11 @@ export interface RelinkData {
   dry_run: boolean;
   updated: RelinkUpdate[];
   skipped: RelinkSkip[];
+  /**
+   * Notes that link to the moved path but were left unchanged because they are
+   * locked. Their links still point at the old name.
+   */
+  locked: string[];
   truncated: RelinkTruncation;
 }
 
@@ -183,27 +239,14 @@ export interface DeletePathData {
   kind: DocumentKind;
 }
 
-export type EntryKind = "conversation" | "notification";
-
-export interface EntryMeta {
-  id: string;
-  kind: EntryKind;
-  created_at: string;
-  size_bytes: number;
-}
-
-export interface ListEntriesData {
-  entries: EntryMeta[];
-  truncated: boolean;
-}
-
 /* The link graph (SPEC §8) ------------------------------------------------ */
 
 export interface GraphNode {
   path: string;
   /** The filename stem — what the graph shows under each dot. */
   title: string;
-  in_aios: boolean;
+  /** Whether the note is read-only. */
+  locked: boolean;
   size_bytes: number;
   modified_at: string;
   /**
@@ -239,17 +282,4 @@ export interface LinkGraphData {
   edges: GraphEdge[];
   unresolved: UnresolvedLink[];
   truncated: GraphTruncation;
-}
-
-export interface MemoryEntry {
-  name: string;
-  kind: "main" | "extended";
-  path: string;
-  size_bytes: number;
-  modified_at: string;
-}
-
-export interface ListMemoriesData {
-  memories: MemoryEntry[];
-  truncated: boolean;
 }

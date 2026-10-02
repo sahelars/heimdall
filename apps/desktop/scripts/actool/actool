@@ -1,0 +1,23 @@
+#!/bin/bash
+# Stand-in for actool, put first on PATH by `npm run tauri:build`.
+#
+# Tauri's bundler compiles Icon.icon into Assets.car by running actool, and
+# actool 26.6 crashes on two things about that call, every time
+# (`-[__NSPlaceholderArray initWithObjects:count:]: attempt to insert nil
+# object`, surfacing as "Failed to create app Assets.car"):
+#
+# - `--accent-color AccentColor`: the catalog holds only the icon, no colour
+#   set. The app declares no accent colour, so dropping the flag loses nothing.
+# - a closed stdin, which is how Tauri launches it. /dev/null is fine.
+#
+# Every other argument goes to the real actool unchanged.
+args=()
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--accent-color" ]; then
+    shift 2
+    continue
+  fi
+  args+=("$1")
+  shift
+done
+exec /usr/bin/xcrun actool "${args[@]}" </dev/null

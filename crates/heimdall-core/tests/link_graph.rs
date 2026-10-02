@@ -7,13 +7,12 @@
 use camino::Utf8PathBuf;
 use heimdall_core::commands::{link_graph, LinkGraphRequest, LinkGraphResponse};
 use heimdall_core::paths::RelPath;
-use heimdall_core::{template, Vault};
+use heimdall_core::Vault;
 
 fn vault() -> (tempfile::TempDir, Vault) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-    let vault = Vault::open_with_lock_dir(&root, &test_lock_dir()).unwrap();
-    template::scaffold_aios_only(&vault).unwrap();
+    let vault = Vault::open_with_data_dir(&root, &test_data_dir()).unwrap();
     (dir, vault)
 }
 
@@ -208,43 +207,19 @@ fn a_self_link_is_not_an_edge() {
 }
 
 #[test]
-fn the_graph_covers_the_protected_tree_and_marks_those_nodes() {
+fn every_node_says_whether_it_is_locked() {
     let (_dir, vault) = vault();
-    note(&vault, "ideas/source.md", "Remember [[memory]].\n");
+    note(&vault, "ideas/open.md", "# Open\n");
+    note(&vault, "projects/kept.md", "# Kept\n");
+    heimdall_core::lock(&vault, heimdall_core::LockRequest { path: Some("projects".into()) }).unwrap();
 
     let response = graph(&vault);
-    let memory = response
+    let locked: Vec<_> = response
         .nodes
         .iter()
-        .find(|node| node.path == "aios/memories/memory.md")
-        .expect("the main memory is a node");
-    assert!(memory.in_aios);
-
-    // The file tree in the desktop shows aios/, so the graph has to agree.
-    assert_eq!(
-        edges(&response),
-        [("ideas/source.md".into(), "aios/memories/memory.md".into(), 1)]
-    );
-}
-
-#[test]
-fn excluding_the_protected_tree_removes_its_nodes_and_every_edge_touching_them() {
-    let (_dir, vault) = vault();
-    note(&vault, "ideas/source.md", "Remember [[memory]].\n");
-
-    let response = link_graph(
-        &vault,
-        LinkGraphRequest {
-            include_aios: false,
-            max_depth: None,
-        },
-    )
-    .unwrap();
-
-    assert_eq!(paths(&response), ["ideas/source.md"]);
-    assert!(response.edges.is_empty());
-    // Not silently dropped: the link is still reported, just unresolved.
-    assert_eq!(response.unresolved[0].target, "memory");
+        .map(|node| (node.path.as_str(), node.locked))
+        .collect();
+    assert_eq!(locked, [("ideas/open.md", false), ("projects/kept.md", true)]);
 }
 
 #[test]
@@ -256,12 +231,8 @@ fn hidden_folders_and_debris_are_never_nodes() {
     std::fs::write(dir.path().join("ideas/.DS_Store"), b"junk").unwrap();
     std::fs::write(dir.path().join("ideas/notes.txt"), "not markdown\n").unwrap();
 
-    // `aios/memories/memory.md` is real content and belongs in the graph;
-    // `.trash/`, `.DS_Store`, and a non-Markdown file do not.
-    assert_eq!(
-        paths(&graph(&vault)),
-        ["aios/memories/memory.md", "ideas/real.md"]
-    );
+    // `.trash/`, `.DS_Store`, and a non-Markdown file are not content.
+    assert_eq!(paths(&graph(&vault)), ["ideas/real.md"]);
 }
 
 #[test]
@@ -355,15 +326,15 @@ fn a_relative_link_climbing_past_the_vault_root_is_unresolved_not_a_crash() {
     assert_eq!(response.unresolved[0].target, "../../../etc/passwd.md");
 }
 
-/// Where these tests keep their write locks.
+/// Where these tests keep Heimdall's application data (write locks, lock rules).
 ///
 /// Outside the vault, as production does, but under the system temp directory
 /// rather than the real application-data one: a test run must not leave files
-/// in a developer's home. Lock files are named by a hash of the vault's path
-/// and every vault here is a fresh temp directory, so sharing one directory
-/// cannot collide.
-fn test_lock_dir() -> camino::Utf8PathBuf {
+/// in a developer's home. Per-vault files are named by a hash of the vault's
+/// path and every vault here is a fresh temp directory, so sharing one
+/// directory cannot collide.
+fn test_data_dir() -> camino::Utf8PathBuf {
     camino::Utf8PathBuf::from_path_buf(std::env::temp_dir())
         .expect("temp dir is UTF-8")
-        .join("heimdall-test-locks")
+        .join("heimdall-test-data")
 }

@@ -1,164 +1,410 @@
 # Heimdall
 
-An intent-aware layer over Markdown vaults. Heimdall gives AI clients
-constrained, purpose-aware operations over notes, durable memories, and
-entries — instead of unrestricted filesystem access.
+Markdown vaults your AI can read and write, and you can lock.
+
+Heimdall gives AI clients two verbs over your notes, `read` and `write`, instead
+of unrestricted filesystem access. You can **lock** any note, any folder, or the
+whole vault, and nothing can change it until you unlock it — not an agent, not a
+script, not the editor — and unlocking asks for Touch ID or your password.
 
 A vault is a folder of Markdown files and nothing else, so any Markdown editor
-opens the same files.
+opens the same files. Heimdall keeps nothing of its own inside it.
 
-`docs/SPEC.md` is the source of truth for product behavior.
+Heimdall comes in two parts:
 
-## Status
+- **Heimdall.app** is a desktop editor with a file tree, a Markdown editor with
+  preview, and a link graph. It is also where you connect AI clients.
+- **`heimdall`** is the command line tool and MCP server. It ships inside the
+  app, and you can also build it on its own.
 
-**Phases 1–3 and 5 (SPEC §18) are implemented**: `heimdall-core`, the direct shell
-CLI, the MCP stdio server, the Tauri desktop app, and the desktop editor — its
-client write operations, the link graph, and the three-pane workspace. Phase 4 —
-signed artifacts and installers — is still to come.
+## Install
 
-## Build
+Requires macOS 11 or later on Apple Silicon.
+
+1. Download `Heimdall_<version>_aarch64.dmg` from the
+   [Releases](https://github.com/sahelars/heimdall/releases) page.
+2. Open it and drag **Heimdall** into **Applications**.
+3. Launch Heimdall from Applications. The app is signed with a Developer ID and
+   notarized by Apple, so macOS opens it after the usual "downloaded from the
+   internet" confirmation.
+
+Run Heimdall from `/Applications`, not from the mounted disk image. When you
+connect an AI client, the app writes the absolute path of its bundled
+`heimdall` into the client's configuration. A path inside `/Volumes/…`
+disappears when the disk image is ejected.
+
+### Put `heimdall` on your PATH (optional)
+
+The app bundles a signed command line tool that always matches the app's
+version. To use it from a terminal, link it onto your `PATH`:
 
 ```bash
-cargo build --workspace
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+sudo ln -sf /Applications/Heimdall.app/Contents/MacOS/heimdall /usr/local/bin/heimdall
+heimdall --version
 ```
 
-## Use
+If you'd rather not use `sudo`, link it into a directory you own that is already
+on your `PATH`, such as `~/.local/bin`. The link follows the app, so updating
+Heimdall updates the CLI too.
 
-Create a vault, or add the managed structure to a folder of notes you already have:
+## Getting started
+
+Open **Heimdall → Settings…** (`⌘,`) and go to **Vault**. From there you can
+create a new vault, which starts with a few example notes, or open a folder of
+Markdown you already have. Opening an existing folder writes nothing into it.
+
+To do the same from a terminal:
 
 ```bash
 heimdall create my-vault --root ~/Documents
 ```
 
-Every domain command takes an explicit `--vault` and prints a JSON envelope on
-stdout:
+## Connecting an AI client
 
-```bash
-V=~/Documents/my-vault
+Open **Settings → Server**.
 
-heimdall list-documents --vault "$V" --recursive
-heimdall read-documents --vault "$V" --doc ideas/hello_world.md
+1. Make sure each vault you want AI clients to use is **Available to AI
+   clients**. A vault you create or open in Heimdall is, unless you switch it
+   off. Change it later from the Active vault panel on the Vault screen or the
+   list on the Server screen. Each shared vault gets a name (its folder name
+   unless you rename it), and that name is all a client ever sees.
+2. **Add entry** next to Claude Desktop or ChatGPT. This writes one `heimdall`
+   entry into that client's configuration, whatever the number of vaults, and
+   leaves everything else in the file untouched. Per-vault entries from older
+   versions are replaced, and their vaults are shared first.
+3. Restart the client. For ChatGPT, use **Work** or **Codex** mode: plain chat
+   and chatgpt.com don't run local servers.
 
-heimdall list-memories  --vault "$V"
-heimdall read-memory    --vault "$V"
-echo "# Memory" | heimdall write-memory --vault "$V" --expected-revision "blake3:..."
-echo "# Topic"  | heimdall write-memory --vault "$V" --extended topic.md --create
+**Run health check** performs a real MCP handshake, which confirms the server
+starts and answers. Sharing, unsharing, or renaming a vault later needs no
+restart. The client sees the change on its next call.
 
-heimdall list-entries --vault "$V" --kind conversation
-echo "# Summary" | heimdall create-entry --vault "$V" --kind conversation
-heimdall read-entry --vault "$V" --kind conversation --id 2026-08-16_10-30-00.md
-```
-
-Markdown content always arrives on stdin, never as a shell-interpreted argument.
-
-Exit codes: `0` success, `1` domain error (the error envelope is still printed),
-`2` usage error.
-
-## Use from an AI client
-
-One server process per vault, over stdio:
-
-```bash
-heimdall mcp --vault ~/Documents/my-vault
-```
+For any other MCP client, run `heimdall mcp` over stdio. Give the absolute path
+to the bundled binary, because GUI clients don't inherit your shell's `PATH`:
 
 ```json
 {
   "mcpServers": {
     "heimdall": {
-      "command": "heimdall",
-      "args": ["mcp", "--vault", "/Users/name/Documents/my-vault"]
+      "command": "/Applications/Heimdall.app/Contents/MacOS/heimdall",
+      "args": ["mcp"]
     }
   }
 }
 ```
 
-Eight tools: `list_documents`, `read_documents`, `list_memories`, `read_memory`,
-`write_memory`, `list_entries`, `read_entry`, `create_entry`. There is no general
-file read, write, or execute tool, and no tool takes a vault path — the vault is
-fixed by `--vault` and cannot be named, switched, or discovered by a call.
-Creating a vault stays a shell command.
+For example, with Claude Code:
 
-There is no agent-instructions file and no tool to read one. MCP already carries
-that: the server publishes an `instructions` string at initialization, so a
-client has the rules before its first call rather than after it. What varies per
-vault — how this user wants their assistant to work — is durable context, and
-lives in the main memory, which those instructions point at.
+```bash
+claude mcp add heimdall -- /Applications/Heimdall.app/Contents/MacOS/heimdall mcp
+```
+
+From the shell, `heimdall vaults` lists vaults and which are shared, and
+`heimdall share --vault PATH [--name NAME]` and `heimdall unshare --vault PATH`
+change that.
+
+### "Operation not permitted" and vaults in Documents
+
+macOS guards Documents, Desktop, Downloads, iCloud Drive, other cloud storage,
+and external volumes. When ChatGPT or Claude starts `heimdall mcp`, macOS judges
+that process on its own, separately from the Heimdall app, and refuses it these
+folders without asking. The client still lists Heimdall's tools, but every call
+to such a vault reports "Operation not permitted". There are two fixes:
+
+- Keep vaults in a folder of their own in your home directory, such as
+  `~/Heimdall/Work`. Settings → Vault suggests this and warns before you create
+  a vault anywhere guarded.
+- Or add Heimdall's command line tool under **System Settings → Privacy &
+  Security → Full Disk Access**. On the Server screen, **Open Privacy settings**
+  opens that list and **Show Heimdall's command in Finder** selects
+  `Heimdall.app/Contents/MacOS/heimdall` so you can drag it in. Then restart the
+  client.
+
+### What an agent can do
+
+An agent gets two tools, **`read`** and **`write`**, the same two verbs as the
+shell.
+
+- **No general file access.** There is no general file read, write, or execute
+  tool.
+- **No lock tools.** There is no `lock` or `unlock` tool.
+- **Only the vaults you share, only by name.** A call names a shared vault by
+  the name you gave it, never by a path. With more than one shared, a call that
+  doesn't name one is refused, along with the list of names. A vault you
+  haven't shared, a made-up name, and a path all get the same "not found".
+  Sharing and creating vaults are things you do, not tools.
+
+The server's initialization instructions tell a client to:
+
+- start with `read`,
+- pass the revision from its latest read when it writes,
+- use these tools rather than the filesystem,
+- treat a locked path as read-only. They are told not to try any other route:
+  not a shell, file tools, scripts, or operating the Heimdall app or any other
+  app through computer use. A refused write is reported to you, with the lock
+  responsible. The `write` tool's description and every `LOCKED` refusal say
+  the same, for clients that never show the instructions.
 
 Each tool publishes an input and output schema derived from the same Rust types
-the shell returns, so the two adapters cannot drift. Results come back as typed
-`structuredContent` rather than the shell envelope. Expected refusals are tool
-results flagged `isError` carrying a domain `code`, `message`, and safe
-`details`; protocol errors are reserved for calls the server cannot execute at
-all. Pinned to `rmcp` 3.1.3 and MCP protocol `2025-11-25`; check with:
+the shell returns, so the two cannot drift. Results come back as typed
+`structuredContent`. An expected refusal is a tool result flagged `isError`,
+carrying a domain `code` (`LOCKED`, `REVISION_CONFLICT`, …), a `message`, and
+safe `details`. Protocol errors are reserved for calls the server cannot execute
+at all.
+
+Heimdall is pinned to `rmcp` 3.1.3 and MCP protocol `2025-11-25`. To check:
 
 ```bash
 heimdall --version --json
 ```
 
-## Desktop app
+## Locks
 
-A three-pane workspace over the same vault.
+A locked note can be read but not written, moved, or deleted, whether by an
+agent, a script, or the desktop editor. Every read reports whether a path is
+locked. Locking a folder locks everything in it, and a single note inside it can
+then be unlocked again.
+
+Only people set locks, at the shell or in the desktop. An agent can see a lock
+in every `read`, but it can neither lift one nor set one. Setting one is
+withheld too, because a folder lock would erase the note-level unlocks beneath
+it.
+
+Locks are enforced in three places:
+
+- **In Heimdall.** Every write path checks the lock, whatever spelling it was
+  given: another capitalisation, a decomposed accent, or a symlinked folder.
+- **By macOS.** Each locked note gets the filesystem's immutable flag, the one
+  Finder calls "Locked". An agent's shell, `apply_patch`, another editor, or
+  `rm` all get "Operation not permitted". A note carrying the flag counts as
+  locked even if Heimdall's own records are deleted.
+- **At the unlock.** Unlocking from the app or with `heimdall unlock` asks for
+  Touch ID or your login password, and the prompt says which program asked.
+  An agent that drives the app through computer use can press the button, but
+  it can't answer that prompt.
+
+What a lock doesn't stop is an agent deliberately working against you with
+your own account. It could run `chflags nouchg` on a note, or untick "Locked" in
+Finder before editing. Agents are told not to try. Don't give computer-use
+agents Finder or a text editor for vault work.
+
+## The desktop app
+
+The app has three panes.
+
+- **Left** is the whole vault. Its toolbar has new note, new folder, sort,
+  collapse all, and a lock for the whole vault. Right-click an item to rename,
+  delete, lock, or unlock it. Locked notes and folders carry a small lock glyph.
+- **Middle** is the open note.
+  - At the top are a breadcrumb with back and forward, a lock toggle, and a
+    switch between the Markdown source and a rendered preview.
+  - The preview shows YAML frontmatter as a properties table, draws `mermaid`
+    diagrams, and lists linked mentions.
+  - A locked note opens read-only. The note's heading is its filename: editing
+    one renames the other.
+- **Right** is a force-directed graph of the vault's links.
+  - Pan with inertia, and zoom about the pointer.
+  - Drag a node and its neighbours follow.
+  - Click a node to open its note.
+  - Hover over a node to light up its neighbourhood and dim the rest.
+
+`⌘O` finds a note by name.
+
+Renaming or moving a note asks before it updates the `[[wikilinks]]` that point
+at it. The dialog names the notes it would rewrite, and offers **Update links**
+or **Rename only**. Deleting moves a note into the vault's `.trash/`; nothing is
+ever unlinked.
+
+The editor saves through `write`, exactly as an agent does, so a lock or a stale
+revision refuses it too.
+
+**Settings** (`⌘,`) has four sections:
+
+- **Vault** creates a vault or opens an existing folder.
+- **Server** chooses which vaults AI clients can see and connects clients, as
+  described above.
+- **Appearance** overrides the system theme and sets an accent colour for each
+  theme.
+- **Diagnostics** reports which binary is in use, its versions, the vault's
+  state, the enforced limits, and recent failures.
+
+Dark mode is pure black behind white, and light mode is the exact inverse. Until
+you pick an accent, the theme is monochrome.
+
+## Using the command line
+
+Inside a vault, `read`, `write`, `lock`, and `unlock` need no configuration.
+They work on the current folder by default, and paths are relative to it:
 
 ```bash
-cd apps/desktop
-npm install
-npm run sidecar        # build the CLI and stage it as a Tauri externalBin
-npm run tauri:dev      # or: npm run tauri:build
+cd ~/Documents/my-vault/projects
+
+heimdall read                              # list this folder
+heimdall read --recursive                  # ...and everything beneath it
+heimdall read my_project.md                # read a note (bounded; follow next_line)
+heimdall read ../ideas/hello_world.md      # anywhere else in the vault
+
+echo "# Plan" | heimdall write plan.md     # create a note; never replaces one
+echo "# Plan v2" | heimdall write plan.md --expected-revision "blake3:..."
+
+heimdall lock                              # lock this folder
+heimdall unlock my_project.md              # ...but let this one note be edited
+heimdall lock ..                           # lock the whole vault
 ```
 
-Three panes. **Left** is the whole vault including `aios/`, with new note, new
-folder, sort, and collapse-all, and rename/delete on right-click. **Middle** is the note: a breadcrumb with
-back/forward, and a toggle between a Markdown source editor and a rendered
-preview that shows YAML frontmatter as a properties table, draws `mermaid`
-diagrams, and lists linked mentions. **Right** is a force-directed graph of the
-vault: pan with inertia, zoom about the pointer, drag
-a node and its neighbours follow, click one to open it, hover to light up its
-neighbourhood and dim the rest. `⌘O` finds a note by name.
+From anywhere else, name the vault with `--vault`. Paths are then relative to
+the vault root, and the full path to a note works too.
 
-The note's heading is its filename — editing one renames the other.
+- **Output.** Every command prints a versioned JSON envelope on stdout.
+- **Input.** Markdown content always arrives on stdin, never as a
+  shell-interpreted argument.
+- **Exit codes.** `0` is success. `1` is a domain error, and the error envelope
+  is still printed. `2` is a usage error.
 
-Dark mode is pure black behind white; light mode is the exact inverse. The
-system preference decides unless overridden. Each theme has its own accent
-colour, set in Settings, spent on links, the open note, the active graph node,
-and mermaid. Until you pick one that theme is monochrome — black links on white,
-white on black.
+## Updating and uninstalling
 
-**Heimdall → Settings…** (`⌘,`) opens a modal with four sections: **Vault**
-creates a templated vault or initializes a folder you already have; **Server**
-shows the exact `heimdall mcp` command, generates the `mcpServers` snippet, offers
-to write it into a detected client's configuration, and proves it works with a
-real MCP handshake; **Appearance** overrides the theme; **Diagnostics** reports
-which binary is in use, its versions, the vault's state, the enforced limits, and
-recent failures.
+**To update,** download the new DMG and drag Heimdall into Applications,
+replacing the old copy. Your vaults, locks, and client configurations are kept,
+and the bundled CLI is replaced along with the app.
 
-Editing needs writes the MCP surface deliberately does not have, so the desktop
-calls shell subcommands instead — `write-document`, `create-folder`, `move-path`,
-`delete-path`, `write-entry`, and `link-graph`. None of them is
-an MCP tool, and none of their types derives `JsonSchema`, so giving one a tool
-would not compile. The tool surface stays at eight. Saving carries the revision
-the note was read at, and a stale one becomes a conflict the user resolves —
-never a silent overwrite. Deleting moves a note into the vault's `.trash/`;
-nothing is ever unlinked.
+**To uninstall:**
 
-The app always runs the version-matched CLI bundled inside it — never one found
-on `PATH` — and never uses a shell. React cannot name an executable or invent a
-flag: it calls a Tauri command whose subcommand and argument keys are both
-allowlisted in Rust.
+1. Quit Heimdall and move it from Applications to the Trash.
+2. Remove the CLI link if you made one:
+   `sudo rm /usr/local/bin/heimdall`.
+3. Optionally, remove Heimdall's own data:
+   `~/Library/Application Support/heimdall/`. This holds the registry of known
+   vaults, the shared vaults, the lock rules, and the write locks. Deleting it
+   drops every lock rule. Notes that were locked keep the macOS "Locked" flag
+   until you untick it in Finder (Get Info).
+4. Remove the `heimdall` entry from any AI client you connected.
+
+Your vaults are ordinary folders of Markdown, and uninstalling never touches
+them.
+
+## Building from source
+
+You need Rust 1.85 or later, Node.js 22, and Xcode's command line tools.
+
+```bash
+cargo build --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+
+cd apps/desktop
+npm install
+npm test
+npm run sidecar        # build the CLI and stage it as a Tauri externalBin
+npm run tauri:dev      # run the desktop app
+npm run tauri:build    # an unsigned .app and .dmg
+```
+
+`cargo run -p heimdall-cli -- <args>` runs the CLI without installing it.
+
+## Releasing
+
+A release is a Developer ID–signed, notarized, and stapled `Heimdall.app` inside
+a signed, notarized, and stapled DMG, for Apple Silicon.
+
+### One-time setup
+
+1. **Signing certificate.**
+   - In Keychain Access, choose **Certificate Assistant → Request a Certificate
+     from a Certificate Authority**, and save the request to disk. This creates
+     the private key in your login keychain.
+   - At [developer.apple.com](https://developer.apple.com/account/resources/certificates/list),
+     create a **Developer ID Application** certificate from that request. This
+     needs the Account Holder role.
+   - Download the certificate and double-click it to install it.
+   - Check it with `security find-identity -v -p codesigning`. If it shows as
+     untrusted, install Apple's *Developer ID - G2* intermediate from
+     [apple.com/certificateauthority](https://www.apple.com/certificateauthority/).
+   - Export the certificate together with its private key as a `.p12` backup,
+     and keep it out of the repository.
+2. **Notarization key.**
+   - In App Store Connect, go to **Users and Access → Integrations → Team
+     Keys** and create a key with the *Developer* role.
+   - Download `AuthKey_<KEYID>.p8`. Apple only lets you download it once.
+   - Note the key ID and the issuer ID.
+
+### Each release
+
+1. Bump `version` in all three places: `Cargo.toml`,
+   `apps/desktop/package.json`, and `apps/desktop/src-tauri/tauri.conf.json`.
+2. Set the four `APPLE_*` variables and run the release:
+
+   ```bash
+   export APPLE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+   export APPLE_API_KEY="<key id>"
+   export APPLE_API_ISSUER="<issuer id>"
+   export APPLE_API_KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_<KEYID>.p8"
+
+   cd apps/desktop
+   npm run release:mac
+   ```
+
+The script does the following:
+
+1. Checks the credentials.
+2. Builds the release CLI and the app. Tauri signs the app and the bundled CLI
+   with the hardened runtime, notarizes the app, and staples the ticket.
+3. Signs, notarizes, and staples the DMG.
+4. Checks every signature the way Gatekeeper will.
+5. Prints the DMG's path and its SHA-256 for the release notes.
+
+`npm run tauri:build` puts `scripts/actool/actool` first on `PATH`. Tauri
+compiles `Icon.icon` with `--accent-color AccentColor` and a closed stdin, and
+`actool` 26.6 crashes on either one while creating `Assets.car`. The wrapper
+drops the flag, gives `actool` `/dev/null` as stdin, and passes everything else
+through unchanged. Once Tauri or Xcode fixes the crash, remove the wrapper.
 
 ## Design in one paragraph
 
 `heimdall-core` owns every filesystem operation; adapters only translate into it.
 The vault is opened once as a `cap-std` directory capability, so `..`, absolute
 children, and symlinks pointing out of the vault fail at the syscall boundary
-rather than being filtered by hand. Ordinary document operations never see the
-protected `aios/` tree. No operation reads a whole vault: listings paginate and
-reads are bounded by line and byte budgets, and partial results always say so.
-Replacing a memory requires the revision from the latest read, compared and
-written inside one cross-process lock; entries are create-only over MCP and never
-overwrite. The desktop's own write path obeys the same revision rule, and the one
-operation that does read the whole vault — the link graph — is capped by node,
-per-file, and total-byte budgets, returns metadata and link endpoints but never
-content, and reports exactly what it left out.
+rather than being filtered by hand. No operation reads a whole vault: listings
+paginate and reads are bounded by line and byte budgets, and partial results
+always say so. Replacing a note requires the revision from the latest read,
+compared, checked against the lock rules, and written inside one cross-process
+lock; a write without a revision only ever creates. The write lock, the lock
+rules, and the registry of known vaults all live in the per-user
+application-data directory, never in the vault. The one operation that does read
+the whole vault — the link graph — is capped by node, per-file, and total-byte
+budgets, returns metadata and link endpoints but never content, and reports
+exactly what it left out.
+
+The app never looks for a `heimdall` on your `PATH`; it always runs the
+version-matched CLI bundled inside it. It never uses a shell either. React
+cannot name an executable or invent a flag: it calls a Tauri command whose
+subcommand and argument keys are both allowlisted in Rust.
+
+`docs/SPEC.md` is the source of truth for product behaviour.
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). Every
+contributor signs the [Contributor License Agreement](CLA.md) once, by
+commenting on their first pull request.
+
+## License
+
+Heimdall is **source-available, not open source**. It is © 2026 Sam Larsen and
+licensed under the [Sustainable Use License 1.0](LICENSE).
+
+**You may:**
+
+- read the source, and modify it;
+- use Heimdall, modified or not, for your own internal business purposes, or
+  for personal or non-commercial use;
+- share it with others free of charge for non-commercial purposes.
+
+**You may not, without a separate license:**
+
+- sell Heimdall, or a version of it;
+- offer it to others commercially, for example as a paid or hosted product.
+
+**You must** keep the license and copyright notices intact, and mark any
+modified copy you share as modified.
+
+For a commercial license, contact samhlarsen@proton.me.

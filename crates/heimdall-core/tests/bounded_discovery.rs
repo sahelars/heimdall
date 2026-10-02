@@ -1,20 +1,19 @@
 //! The listing scan guard (SPEC §8).
 //!
-//! One `list_documents` call examines at most 10,000 filesystem entries. When
+//! One folder `read` examines at most 10,000 filesystem entries. When
 //! the guard trips, the partial page still comes back with a cursor so the
 //! caller can keep going rather than being stuck at a hard wall.
 
 use camino::Utf8PathBuf;
-use heimdall_core::commands::{list_documents, ListDocumentsRequest};
+use heimdall_core::commands::{read, Listing, ReadRequest};
 use heimdall_core::limits::LIST_SCAN_GUARD;
-use heimdall_core::{template, Vault};
+use heimdall_core::Vault;
 
 /// A vault holding more notes than one call is allowed to examine.
 fn oversized_vault() -> (tempfile::TempDir, Vault) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-    let vault = Vault::open_with_lock_dir(&root, &test_lock_dir()).unwrap();
-    template::scaffold_aios_only(&vault).unwrap();
+    let vault = Vault::open_with_data_dir(&root, &test_data_dir()).unwrap();
 
     let notes = dir.path().join("notes");
     std::fs::create_dir(&notes).unwrap();
@@ -24,10 +23,11 @@ fn oversized_vault() -> (tempfile::TempDir, Vault) {
     (dir, vault)
 }
 
-fn list(vault: &Vault, cursor: Option<String>) -> heimdall_core::commands::ListDocumentsResponse {
-    list_documents(
+fn list(vault: &Vault, cursor: Option<String>) -> Listing {
+    read(
         vault,
-        ListDocumentsRequest {
+        ReadRequest {
+            vault: None,
             recursive: true,
             cursor,
             limit: Some(200),
@@ -35,6 +35,8 @@ fn list(vault: &Vault, cursor: Option<String>) -> heimdall_core::commands::ListD
         },
     )
     .unwrap()
+    .listing
+    .expect("the vault root is a folder")
 }
 
 #[test]
@@ -100,8 +102,7 @@ mod graph_bounds {
     fn vault_with(count: usize) -> (tempfile::TempDir, Vault) {
         let dir = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-        let vault = Vault::open_with_lock_dir(&root, &test_lock_dir()).unwrap();
-        template::scaffold_aios_only(&vault).unwrap();
+        let vault = Vault::open_with_data_dir(&root, &test_data_dir()).unwrap();
 
         let notes = dir.path().join("notes");
         std::fs::create_dir(&notes).unwrap();
@@ -120,10 +121,9 @@ mod graph_bounds {
 
         assert_eq!(response.nodes.len(), GRAPH_MAX_NODES);
         assert!(response.truncated.node_cap_hit);
-        // The main memory is a note too, so the overflow is the excess plus it.
         assert_eq!(
             response.nodes.len() + response.truncated.nodes_omitted,
-            GRAPH_MAX_NODES + over + 1
+            GRAPH_MAX_NODES + over
         );
     }
 
@@ -171,7 +171,6 @@ mod graph_bounds {
         let shallow = link_graph(
             &vault,
             LinkGraphRequest {
-                include_aios: false,
                 max_depth: Some(2),
             },
         )
@@ -188,7 +187,6 @@ mod graph_bounds {
         let full = link_graph(
             &vault,
             LinkGraphRequest {
-                include_aios: false,
                 max_depth: Some(16),
             },
         )
@@ -199,15 +197,15 @@ mod graph_bounds {
     }
 }
 
-/// Where these tests keep their write locks.
+/// Where these tests keep Heimdall's application data (write locks, lock rules).
 ///
 /// Outside the vault, as production does, but under the system temp directory
 /// rather than the real application-data one: a test run must not leave files
-/// in a developer's home. Lock files are named by a hash of the vault's path
-/// and every vault here is a fresh temp directory, so sharing one directory
-/// cannot collide.
-fn test_lock_dir() -> camino::Utf8PathBuf {
+/// in a developer's home. Per-vault files are named by a hash of the vault's
+/// path and every vault here is a fresh temp directory, so sharing one
+/// directory cannot collide.
+fn test_data_dir() -> camino::Utf8PathBuf {
     camino::Utf8PathBuf::from_path_buf(std::env::temp_dir())
         .expect("temp dir is UTF-8")
-        .join("heimdall-test-locks")
+        .join("heimdall-test-data")
 }

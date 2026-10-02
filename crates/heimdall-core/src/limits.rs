@@ -14,22 +14,17 @@ pub const RECURSE_DEPTH_DEFAULT: usize = 4;
 pub const RECURSE_DEPTH_MAX: usize = 16;
 
 // Reads (SPEC §8, §10).
-pub const READ_MAX_DOCUMENTS: usize = 10;
 pub const READ_LINES_DEFAULT: usize = 200;
 pub const READ_LINES_MAX: usize = 1_000;
 pub const READ_TOTAL_BYTES_DEFAULT: usize = 64 * 1024;
 pub const READ_TOTAL_BYTES_MAX: usize = 256 * 1024;
 
 // Writes (SPEC §10).
-/// The largest ordinary note the desktop client may save.
+/// The largest note `write` accepts.
 ///
 /// Matched to `STDIN_MAX_BYTES` below: content arrives on stdin, so a larger
 /// cap here would only be rejected one layer down with a less useful message.
 pub const DOCUMENT_MAX_BYTES: usize = 1024 * 1024;
-pub const MAIN_MEMORY_MAX_BYTES: usize = 32 * 1024;
-pub const MAIN_MEMORY_WARN_BYTES: usize = 24 * 1024;
-pub const EXTENDED_MEMORY_MAX_BYTES: usize = 1024 * 1024;
-pub const ENTRY_CONTENT_MAX_BYTES: usize = 1024 * 1024;
 
 // Link graph (SPEC §8). The one operation that reads the whole vault, so its
 // bounds are caps rather than pagination.
@@ -37,7 +32,7 @@ pub const ENTRY_CONTENT_MAX_BYTES: usize = 1024 * 1024;
 /// anyway, and the response reports what it left out.
 pub const GRAPH_MAX_NODES: usize = 5_000;
 /// The most of any single file that is scanned for links. A note larger than a
-/// whole `read_documents` request is not a note.
+/// whole `read` is not a note.
 pub const GRAPH_MAX_FILE_BYTES: u64 = READ_TOTAL_BYTES_MAX as u64;
 /// The total scan budget: roughly `GRAPH_MAX_NODES` files of average size, and
 /// the wall that stops a vault full of pasted logs.
@@ -57,7 +52,7 @@ pub const RELINK_MAX_FILES: usize = 1_000;
 
 /// The largest body any single stdin read will accept, used by the CLI to bound
 /// input before it reaches a domain limit check.
-pub const STDIN_MAX_BYTES: usize = EXTENDED_MEMORY_MAX_BYTES;
+pub const STDIN_MAX_BYTES: usize = DOCUMENT_MAX_BYTES;
 
 fn resolve(
     requested: Option<u32>,
@@ -109,7 +104,7 @@ pub fn resolve_graph_depth(requested: Option<u32>) -> Result<usize> {
     )
 }
 
-/// Recursion depth for `list_documents`.
+/// Recursion depth for a folder `read`.
 pub fn resolve_max_depth(requested: Option<u32>) -> Result<usize> {
     resolve(
         requested,
@@ -119,7 +114,7 @@ pub fn resolve_max_depth(requested: Option<u32>) -> Result<usize> {
     )
 }
 
-/// Total content budget across every file in one read request.
+/// Content budget for one `read` of a note.
 pub fn resolve_max_total_bytes(requested: Option<u32>) -> Result<usize> {
     resolve(
         requested,
@@ -216,14 +211,9 @@ mod tests {
 
     #[test]
     fn write_size_check_reports_the_breached_limit() {
-        assert!(check_write_size(MAIN_MEMORY_MAX_BYTES, MAIN_MEMORY_MAX_BYTES, "main memory").is_ok());
-        let err = check_write_size(
-            MAIN_MEMORY_MAX_BYTES + 1,
-            MAIN_MEMORY_MAX_BYTES,
-            "main memory",
-        )
-        .unwrap_err();
+        assert!(check_write_size(DOCUMENT_MAX_BYTES, DOCUMENT_MAX_BYTES, "document").is_ok());
+        let err = check_write_size(DOCUMENT_MAX_BYTES + 1, DOCUMENT_MAX_BYTES, "document").unwrap_err();
         assert_eq!(err.code, ErrorCode::LimitExceeded);
-        assert_eq!(err.details["maximum"], 32_768);
+        assert_eq!(err.details["maximum"], 1_048_576);
     }
 }

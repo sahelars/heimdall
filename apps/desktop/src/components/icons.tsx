@@ -1,7 +1,7 @@
 /**
  * The toolbar and header icons.
  *
- * Inline SVG rather than a font or a package: twelve small shapes, all drawn in
+ * Inline SVG rather than a font or a package: small shapes, all drawn in
  * `currentColor` so they inherit the theme without a single colour literal
  * living in TypeScript.
  */
@@ -129,6 +129,36 @@ export function IconMore(props: IconProps) {
   return (
     <Svg {...props}>
       <path d="M3.5 8h.01M8 8h.01M12.5 8h.01" strokeWidth="1.8" />
+    </Svg>
+  );
+}
+
+/** A closed padlock: the path is read-only. */
+export function IconLock(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M3.5 7.5h9v6h-9z" />
+      <path d="M5.5 7.5V5a2.5 2.5 0 0 1 5 0v2.5" />
+    </Svg>
+  );
+}
+
+/** An open padlock: the path can be written. */
+export function IconUnlock(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M3.5 7.5h9v6h-9z" />
+      <path d="M5.5 7.5V5a2.5 2.5 0 0 1 5 0" />
+    </Svg>
+  );
+}
+
+/** A circling arrow: fly the graph back to fit. */
+export function IconRecentre(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M13 8a5 5 0 1 1-1.5-3.55" />
+      <path d="M12 1.5V5H8.5" />
     </Svg>
   );
 }

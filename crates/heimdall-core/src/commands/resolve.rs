@@ -28,15 +28,14 @@ pub(crate) struct Note {
 /// Collect every listable Markdown file, stopping at the node cap but still
 /// counting what it had to leave out.
 ///
-/// `list_documents`' walker is not reusable here: every one of its invariants —
-/// the cursor, cursor-bounded subtree pruning, the page limit, the `aios/` skip
-/// — is about pagination, and this needs the inverse of four of the five.
+/// The folder listing's walker is not reusable here: every one of its
+/// invariants — the cursor, cursor-bounded subtree pruning, the page limit — is
+/// about pagination, and this needs the inverse of all three.
 pub(crate) fn walk(
     vault: &Vault,
     directory: &RelPath,
     level: usize,
     max_depth: usize,
-    include_aios: bool,
     found: &mut Vec<Note>,
     omitted: &mut usize,
 ) {
@@ -49,9 +48,6 @@ pub(crate) fn walk(
             continue;
         }
         let path = directory.join(&child.name);
-        if !include_aios && path.is_in_aios() {
-            continue;
-        }
 
         if child.is_dir {
             if level < max_depth {
@@ -60,7 +56,6 @@ pub(crate) fn walk(
                     &path,
                     level + 1,
                     max_depth,
-                    include_aios,
                     found,
                     omitted,
                 );

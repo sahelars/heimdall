@@ -1,4 +1,5 @@
 /target
+*.env
 .DS_Store
 
 # Desktop build outputs. The frontend bundle and the staged sidecar are both

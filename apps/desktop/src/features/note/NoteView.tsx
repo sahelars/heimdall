@@ -6,7 +6,15 @@ import { useMemo, useRef, useState } from "react";
 
 import { titleOf } from "../../api/source";
 import type { DomainError } from "../../api/types";
-import { IconBack, IconEdit, IconForward, IconMore, IconRead } from "../../components/icons";
+import {
+  IconBack,
+  IconEdit,
+  IconForward,
+  IconLock,
+  IconMore,
+  IconRead,
+  IconUnlock,
+} from "../../components/icons";
 import { Failure } from "../../components";
 import { ContextMenu } from "../../components/ContextMenu";
 import { joinTitle, splitNote, withFrontmatter, withoutTitle } from "../../markdown/frontmatter";
@@ -23,8 +31,12 @@ export interface OpenNote {
   path: string;
   buffer: string;
   dirty: boolean;
-  /** Null when the note cannot be saved from here — an entry, for instance. */
+  /** False when the note cannot be saved from here — a locked note, or a failed read. */
   editable: boolean;
+  /** Whether the note is read-only, by its own rule or an enclosing folder's. */
+  locked: boolean;
+  /** Where the rule that locks it lives (`""` is the vault root); null when unlocked. */
+  lockedAt: string | null;
   saving: boolean;
   conflict: Conflict | null;
   error: DomainError | null;
@@ -50,8 +62,10 @@ interface NoteViewProps {
   onOpenLink: (target: string, from: string) => void;
   resolves: (target: string, from: string) => boolean;
   onResolveConflict: (choice: "mine" | "theirs") => void;
-  /** Null when the note cannot be renamed — the protected tree, for instance. */
+  /** Null when the note cannot be renamed — a locked note, for instance. */
   onRename: ((name: string) => void) | null;
+  /** Lock or unlock the open note. Null hides the toggle. */
+  onToggleLock?: (() => void) | null;
 }
 
 export function NoteView(props: NoteViewProps) {
@@ -129,6 +143,24 @@ export function NoteView(props: NoteViewProps) {
 
         <div className="note__actions">
           {note.dirty ? <span className="note__dirty" title="Unsaved changes">●</span> : null}
+          {props.onToggleLock ? (
+            <button
+              type="button"
+              className="icon-button"
+              aria-label={note.locked ? "Unlock note" : "Lock note"}
+              title={
+                note.locked
+                  ? note.lockedAt && note.lockedAt !== note.path
+                    ? `Locked by ${note.lockedAt === "" ? "the vault" : note.lockedAt}; unlock this note`
+                    : "Unlock note"
+                  : "Lock note"
+              }
+              aria-pressed={note.locked}
+              onClick={props.onToggleLock}
+            >
+              {note.locked ? <IconLock /> : <IconUnlock />}
+            </button>
+          ) : null}
           <button
             type="button"
             className="icon-button"

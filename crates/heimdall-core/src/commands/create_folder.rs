@@ -2,13 +2,13 @@
 //!
 //! A client operation; no `JsonSchema` derive, so it cannot become an MCP tool.
 //!
-//! `aios/` is refused: its structure is Heimdall's, and `list_memories` and
-//! `list_entries` are both flat, so a subfolder created there would be invisible
-//! to every operation that reads the protected tree.
+//! A folder cannot be made inside a locked one: a lock fixes what a folder
+//! holds, not only the bytes of the notes in it.
 
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{Error, Result};
+use crate::notelocks::Locks;
 use crate::paths::RelPath;
 use crate::storage::Vault;
 
@@ -28,10 +28,7 @@ pub struct CreateFolderResponse {
 }
 
 pub fn create_folder(vault: &Vault, request: CreateFolderRequest) -> Result<CreateFolderResponse> {
-    vault.ensure_initialized()?;
-
     let path = RelPath::parse_file(&request.path)?;
-    path.deny_aios()?;
     path.deny_hidden()?;
 
     if vault.entry_exists(&path) {
@@ -39,7 +36,16 @@ pub fn create_folder(vault: &Vault, request: CreateFolderRequest) -> Result<Crea
             .with_detail("path", path.as_str()));
     }
 
-    let created = vault.create_dir_all(&path)?;
+    // Missing parents are made too, so the folder that must be unlocked is the
+    // deepest one that already exists.
+    let mut existing = path.parent();
+    while !existing.is_root() && !vault.is_dir(&existing) {
+        existing = existing.parent();
+    }
+    let created = vault.with_write_lock(&path, || {
+        Locks::load(vault)?.deny_change_in(&existing, &path)?;
+        vault.create_dir_all(&path)
+    })?;
 
     Ok(CreateFolderResponse {
         path: path.to_string(),

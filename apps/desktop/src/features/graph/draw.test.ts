@@ -80,8 +80,8 @@ function recorder(): Recording {
 }
 
 function model(): { nodes: SimNode[]; links: SimLink[] } {
-  const a: SimNode = { id: "a.md", title: "a", inAios: false, degree: 1, x: 0, y: 0 };
-  const b: SimNode = { id: "b.md", title: "b", inAios: false, degree: 1, x: 40, y: 0 };
+  const a: SimNode = { id: "a.md", title: "a", degree: 1, x: 0, y: 0 };
+  const b: SimNode = { id: "b.md", title: "b", degree: 1, x: 40, y: 0 };
   return { nodes: [a, b], links: [{ source: a, target: b }] };
 }
 
@@ -150,7 +150,7 @@ describe("drawing the graph", () => {
 
   it("skips a node the simulation has not placed yet", () => {
     const recording = recorder();
-    const unplaced: SimNode = { id: "c.md", title: "c", inAios: false, degree: 0 };
+    const unplaced: SimNode = { id: "c.md", title: "c", degree: 0 };
     draw(recording.painter, { nodes: [unplaced], links: [] }, options());
 
     expect(recording.arcs).toHaveLength(0);
@@ -164,7 +164,7 @@ describe("hovering a neighbourhood", () => {
     // What turns a hairball into something a neighbourhood can be read out of.
     const recording = recorder();
     const graph = model();
-    graph.nodes.push({ id: "c.md", title: "c", inAios: false, degree: 0, x: 90, y: 0 });
+    graph.nodes.push({ id: "c.md", title: "c", degree: 0, x: 90, y: 0 });
 
     draw(
       recording.painter,
@@ -183,8 +183,8 @@ describe("hovering a neighbourhood", () => {
   it("dims an edge that does not touch what is hovered", () => {
     const recording = recorder();
     const graph = model();
-    graph.nodes.push({ id: "c.md", title: "c", inAios: false, degree: 1, x: 200, y: 0 });
-    graph.nodes.push({ id: "d.md", title: "d", inAios: false, degree: 1, x: 260, y: 0 });
+    graph.nodes.push({ id: "c.md", title: "c", degree: 1, x: 200, y: 0 });
+    graph.nodes.push({ id: "d.md", title: "d", degree: 1, x: 260, y: 0 });
     graph.links.push({ source: graph.nodes[2]!, target: graph.nodes[3]! });
 
     draw(

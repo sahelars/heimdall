@@ -13,26 +13,50 @@ pub fn binary() -> PathBuf {
     assert_cmd::cargo::cargo_bin("heimdall")
 }
 
-/// Where the forked binaries keep their write locks.
+/// Where the forked binaries keep Heimdall's application data.
 ///
-/// These are real `heimdall` processes, so they resolve the production lock
+/// These are real `heimdall` processes, so they resolve the production data
 /// directory — the developer's actual application-data folder — unless told
-/// otherwise. `HEIMDALL_LOCK_DIR` is what tells them otherwise. Every vault
-/// here is a fresh temp directory and lock files are named by a hash of the
-/// vault path, so one shared directory cannot collide.
-pub fn lock_dir() -> PathBuf {
-    std::env::temp_dir().join("heimdall-test-locks")
+/// otherwise. `HEIMDALL_DATA_DIR` is what tells them otherwise. Every vault
+/// here is a fresh temp directory and per-vault files are named by a hash of
+/// the vault path, so one shared directory cannot collide.
+pub fn data_dir() -> PathBuf {
+    std::env::temp_dir().join("heimdall-test-data")
 }
 
 /// A `heimdall` command that will not write into the real application data.
+///
+/// `HEIMDALL_TEST_PRESENCE` answers the unlock prompt for it. Only a debug
+/// build listens, and only for a vault under the temp directory — which every
+/// vault here is.
 pub fn command() -> std::process::Command {
     let mut command = std::process::Command::new(binary());
-    command.env("HEIMDALL_LOCK_DIR", lock_dir());
+    command.env("HEIMDALL_DATA_DIR", data_dir());
+    command.env("HEIMDALL_TEST_PRESENCE", "confirm");
     command
 }
 
+/// A temporary vault directory whose locked notes are made deletable again
+/// on drop; a lock leaves notes immutable, and `TempDir` cannot remove them.
+pub struct TempVault(tempfile::TempDir);
+
+impl TempVault {
+    pub fn path(&self) -> &std::path::Path {
+        self.0.path()
+    }
+}
+
+impl Drop for TempVault {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("chflags")
+            .args(["-R", "nouchg"])
+            .arg(self.0.path())
+            .status();
+    }
+}
+
 /// Create a scaffolded vault and return its directory and path.
-pub fn new_vault() -> (tempfile::TempDir, String) {
+pub fn new_vault() -> (TempVault, String) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_str().unwrap().to_string();
 
@@ -43,7 +67,7 @@ pub fn new_vault() -> (tempfile::TempDir, String) {
     assert!(output.status.success(), "create failed: {output:?}");
 
     let vault = format!("{root}/demo");
-    (dir, vault)
+    (TempVault(dir), vault)
 }
 
 pub fn run(args: &[&str]) -> Output {
@@ -83,8 +107,8 @@ pub fn error_code(output: &Output) -> String {
     envelope["error"]["code"].as_str().unwrap().to_string()
 }
 
-/// The revision currently stored for the main memory.
-pub fn main_memory_revision(vault: &str) -> String {
-    let output = run(&["read-memory", "--vault", vault]);
-    data(&output)["revision"].as_str().unwrap().to_string()
+/// The revision currently stored for one note.
+pub fn revision_of(vault: &str, path: &str) -> String {
+    let output = run(&["read", path, "--vault", vault]);
+    data(&output)["document"]["revision"].as_str().unwrap().to_string()
 }

@@ -1,4 +1,4 @@
-//! Vault-relative path validation and the fixed managed locations.
+//! Vault-relative path validation.
 //!
 //! Validation here is a fast pre-filter that rejects obviously hostile input
 //! before it reaches the filesystem. The authority on containment is the
@@ -9,15 +9,6 @@ use std::fmt;
 
 use crate::errors::{Error, Result};
 
-/// The protected subtree. Ordinary document operations exclude it entirely.
-pub const AIOS_DIR: &str = "aios";
-pub const MEMORIES_DIR: &str = "aios/memories";
-pub const MAIN_MEMORY_FILE: &str = "aios/memories/memory.md";
-pub const EXTENDED_DIR: &str = "aios/memories/extended";
-pub const CONVERSATIONS_DIR: &str = "aios/conversations";
-pub const NOTIFICATIONS_DIR: &str = "aios/notifications";
-pub const ATTACHMENTS_DIR: &str = "aios/attachments";
-
 /// Where `delete_path` moves removed content.
 ///
 /// Deletion is recoverable rather than destructive: content is moved here, not
@@ -25,16 +16,6 @@ pub const ATTACHMENTS_DIR: &str = "aios/attachments";
 /// [`is_listable`] already keeps the folder out of every listing, so trashed
 /// notes disappear from the UI and from discovery without a special case.
 pub const TRASH_DIR: &str = ".trash";
-
-/// Managed directories that must exist for a vault to count as initialized.
-pub const REQUIRED_DIRS: [&str; 6] = [
-    AIOS_DIR,
-    MEMORIES_DIR,
-    EXTENDED_DIR,
-    CONVERSATIONS_DIR,
-    NOTIFICATIONS_DIR,
-    ATTACHMENTS_DIR,
-];
 
 /// Filesystem debris that is never part of a vault's content and is never
 /// copied out of the embedded template.
@@ -143,27 +124,43 @@ impl RelPath {
         }
     }
 
-    /// Whether this path is inside the protected `aios/` tree.
-    ///
-    /// The comparison is case-insensitive: on macOS and Windows `AIOS/notes.md`
-    /// and `aios/notes.md` are the same file, so a case-sensitive check would
-    /// let ordinary document operations reach protected content.
-    pub fn is_in_aios(&self) -> bool {
-        self.components()
-            .next()
-            .is_some_and(|first| first.eq_ignore_ascii_case(AIOS_DIR))
+    /// Whether this path is `outer` itself or lies beneath it, compared by
+    /// whole components: `projects2` is not inside `projects`.
+    pub fn is_within(&self, outer: &RelPath) -> bool {
+        let mut outer_components = outer.components();
+        let mut own = self.components();
+        loop {
+            match (outer_components.next(), own.next()) {
+                (None, _) => return true,
+                (Some(_), None) => return false,
+                (Some(a), Some(b)) if a == b => continue,
+                (Some(_), Some(_)) => return false,
+            }
+        }
     }
 
-    /// Reject any path that would let an ordinary document operation touch
-    /// protected content (SPEC §6).
-    pub fn deny_aios(&self) -> Result<()> {
-        if self.is_in_aios() {
-            return Err(Error::not_found(format!(
-                "\"{AIOS_DIR}/\" holds protected content and is not reachable through document operations"
-            ))
-            .with_detail("path", self.as_str()));
+    /// This path and every folder above it, nearest first, ending at the root.
+    pub fn ancestors(&self) -> Vec<RelPath> {
+        let mut chain = vec![self.clone()];
+        let mut current = self.clone();
+        while !current.is_root() {
+            current = current.parent();
+            chain.push(current.clone());
         }
-        Ok(())
+        chain
+    }
+
+    /// Re-express a path at or beneath `from` as the same path beneath `to`,
+    /// or `None` when it does not lie under `from`.
+    pub fn rebase(&self, from: &RelPath, to: &RelPath) -> Option<RelPath> {
+        if !self.is_within(from) {
+            return None;
+        }
+        let mut rebased = to.clone();
+        for component in self.components().skip(from.components().count()) {
+            rebased = rebased.join(component);
+        }
+        Some(rebased)
     }
 
     /// Reject any path with a hidden component.
@@ -187,87 +184,7 @@ impl RelPath {
     }
 }
 
-/// Whether a path is managed structure that [`Vault::ensure_initialized`] needs.
-///
-/// Moving or deleting one of these would leave a vault that no longer opens, so
-/// the client operations refuse them. The content *inside* the protected tree —
-/// entries, extended memories — stays removable; only the skeleton is fixed.
-///
-/// The comparison is case-insensitive for the reason SPEC §6 gives about
-/// `aios/`: on macOS and Windows `AIOS/Memories` names the same directory.
-///
-/// [`Vault::ensure_initialized`]: crate::storage::Vault::ensure_initialized
-pub fn is_structural(path: &RelPath) -> bool {
-    let candidates = REQUIRED_DIRS.iter().chain(std::iter::once(&MAIN_MEMORY_FILE));
-
-    candidates.into_iter().any(|managed| {
-        let mut wanted = managed.split('/');
-        let mut actual = path.components();
-        loop {
-            match (wanted.next(), actual.next()) {
-                (None, None) => return true,
-                (None, Some(_)) | (Some(_), None) => return false,
-                (Some(a), Some(b)) if a.eq_ignore_ascii_case(b) => continue,
-                (Some(_), Some(_)) => return false,
-            }
-        }
-    })
-}
-
 impl fmt::Display for RelPath {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// A validated single filename with no directory part.
-///
-/// Used wherever the contract accepts a name rather than a path: `extended` on
-/// memory operations and `id` on entry operations (SPEC §10).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BaseName(String);
-
-impl BaseName {
-    /// Validate a Markdown filename supplied by a caller.
-    pub fn parse_markdown(raw: &str, parameter: &str) -> Result<Self> {
-        let reject = |reason: &str| {
-            Err(Error::invalid_input(format!("{parameter} {reason}"))
-                .with_detail("parameter", parameter))
-        };
-
-        if raw.is_empty() {
-            return reject("must not be empty");
-        }
-        if raw.len() > 255 {
-            return reject("is longer than 255 bytes");
-        }
-        if raw.contains('/') || raw.contains('\\') {
-            return reject("must be a bare filename, not a path");
-        }
-        if raw.contains('\0') {
-            return reject("contains a NUL byte");
-        }
-        if raw == "." || raw == ".." {
-            return reject("must not be \".\" or \"..\"");
-        }
-        if raw.starts_with('.') {
-            return reject("must not start with \".\"");
-        }
-        if is_windows_prefix(raw) {
-            return reject("must not be a drive or device name");
-        }
-        if !raw.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && ext.eq_ignore_ascii_case("md")) {
-            return reject("must be a Markdown filename ending in \".md\"");
-        }
-        Ok(Self(raw.to_string()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for BaseName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
@@ -383,17 +300,6 @@ mod tests {
     }
 
     #[test]
-    fn aios_detection_ignores_case() {
-        for raw in ["aios/notes.md", "AIOS/notes.md", "AiOs/memories/memory.md"] {
-            let path = RelPath::parse(raw).unwrap();
-            assert!(path.is_in_aios(), "{raw:?} not detected as protected");
-            assert_eq!(path.deny_aios().unwrap_err().code, ErrorCode::NotFound);
-        }
-        assert!(!RelPath::parse("aiosphere/note.md").unwrap().is_in_aios());
-        assert!(!RelPath::parse("projects/aios/note.md").unwrap().is_in_aios());
-    }
-
-    #[test]
     fn markdown_detection_is_extension_based_and_case_insensitive() {
         assert!(RelPath::parse("a.md").unwrap().is_markdown());
         assert!(RelPath::parse("a.MD").unwrap().is_markdown());
@@ -408,32 +314,33 @@ mod tests {
         assert_eq!(path.parent().as_str(), "projects/lens");
         assert_eq!(path.file_name(), Some("profile.md"));
         assert_eq!(RelPath::parse("a.md").unwrap().parent().as_str(), "");
-        assert_eq!(RelPath::root().join("aios").as_str(), "aios");
-        assert_eq!(RelPath::parse("aios").unwrap().join("memories").as_str(), "aios/memories");
+        assert_eq!(RelPath::root().join("ideas").as_str(), "ideas");
+        assert_eq!(RelPath::parse("ideas").unwrap().join("drafts").as_str(), "ideas/drafts");
     }
 
     #[test]
-    fn base_names_reject_anything_that_is_not_a_bare_markdown_file() {
-        assert_eq!(
-            BaseName::parse_markdown("project_history.md", "extended").unwrap().as_str(),
-            "project_history.md"
-        );
-        for raw in [
-            "",
-            "..",
-            ".hidden.md",
-            "extended/history.md",
-            "..\\escape.md",
-            "/absolute.md",
-            "history.txt",
-            ".md",
-            "C:.md",
-        ] {
-            assert!(
-                BaseName::parse_markdown(raw, "extended").is_err(),
-                "accepted {raw:?}"
-            );
-        }
+    fn containment_is_by_whole_components() {
+        let projects = RelPath::parse("projects").unwrap();
+        assert!(RelPath::parse("projects/a.md").unwrap().is_within(&projects));
+        assert!(projects.is_within(&projects));
+        assert!(!RelPath::parse("projects2/a.md").unwrap().is_within(&projects));
+        assert!(RelPath::parse("anything").unwrap().is_within(&RelPath::root()));
+    }
+
+    #[test]
+    fn ancestors_run_from_the_path_to_the_root() {
+        let chain: Vec<_> = RelPath::parse("a/b/c.md").unwrap().ancestors();
+        let chain: Vec<_> = chain.iter().map(RelPath::as_str).collect();
+        assert_eq!(chain, ["a/b/c.md", "a/b", "a", ""]);
+    }
+
+    #[test]
+    fn rebasing_moves_a_subtree_and_ignores_anything_outside_it() {
+        let from = RelPath::parse("a").unwrap();
+        let to = RelPath::parse("x/y").unwrap();
+        assert_eq!(RelPath::parse("a/b.md").unwrap().rebase(&from, &to).unwrap().as_str(), "x/y/b.md");
+        assert_eq!(from.rebase(&from, &to).unwrap().as_str(), "x/y");
+        assert!(RelPath::parse("ab.md").unwrap().rebase(&from, &to).is_none());
     }
 
     #[test]

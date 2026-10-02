@@ -7,12 +7,12 @@ use common::*;
 #[test]
 fn a_successful_command_prints_the_versioned_ok_envelope() {
     let (_tmp, vault) = new_vault();
-    let output = run(&["list-memories", "--vault", &vault]);
+    let output = run(&["read", "--vault", &vault]);
 
     let envelope = envelope(&output);
     assert_eq!(envelope["ok"], true);
     assert_eq!(envelope["meta"]["schema_version"], 1);
-    assert!(envelope["data"]["memories"].is_array());
+    assert!(envelope["data"]["listing"]["entries"].is_array());
     assert!(envelope.get("error").is_none());
     assert_eq!(output.status.code(), Some(0));
 }
@@ -20,7 +20,7 @@ fn a_successful_command_prints_the_versioned_ok_envelope() {
 #[test]
 fn a_domain_failure_prints_the_error_envelope_and_exits_one() {
     let (_tmp, vault) = new_vault();
-    let output = run(&["read-entry", "--vault", &vault, "--kind", "conversation", "--id", "missing.md"]);
+    let output = run(&["read", "missing.md", "--vault", &vault]);
 
     let envelope = envelope(&output);
     assert_eq!(envelope["ok"], false);
@@ -34,7 +34,7 @@ fn a_domain_failure_prints_the_error_envelope_and_exits_one() {
 #[test]
 fn a_usage_error_is_distinct_from_a_domain_failure() {
     // Exit 2 with no envelope: the request never reached the domain.
-    let output = run(&["list-documents"]);
+    let output = run(&["write"]);
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert!(!output.stderr.is_empty());
@@ -43,10 +43,10 @@ fn a_usage_error_is_distinct_from_a_domain_failure() {
 #[test]
 fn stdout_carries_only_the_envelope() {
     let (_tmp, vault) = new_vault();
-    let output = run(&["read-memory", "--vault", &vault]);
+    let output = run(&["read", "ideas/hello_world.md", "--vault", &vault]);
 
     // Parsing the whole of stdout as one JSON value proves nothing else leaked
-    // into it — the discipline the MCP transport will depend on in Phase 2.
+    // into it — the discipline the MCP transport depends on.
     let _ = envelope(&output);
     assert!(
         output.stderr.is_empty(),
@@ -76,84 +76,122 @@ fn markdown_reaches_the_vault_verbatim_through_stdin() {
     // shell-interpreted argument (SPEC §11).
     let content = "# Notes\n\n`rm -rf $HOME` \"quoted\" 'single' $(echo hi)\n\n- 🌍\n";
 
-    let created = run_with_stdin(
-        &["create-entry", "--vault", &vault, "--kind", "notification"],
-        content.as_bytes(),
-    );
-    let id = data(&created)["id"].as_str().unwrap().to_string();
+    let created = run_with_stdin(&["write", "ideas/verbatim.md", "--vault", &vault], content.as_bytes());
+    assert_eq!(data(&created)["created"], true);
 
-    let read = run(&["read-entry", "--vault", &vault, "--kind", "notification", "--id", &id]);
-    let stored = data(&read)["content"].as_str().unwrap().to_string();
-    assert!(stored.ends_with(content), "{stored}");
+    let read = run(&["read", "ideas/verbatim.md", "--vault", &vault]);
+    let stored = data(&read)["document"]["content"].as_str().unwrap().to_string();
+    assert_eq!(stored, content);
 }
 
 #[test]
 fn non_utf8_stdin_is_rejected() {
     let (_tmp, vault) = new_vault();
-    let output = run_with_stdin(
-        &["create-entry", "--vault", &vault, "--kind", "notification"],
-        &[0x23, 0x20, 0xff, 0xfe],
-    );
+    let output = run_with_stdin(&["write", "ideas/bad.md", "--vault", &vault], &[0x23, 0x20, 0xff, 0xfe]);
     assert_eq!(error_code(&output), "INVALID_INPUT");
 }
 
 #[test]
-fn write_memory_round_trips_a_revision_across_processes() {
+fn write_round_trips_a_revision_across_processes() {
     let (_tmp, vault) = new_vault();
-    let revision = main_memory_revision(&vault);
+    let note = "projects/my_project.md";
+    let revision = revision_of(&vault, note);
 
     let written = run_with_stdin(
-        &["write-memory", "--vault", &vault, "--expected-revision", &revision],
-        b"# Memory\n\nFresh.\n",
+        &["write", note, "--vault", &vault, "--expected-revision", &revision],
+        b"# My Project\n\nFresh.\n",
     );
     let new_revision = data(&written)["new_revision"].as_str().unwrap().to_string();
     assert_ne!(new_revision, revision);
-    assert_eq!(main_memory_revision(&vault), new_revision);
+    assert_eq!(revision_of(&vault, note), new_revision);
 
     // The old revision is now stale.
     let stale = run_with_stdin(
-        &["write-memory", "--vault", &vault, "--expected-revision", &revision],
+        &["write", note, "--vault", &vault, "--expected-revision", &revision],
         b"clobber\n",
     );
     assert_eq!(error_code(&stale), "REVISION_CONFLICT");
 }
 
 #[test]
-fn create_flag_expresses_the_null_revision_for_a_new_extended_memory() {
+fn a_write_without_a_revision_creates_and_never_replaces() {
     let (_tmp, vault) = new_vault();
 
-    let created = run_with_stdin(
-        &["write-memory", "--vault", &vault, "--extended", "topic.md", "--create"],
-        b"# Topic\n",
-    );
+    let created = run_with_stdin(&["write", "ideas/topic.md", "--vault", &vault], b"# Topic\n");
     assert_eq!(data(&created)["created"], true);
 
-    // --create against an existing file is a conflict, not an overwrite.
-    let again = run_with_stdin(
-        &["write-memory", "--vault", &vault, "--extended", "topic.md", "--create"],
-        b"clobber\n",
-    );
-    assert_eq!(error_code(&again), "REVISION_CONFLICT");
+    for args in [
+        vec!["write", "ideas/topic.md", "--vault", &vault],
+        vec!["write", "ideas/topic.md", "--vault", &vault, "--create"],
+    ] {
+        let again = run_with_stdin(&args, b"clobber\n");
+        assert_eq!(error_code(&again), "REVISION_CONFLICT");
+    }
 }
 
 #[test]
-fn an_uninitialized_vault_reports_how_to_fix_itself() {
+fn a_folder_in_no_vault_reports_how_to_fix_itself() {
     let tmp = tempfile::tempdir().unwrap();
-    let empty = tmp.path().to_str().unwrap();
-
-    let output = run(&["list-documents", "--vault", empty]);
+    let output = common::command()
+        .args(["read"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
     assert_eq!(error_code(&output), "NOT_INITIALIZED");
     let message = envelope(&output)["error"]["message"].as_str().unwrap().to_string();
-    assert!(message.contains("heimdall create"), "{message}");
+    assert!(message.contains("--vault"), "{message}");
 }
 
 #[test]
-fn no_command_can_name_a_vault_path_in_its_payload() {
+fn inside_a_vault_the_four_verbs_need_no_vault_and_take_the_current_folder() {
     let (_tmp, vault) = new_vault();
-    // Paths in a request are vault-relative; an absolute one cannot escape.
-    let output = run(&["read-documents", "--vault", &vault, "--doc", "/etc/hosts.md"]);
-    let code = error_code(&output);
-    assert!(code == "NOT_FOUND" || code == "INVALID_INPUT", "{code}");
+    let projects = format!("{vault}/projects");
+    let here = |args: &[&str], stdin: &[u8]| {
+        use std::io::Write;
+        let mut child = common::command()
+            .args(args)
+            .current_dir(&projects)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin).unwrap();
+        child.wait_with_output().unwrap()
+    };
+
+    // `read` with no path is the folder the shell is standing in.
+    let listing = data(&here(&["read"], b""));
+    assert_eq!(listing["path"], "projects");
+    assert_eq!(listing["listing"]["entries"][0]["path"], "projects/my_project.md");
+
+    // A bare filename is in the current folder; `..` reaches the rest of the vault.
+    assert_eq!(data(&here(&["read", "my_project.md"], b""))["kind"], "document");
+    assert_eq!(data(&here(&["read", "../ideas/hello_world.md"], b""))["path"], "ideas/hello_world.md");
+    assert_eq!(data(&here(&["write", "new.md"], b"# New\n"))["path"], "projects/new.md");
+
+    // `lock` with no path locks the current folder, and a write inside it fails.
+    let locked = data(&here(&["lock"], b""));
+    assert_eq!((locked["path"].as_str(), locked["locked"].as_bool()), (Some("projects"), Some(true)));
+    let refused = here(&["write", "other.md"], b"# Other\n");
+    assert_eq!(error_code(&refused), "LOCKED");
+    assert_eq!(envelope(&refused)["error"]["details"]["locked_at"], "projects");
+
+    data(&here(&["unlock", "."], b""));
+    data(&here(&["write", "other.md"], b"# Other\n"));
+
+    // The whole path works too.
+    let absolute = format!("{projects}/other.md");
+    assert_eq!(data(&here(&["read", &absolute], b""))["path"], "projects/other.md");
+    assert_eq!(error_code(&here(&["read", "../../outside.md"], b"")), "PATH_OUTSIDE_VAULT");
+}
+
+#[test]
+fn no_command_can_reach_outside_the_vault_through_a_path() {
+    let (_tmp, vault) = new_vault();
+    // With --vault, a path is vault-relative; an absolute one outside it is refused.
+    let output = run(&["read", "/etc/hosts", "--vault", &vault]);
+    assert_eq!(error_code(&output), "PATH_OUTSIDE_VAULT");
 }
 
 #[test]
@@ -215,4 +253,41 @@ fn walk(root: &std::path::Path) -> Vec<String> {
     }
     found.sort();
     found
+}
+
+#[test]
+fn sharing_names_a_vault_for_ai_clients_and_vaults_lists_it() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let (_tmp, vault) = new_vault();
+    let run_in = |args: &[&str]| {
+        common::command()
+            .env("HEIMDALL_DATA_DIR", data_dir.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let shared = data(&run_in(&["share", "--vault", &vault, "--name", "Work"]));
+    assert_eq!(shared["name"], "Work");
+
+    let listed = data(&run_in(&["vaults"]));
+    let entry = listed["vaults"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["shared"] == true)
+        .cloned()
+        .expect("the shared vault is listed");
+    assert_eq!(entry["name"], "Work");
+    assert_eq!(entry["folder"], "demo");
+    assert_eq!(entry["exists"], true);
+
+    // A read names the vault by its shared name.
+    assert_eq!(data(&run_in(&["read", "--vault", &vault]))["vault"], "Work");
+
+    let unshared = data(&run_in(&["unshare", "--vault", &vault]));
+    assert_eq!(unshared["changed"], true);
+    let listed = data(&run_in(&["vaults"]));
+    assert!(listed["vaults"].as_array().unwrap().iter().all(|v| v["shared"] == false));
+    assert_eq!(data(&run_in(&["read", "--vault", &vault]))["vault"], "demo");
 }

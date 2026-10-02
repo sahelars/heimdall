@@ -1,56 +1,99 @@
 /**
  * Server — make the local MCP server available to AI clients (SPEC §15).
  *
- * Shows the exact command, generates the `mcpServers` snippet, offers to write
- * it into a detected client's configuration, and proves the whole thing works
- * with a real handshake.
+ * One server serves every vault the user shares, and each tool call names the
+ * vault it means. So this screen does three things: chooses which vaults AI
+ * clients may see and what they are called, puts the one `heimdall` entry into
+ * a client's configuration (replacing the per-vault entries older builds
+ * wrote), and proves the server answers with a real handshake.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import {
+  chatgptConfigSnippet,
   clientConfigSnippet,
   healthCheck,
   installClientConfig,
   listClientConfigs,
+  listVaults,
   mcpCommand,
+  openPrivacySettings,
+  protectedLocation,
+  revealCli,
+  shareVault,
+  unshareVault,
 } from "../../api/cli";
-import type { CliStatus, DomainError, HealthCheck, InstallOutcome, KnownClient } from "../../api/types";
-import { Button, Facts, Failure, Notice, Panel } from "../../components";
+import type {
+  CliResponse,
+  CliStatus,
+  DomainError,
+  HealthCheck,
+  InstallOutcome,
+  KnownClient,
+  KnownVault,
+} from "../../api/types";
+import { Button, Facts, Failure, Notice, Panel, Switch } from "../../components";
+import { Prompt } from "../../components/Prompt";
+
+/** What each client is called here, and what a user needs to know about it. */
+const CLIENT_NOTES: Record<string, string> = {
+  chatgpt:
+    "Work or Codex mode only — ChatGPT's plain chat and the web do not run local servers. Restart ChatGPT after adding.",
+  "claude-desktop": "Restart Claude Desktop after adding.",
+};
 
 export function Server({ vault, status }: { vault: string; status: CliStatus | null }) {
   const [clients, setClients] = useState<KnownClient[]>([]);
+  const [vaults, setVaults] = useState<KnownVault[]>([]);
   const [installed, setInstalled] = useState<InstallOutcome | null>(null);
   const [health, setHealth] = useState<HealthCheck | null>(null);
   const [error, setError] = useState<DomainError | null>(null);
   const [busy, setBusy] = useState(false);
+  const [renaming, setRenaming] = useState<KnownVault | null>(null);
 
   const cliPath = status?.path ?? "";
-  const serverKey = clients.find((client) => client.present)?.serverKey ?? "heimdall";
   // A build directory's path is not one to leave in a file the user keeps: a
   // rebuild removes it, and the client then reports a timeout rather than a
   // missing file. The write is refused in Rust; this is so the reason arrives
   // before the click, and covers copying the snippet by hand too (SPEC §15).
   const developmentBuild = status?.developmentBuild ?? false;
 
-  useEffect(() => {
-    if (!vault) return;
-    listClientConfigs(vault).then(setClients).catch(() => setClients([]));
-  }, [vault, installed]);
+  const refreshVaults = useCallback(async () => {
+    try {
+      const response = await listVaults();
+      setVaults(response.ok ? (response.data?.vaults ?? []) : []);
+    } catch {
+      setVaults([]);
+    }
+  }, []);
 
-  if (!vault) {
-    return (
-      <Panel title="No vault selected">
-        <p className="muted">Create or choose a vault on the Setup screen first.</p>
-      </Panel>
-    );
+  useEffect(() => {
+    listClientConfigs().then(setClients).catch(() => setClients([]));
+  }, [installed]);
+
+  useEffect(() => {
+    void refreshVaults();
+  }, [refreshVaults, vault, installed]);
+
+  /** Run one sharing command, then show the list as it now stands. */
+  async function change(run: () => Promise<CliResponse<unknown>>) {
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await run();
+      if (!response.ok && response.error) setError(response.error);
+      await refreshVaults();
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function check() {
     setBusy(true);
     setError(null);
     try {
-      setHealth(await healthCheck(vault));
+      setHealth(await healthCheck());
     } finally {
       setBusy(false);
     }
@@ -60,7 +103,7 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
     setBusy(true);
     setError(null);
     try {
-      setInstalled(await installClientConfig(clientId, vault));
+      setInstalled(await installClientConfig(clientId));
     } catch (failure) {
       setError(failure as DomainError);
     } finally {
@@ -68,20 +111,124 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
     }
   }
 
+  // The current vault is offered even before anything has registered it.
+  const listed = vaults.some((known) => known.path === vault);
+  const rows: KnownVault[] =
+    vault && !listed
+      ? [
+          ...vaults,
+          {
+            path: vault,
+            folder: vault.split("/").pop() ?? vault,
+            exists: true,
+            shared: false,
+            name: null,
+          },
+        ]
+      : vaults;
+  const shared = rows.filter((known) => known.shared);
+  const guarded = shared
+    .map((known) => ({ known, place: protectedLocation(known.path) }))
+    .filter((entry) => entry.place !== null);
+
   return (
     <>
       <Panel
-        title="Run the server"
-        description="One server process per vault. The vault is fixed by this command and no tool call can change it."
+        title="Vaults shared with AI clients"
+        description="One server serves every vault shared here. A client names a vault on each call, by the name shown; it never sees where the vault is. Locks hold whichever vault a call names."
       >
-        <pre className="snippet">{mcpCommand(cliPath, vault)}</pre>
+        {rows.length === 0 ? (
+          <p className="muted">No vaults yet. Create or choose one on the Vault screen.</p>
+        ) : (
+          <div className="stack">
+            {rows.map((known) => (
+              <div className="row" key={known.path}>
+                <div className="field field--grow">
+                  <span className="field__label">
+                    {known.shared ? known.name : known.folder}
+                    {known.shared ? " — shared" : " — not shared"}
+                    {known.exists ? "" : " (folder missing)"}
+                  </span>
+                  <span className="field__hint">{known.path}</span>
+                </div>
+                {known.shared ? (
+                  <Button onClick={() => setRenaming(known)} disabled={busy}>
+                    Rename
+                  </Button>
+                ) : null}
+                <Switch
+                  id={`share-${known.path}`}
+                  label="AI clients"
+                  checked={known.shared}
+                  onChange={(on) =>
+                    change(() => (on ? shareVault(known.path) : unshareVault(known.path)))
+                  }
+                  disabled={busy || (!known.shared && !known.exists)}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+        {guarded.length > 0 ? (
+          <Notice title="macOS may keep AI clients out">
+            {guarded.map(({ known, place }) => (
+              <p className="muted" key={known.path}>
+                “{known.name}” is in {place}. When an AI client starts Heimdall, macOS refuses it
+                that folder without asking, and the client reports “Operation not permitted”. Add
+                Heimdall's command line tool under System Settings › Privacy &amp; Security › Full
+                Disk Access — the buttons below open the setting and show the tool in Finder, to
+                drag into the list — or keep the vault somewhere else, such as ~/Heimdall.
+              </p>
+            ))}
+            <div className="row">
+              <Button onClick={() => void openPrivacySettings().catch(() => undefined)}>
+                Open Privacy settings
+              </Button>
+              <Button onClick={() => void revealCli().catch(() => undefined)}>
+                Show Heimdall's command in Finder
+              </Button>
+            </div>
+          </Notice>
+        ) : null}
+      </Panel>
+
+      <Prompt
+        title="Rename shared vault"
+        label="Name AI clients use"
+        initial={renaming?.name ?? ""}
+        note="Clients connected now see the new name on their next call."
+        open={renaming !== null}
+        onCancel={() => setRenaming(null)}
+        onSubmit={(name) => {
+          const target = renaming;
+          setRenaming(null);
+          if (target && name.trim() && name !== target.name) {
+            void change(() => shareVault(target.path, name.trim()));
+          }
+        }}
+      />
+
+      <Panel
+        title="Run the server"
+        description="The command every client runs. It serves the vaults shared above, and no tool call can reach anything else."
+      >
+        <pre className="snippet">{mcpCommand(cliPath)}</pre>
       </Panel>
 
       <Panel
         title="Client configuration"
-        description="Paste this into your AI client's MCP configuration. It points at the copy of the command line tool bundled with this application."
+        description="Paste the entry for your client into its MCP configuration — one entry, however many vaults you share. It points at the copy of the command line tool bundled with this application."
       >
-        <pre className="snippet">{clientConfigSnippet(cliPath, vault, serverKey)}</pre>
+        <div className="field">
+          <span className="field__label">Claude Desktop</span>
+          <span className="field__hint">claude_desktop_config.json</span>
+        </div>
+        <pre className="snippet">{clientConfigSnippet(cliPath)}</pre>
+        <div className="field">
+          <span className="field__label">ChatGPT (Work or Codex mode)</span>
+          <span className="field__hint">~/.codex/config.toml</span>
+        </div>
+        <pre className="snippet">{chatgptConfigSnippet(cliPath)}</pre>
         {developmentBuild ? (
           <Notice title="Development build">
             <p className="muted">
@@ -95,7 +242,7 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
 
       <Panel
         title="Install automatically"
-        description="Writes the entry above into a detected client's configuration. Existing servers and settings are kept, and the previous file is backed up first."
+        description="Writes the entry above into a client's configuration, in that client's own format. Existing servers and settings are kept, per-vault entries from older versions are replaced (their vaults are shared first), and the previous file is backed up."
       >
         {developmentBuild ? (
           <Notice title="Not available in a development build">
@@ -117,16 +264,32 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
                     {client.name}
                     {client.stale
                       ? " — configured, but its command is gone"
-                      : client.installed
+                      : client.installed && client.legacy.length === 0
                         ? " — already configured"
                         : client.present
                           ? ""
                           : " — not installed"}
                   </span>
                   <span className="field__hint">{client.path}</span>
+                  {CLIENT_NOTES[client.id] ? (
+                    <span className="field__hint">{CLIENT_NOTES[client.id]}</span>
+                  ) : null}
+                  {client.legacy.length > 0 ? (
+                    <span className="field__hint">
+                      Replaces {client.legacy.length} older per-vault{" "}
+                      {client.legacy.length === 1 ? "entry" : "entries"}:{" "}
+                      {client.legacy.map((entry) => entry.key).join(", ")}
+                    </span>
+                  ) : null}
+                  {client.conflict ? (
+                    <span className="field__hint">{client.conflict}</span>
+                  ) : null}
                 </div>
-                <Button onClick={() => install(client.id)} disabled={busy || developmentBuild}>
-                  {client.installed ? "Update entry" : "Add entry"}
+                <Button
+                  onClick={() => install(client.id)}
+                  disabled={busy || developmentBuild || Boolean(client.conflict)}
+                >
+                  {client.installed || client.legacy.length > 0 ? "Update entry" : "Add entry"}
                 </Button>
               </div>
             ))}
@@ -141,6 +304,9 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
               ["File", installed.path],
               ["Entry", installed.serverKey],
               ["Existing entry", installed.replaced ? "replaced" : "added"],
+              ...(installed.removed.length > 0
+                ? ([["Removed", installed.removed.join(", ")]] as [string, string][])
+                : []),
               ...(installed.backupPath
                 ? ([["Backup", installed.backupPath]] as [string, string][])
                 : []),
@@ -151,7 +317,7 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
 
       <Panel
         title="Health check"
-        description="Starts the server and completes a real MCP handshake against it — the same thing your client does."
+        description="Starts the server and completes a real MCP handshake against it — the same thing your client does. It runs with Heimdall's own macOS permissions, so it cannot show whether macOS lets another app's copy into a protected folder."
         action={
           <Button primary onClick={check} disabled={busy}>
             {busy ? "Checking…" : "Run health check"}
@@ -164,6 +330,12 @@ export function Server({ vault, status }: { vault: string; status: CliStatus | n
               rows={[
                 ["Server", `${health.serverName ?? "?"} ${health.serverVersion ?? ""}`.trim()],
                 ["Protocol", health.protocolVersion ?? "unknown"],
+                [
+                  "Vaults shared",
+                  shared.length === 0
+                    ? "none"
+                    : shared.map((known) => known.name ?? known.folder).join(", "),
+                ],
               ]}
             />
           </Notice>

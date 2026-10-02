@@ -6,6 +6,7 @@
 
 mod envelope;
 mod mcp;
+mod presence;
 mod shell;
 
 fn main() -> std::process::ExitCode {

@@ -319,6 +319,23 @@ describe("keyboard focus", () => {
   });
 });
 
+describe("the switch", () => {
+  it("is a hairline box with a square knob in ink, and its own focus ring", () => {
+    const rule = (selector: string) =>
+      rules(declarations).find((candidate) =>
+        candidate.selector.split(",").some((part) => part.trim() === selector),
+      );
+    expect(rule(".switch")?.body).toMatch(/border:\s*1px solid var\(--line\);/);
+    expect(rule(".switch__knob")?.body).toMatch(/border:\s*1px solid var\(--line\);/);
+    expect(rule(".switch--on .switch__knob::after")?.body).toMatch(/background:\s*var\(--fg\);/);
+    expect(rule(".switch:focus-visible")?.body).toMatch(/outline:\s*1px solid var\(--fg\);/);
+    // Not one of the four places the accent is spent.
+    for (const selector of [".switch", ".switch--on .switch__knob::after"]) {
+      expect(rule(selector)?.body ?? "").not.toContain("--accent");
+    }
+  });
+});
+
 describe("the settings sheet", () => {
   it("draws no rule under its title", () => {
     // The tab strip below draws its own, and two hairlines a row apart boxed
@@ -331,6 +348,13 @@ describe("the settings sheet", () => {
   it("shows no focus ring on the sheet itself, which is a container", () => {
     const rule = rules(declarations).find((candidate) => candidate.selector === ".modal:focus");
     expect(rule?.body).toMatch(/outline:\s*none/);
+  });
+
+  it("keeps one size from tab to tab", () => {
+    // Sized to its content, the sheet jumped every time a tab changed.
+    const sheet = rules(declarations).find((rule) => rule.selector === ".modal");
+    expect(sheet?.body).toMatch(/(^|[\s;])height:\s*86vh;/);
+    expect(sheet?.body).not.toMatch(/max-height/);
   });
 });
 
@@ -388,6 +412,20 @@ describe("palette", () => {
     const root = declarations.match(/:root\s*\{[^}]*\}/)?.[0] ?? "";
     expect(root).toMatch(/--accent-light-base:\s*#000000;/);
     expect(root).toMatch(/--accent-dark-base:\s*#ffffff;/);
+  });
+
+  it("gives the accent wells each theme's ground, whatever theme is showing", () => {
+    // A well previews its accent on the background it will be spent on, so the
+    // white default for dark mode is not a white box on a light page.
+    const root = declarations.match(/:root\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(root).toMatch(/--ground-light:\s*#ffffff;/);
+    expect(root).toMatch(/--ground-dark:\s*#000000;/);
+    expect(declarations).toMatch(
+      /\.swatch--light::-webkit-color-swatch-wrapper\s*\{[^}]*background:\s*var\(--ground-light\)/,
+    );
+    expect(declarations).toMatch(
+      /\.swatch--dark::-webkit-color-swatch-wrapper\s*\{[^}]*background:\s*var\(--ground-dark\)/,
+    );
   });
 
   it("spends an accent in light mode too, not only in dark", () => {

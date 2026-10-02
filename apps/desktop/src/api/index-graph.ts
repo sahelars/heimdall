@@ -1,13 +1,9 @@
 /**
- * The vault index: one call, three panes (SPEC §8, §15).
+ * The vault's link index (SPEC §8, §15).
  *
- * `link-graph` is the only operation that sees the whole vault, `aios/`
- * included, so it is what the file tree, the graph, and the backlinks panel are
- * all built from. Building them separately would mean the sidebar and the graph
- * could disagree about what the vault contains.
- *
- * It returns metadata and link endpoints, never file content — which is the
- * reason it is allowed to see the protected tree at all.
+ * `link-graph` resolves every link in the vault in one pass, so it is what the
+ * graph, the backlinks panel, wikilink resolution and the quick switcher are all
+ * built from. It returns metadata and link endpoints, never file content.
  */
 
 import { invokeCli } from "./cli";
